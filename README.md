@@ -51,6 +51,32 @@
 
 #### conda create -n trail3 python=4.10
 
+## Start your application in shell.
+## python ds_perfect.py
+
+
+## Start the application automatically in the back of the (ubuntu) server.
+## chmod +x start_quant.sh  //给执行权限
+## ./start_quant.sh  //运行脚本
+
+## Stop the application in the back.
+## Example1：use pid,for eg:12345
+## kill 12345 
+
+# Example1：use application name,for eg:ds_perfect.py
+## pkill -f "python ds_perfect.py"
+
+
+## To the application is actually on or not.
+# ps aux | grep "ds_perfect.py"
+
+## To see the real time logs
+# tail -f TradeOutput.log
+
+## Stop the application.
+# pkill -f "python your_quant_program.py"
+
+
 ###### If this project helps you, you can give me a cup of coffee ☕（TRC20）：0xd711e61cfcd8d544ccbfbc3f003ac78ca397d7f6
 
 #### 打赏地址（TRC20）：0xd711e61cfcd8d544ccbfbc3f003ac78ca397d7f6
