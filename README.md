@@ -56,8 +56,8 @@
 
 
 ## Start the application automatically in the back of the (ubuntu) server.
-## chmod +x start_quant.sh  //给执行权限
-## ./start_quant.sh  //运行脚本
+## chmod +x start.sh  //给执行权限
+## ./start.sh  //运行脚本
 
 ## Stop the application in the back.
 ## Example1：use pid,for eg:12345
