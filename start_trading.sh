@@ -61,12 +61,12 @@ show_status() {
     for account in "${!accounts[@]}"; do
         echo "🔍 检查 ${accounts[$account]} ($account):"
         
-        # 检查进程
-        PID=$(ps aux | grep "python ds_perfect.py $account" | grep -v grep | awk '{print $2}')
+        # 修复：改进进程检查，考虑 -u 参数
+        PID=$(ps aux | grep "python.*ds_perfect.py $account" | grep -v grep | awk '{print $2}')
         if [ -n "$PID" ]; then
             echo "   ✅ 运行中 (PID: $PID)"
             
-            # 检查日志文件 - 适配新的日志命名规则
+            # 检查日志文件
             LOG_DIR="/AutoQuant/Projects/deepseek/Output/$account"
             LATEST_LOG=$(ls -t "$LOG_DIR"/${account}_*.log 2>/dev/null | head -1)
             if [ -n "$LATEST_LOG" ] && [ -f "$LATEST_LOG" ]; then
@@ -120,7 +120,8 @@ stop_account() {
     fi
     
     echo "🛑 停止账号: $account"
-    PID=$(ps aux | grep "python ds_perfect.py $account" | grep -v grep | awk '{print $2}')
+    # 修复：改进进程检查，考虑 -u 参数
+    PID=$(ps aux | grep "python.*ds_perfect.py $account" | grep -v grep | awk '{print $2}')
     
     if [ -n "$PID" ]; then
         echo "📋 找到进程 PID: $PID, 正在停止..."

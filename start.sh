@@ -59,7 +59,7 @@ echo "Conda Environment: $CONDA_DEFAULT_ENV"
 
 # Stop any existing old processes for this account
 echo "Checking and stopping old processes for account: $ACCOUNT..."
-OLD_PID=$(ps aux | grep "python ds_perfect.py $ACCOUNT" | grep -v grep | awk '{print $2}')
+OLD_PID=$(ps aux | grep "python.*ds_perfect.py $ACCOUNT" | grep -v grep | awk '{print $2}')
 if [ -n "$OLD_PID" ]; then
     echo "Found old process PID: $OLD_PID, stopping..."
     kill $OLD_PID
