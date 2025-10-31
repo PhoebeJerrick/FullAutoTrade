@@ -1,11 +1,15 @@
 import os
 import time
+import base64
+import hmac
+import hashlib
 import sys
 from functools import wraps
 import schedule
 from openai import OpenAI
 import ccxt
 import pandas as pd
+import numpy as np
 import re
 from dotenv import load_dotenv
 import json
@@ -162,7 +166,7 @@ def setup_exchange():
             
             logger.log_info("⚙️ Setting cross margin mode and leverage...")
             exchange.set_leverage(
-                TRADE_CONFIG.leverage,
+                TRADE_CONFIG.leverage,  # 这里会自动使用配置中的50倍杠杆
                 TRADE_CONFIG.symbol,
                 {'mgnMode': 'cross'}
             )
@@ -179,14 +183,13 @@ def setup_exchange():
         logger.log_error("exchange_setup", str(e))
         return False
 
-
 # Global variables to store historical data
 price_history = []
 signal_history = []
 position = None
 
 
-def calculate_intelligent_position(signal_data, price_data, current_position):
+def calculate_intelligent_position(signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
     """Calculate intelligent position size - fixed version"""
     config = TRADE_CONFIG.position_management
 
@@ -304,6 +307,15 @@ def calculate_technical_indicators(df):
         # Support resistance levels
         df['resistance'] = df['high'].rolling(20).max()
         df['support'] = df['low'].rolling(20).min()
+
+        # 添加ATR计算
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        df['atr'] = true_range.rolling(14).mean()
 
         # Fill NaN values
         df = df.bfill().ffill()
@@ -446,7 +458,254 @@ def get_market_trend(df):
     except Exception as e:
         logger.log_error("trend_analysis", str(e))
         return {}
+
+def set_breakeven_stop(current_position, price_data):
+    """使用OKX算法订单设置保本止损"""
+    try:
+        # 获取剩余仓位大小（假设已经止盈30%）
+        remaining_size = current_position['size'] * 0.70  # 剩余70%
+        remaining_size = round(remaining_size, 2)
+        
+        if remaining_size < getattr(TRADE_CONFIG, 'min_amount', 0.01):
+            logger.log_warning("⚠️ 剩余仓位太小，无法设置保本止损")
+            return False
+        
+        entry_price = current_position['entry_price']
+        side = current_position['side']
+        
+        # 根据持仓方向确定条件单参数
+        if side == 'long':
+            # 多头持仓：设置止损卖出单，触发价格为开仓价
+            algo_order_type = 'conditional'  # 条件单
+            trigger_action = 'sell'  # 触发后卖出
+            trigger_price = entry_price  # 触发价格设为开仓价（保本）
+            order_type = 'market'  # 市价单
+            
+            logger.log_info(f"🛡️ 设置多头保本止损: 触发价{trigger_price:.2f}, 数量{remaining_size}张")
+            
+        else:  # short
+            # 空头持仓：设置止损买入单，触发价格为开仓价
+            algo_order_type = 'conditional'  # 条件单
+            trigger_action = 'buy'  # 触发后买入
+            trigger_price = entry_price  # 触发价格设为开仓价（保本）
+            order_type = 'market'  # 市价单
+            
+            logger.log_info(f"🛡️ 设置空头保本止损: 触发价{trigger_price:.2f}, 数量{remaining_size}张")
+        
+        # 取消该交易对现有的所有条件单（避免重复）
+        cancel_existing_algo_orders()
+        
+        # 创建算法订单
+        result = create_algo_order(
+            inst_id=TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
+            algo_order_type=algo_order_type,
+            side=trigger_action,
+            order_type=order_type,
+            sz=str(remaining_size),
+            trigger_price=str(trigger_price)
+        )
+        
+        if result:
+            logger.log_info("✅ 保本止损设置成功")
+            return True
+        else:
+            logger.log_error("保本止损设置失败")
+            return False
+            
+    except Exception as e:
+        logger.log_error("breakeven_stop_setting", str(e))
+        return False
+
+def cancel_existing_algo_orders():
+    """取消现有的算法订单"""
+    try:
+        # 获取未完成的算法订单
+        endpoint = '/api/v5/trade/orders-algo-pending'
+        params = {
+            'instType': 'SWAP',
+            'algoOrdType': 'conditional'
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response['code'] == '0' and response['data']:
+            for order in response['data']:
+                # 取消每个条件单
+                cancel_params = {
+                    'instId': TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
+                    'algoId': order['algoId'],
+                    'algoOrdType': 'conditional'
+                }
+                cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+                if cancel_response['code'] == '0':
+                    logger.log_info(f"✅ 取消现有条件单: {order['algoId']}")
+                else:
+                    logger.log_warning(f"⚠️ 取消条件单失败: {cancel_response}")
+                    
+    except Exception as e:
+        logger.log_error("cancel_algo_orders", str(e))
+
+def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
+    """创建算法订单（条件单）"""
+    try:
+        # 构建算法订单参数
+        params = {
+            'instId': inst_id,
+            'tdMode': 'cross',  # 全仓模式
+            'algoOrdType': algo_order_type,  # 条件单类型
+        }
+        
+        if algo_order_type == 'conditional':
+            # 条件单特定参数
+            params.update({
+                'side': side,
+                'ordType': order_type,
+                'sz': sz,  # 委托数量
+                'triggerPrice': trigger_price,  # 触发价格
+                'orderPrice': '-1'  # 委托价格为-1表示市价单
+            })
+        
+        logger.log_info(f"📊 创建算法订单参数: {params}")
+        
+        # 调用OKX算法订单API
+        response = exchange.private_post_trade_order_algo(params)
+        
+        if response['code'] == '0':
+            logger.log_info(f"✅ 算法订单创建成功: {response['data'][0]['algoId']}")
+            return True
+        else:
+            logger.log_error(f"算法订单创建失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.log_error("create_algo_order", str(e))
+        return False
+
+
+
+def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
+    """
+    基于K线结构计算止损价格
+    side: 'long' 或 'short'
+    entry_price: 开仓价格
+    price_data: 价格数据
+    max_stop_loss_ratio: 最大止损比例
+    """
+    try:
+        df = price_data['full_data']
+        current_price = price_data['price']
+        
+        if side == 'long':
+            # 多头止损：基于支撑位和ATR计算
+            support_level = price_data['levels_analysis'].get('static_support', current_price)
+            atr = calculate_atr(df)  # 需要添加ATR计算函数
+            
+            # 使用支撑位或基于ATR的止损，取较宽松的一个
+            stop_loss_by_support = support_level
+            stop_loss_by_atr = current_price - (atr * 2)  # 2倍ATR
+            
+            stop_loss_price = min(stop_loss_by_support, stop_loss_by_atr)
+            
+            # 确保止损不超过最大比例
+            max_stop_loss_price = current_price * (1 - max_stop_loss_ratio)
+            stop_loss_price = max(stop_loss_price, max_stop_loss_price)
+            
+        else:  # short
+            # 空头止损：基于阻力位和ATR计算
+            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price)
+            atr = calculate_atr(df)
+            
+            # 使用阻力位或基于ATR的止损，取较宽松的一个
+            stop_loss_by_resistance = resistance_level
+            stop_loss_by_atr = current_price + (atr * 2)
+            
+            stop_loss_price = max(stop_loss_by_resistance, stop_loss_by_atr)
+            
+            # 确保止损不超过最大比例
+            max_stop_loss_price = current_price * (1 + max_stop_loss_ratio)
+            stop_loss_price = min(stop_loss_price, max_stop_loss_price)
+        
+        logger.log_info(f"🎯 K线结构止损计算: {side}方向, 入场{entry_price:.2f}, 止损{stop_loss_price:.2f}")
+        return stop_loss_price
+        
+    except Exception as e:
+        logger.log_error("stop_loss_calculation", str(e))
+        # 备用止损计算
+        if side == 'long':
+            return entry_price * (1 - max_stop_loss_ratio)
+        else:
+            return entry_price * (1 + max_stop_loss_ratio)
+
+def calculate_atr(df, period=14):
+    """计算平均真实波幅(ATR)"""
+    try:
+        high_low = df['high'] - df['low']
+        high_close = abs(df['high'] - df['close'].shift())
+        low_close = abs(df['low'] - df['close'].shift())
+        
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(period).mean().iloc[-1]
+        return atr
+    except Exception as e:
+        logger.log_error("atr_calculation", str(e))
+        return df['close'].iloc[-1] * 0.02  # 默认2%作为ATR
+
+class PositionManager:
+    """持仓管理器，负责多级止盈逻辑"""
     
+    def __init__(self):
+        self.position_levels = {}  # 记录每个持仓的止盈级别
+        
+    def check_profit_taking(self, current_position, price_data):
+        """检查是否需要执行多级止盈"""
+        if not current_position:
+            return None
+            
+        position_key = f"{current_position['side']}_{current_position['entry_price']}"
+        risk_config = TRADE_CONFIG.get_risk_config()
+        profit_taking_config = risk_config['profit_taking']
+        
+        if not profit_taking_config['enable_multilevel_take_profit']:
+            return None
+            
+        current_price = price_data['price']
+        entry_price = current_position['entry_price']
+        
+        if current_position['side'] == 'long':
+            profit_ratio = (current_price - entry_price) / entry_price
+        else:  # short
+            profit_ratio = (entry_price - current_price) / entry_price
+            
+        # 检查每个止盈级别
+        for i, level in enumerate(profit_taking_config['levels']):
+            level_key = f"{position_key}_level_{i}"
+            
+            # 如果已经执行过这个级别的止盈，跳过
+            if self.position_levels.get(level_key, False):
+                continue
+                
+            # 检查是否达到止盈条件
+            if profit_ratio >= level['profit_multiplier']:
+                logger.log_info(f"🎯 达到止盈级别 {i+1}: 盈利{profit_ratio:.2%}倍, 触发条件{level['profit_multiplier']}倍")
+                return {
+                    'level': i,
+                    'take_profit_ratio': level['take_profit_ratio'],
+                    'set_breakeven_stop': level.get('set_breakeven_stop', False),
+                    'description': level['description']
+                }
+                
+        return None
+        
+    def mark_level_executed(self, current_position, level):
+        """标记止盈级别已执行"""
+        position_key = f"{current_position['side']}_{current_position['entry_price']}"
+        level_key = f"{position_key}_level_{level}"
+        self.position_levels[level_key] = True
+
+# 创建全局持仓管理器实例
+position_manager = PositionManager()
+
+
 def fetch_ohlcv_with_retry(max_retries=None):
     if max_retries is None:
         max_retries = TRADE_CONFIG.max_retries
@@ -599,11 +858,13 @@ def generate_technical_analysis_text(price_data):
     return analysis_text
 
 
-def get_current_position():
+def get_current_position() -> Optional[dict]:
     """Get current position status - OKX version"""
     try:
         positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
-
+        if not positions:
+            return None
+        
         for pos in positions:
             if pos['symbol'] == TRADE_CONFIG.symbol:
                 contracts = float(pos['contracts']) if pos['contracts'] else 0
@@ -621,9 +882,7 @@ def get_current_position():
         return None
 
     except Exception as e:
-        logger.log_error("position_fetch", str(e))
-        import traceback
-        traceback.print_exc()
+        logger.log_error("position_fetch", f"Failed to fetch positions: {str(e)}")
         return None
 
 
@@ -875,6 +1134,165 @@ def check_trading_frequency():
     
     return True
 
+def execute_profit_taking(current_position, profit_taking_signal, price_data):
+    """执行多级止盈逻辑"""
+    try:
+        order_tag = create_order_tag()
+        position_size = current_position['size']
+        take_profit_ratio = profit_taking_signal['take_profit_ratio']
+        
+        # 计算需要平仓的数量
+        close_size = position_size * take_profit_ratio
+        close_size = round(close_size, 2)  # 保留2位小数
+        
+        if close_size < getattr(TRADE_CONFIG, 'min_amount', 0.01):
+            close_size = getattr(TRADE_CONFIG, 'min_amount', 0.01)
+            
+        logger.log_info(f"💰 执行部分止盈: 平仓{close_size:.2f}张合约 ({take_profit_ratio:.1%}仓位)")
+        
+        if not TRADE_CONFIG.test_mode:
+            # 执行平仓
+            if current_position['side'] == 'long':
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'sell',
+                    close_size,
+                    params={'reduceOnly': True, 'tag': order_tag}
+                )
+            else:  # short
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'buy',
+                    close_size,
+                    params={'reduceOnly': True, 'tag': order_tag}
+                )
+            
+            # 如果设置保本止损，更新剩余仓位的止损
+            if profit_taking_signal.get('set_breakeven_stop', False):
+                set_breakeven_stop(current_position, price_data)
+                
+        logger.log_info("✅ 多级止盈执行完成")
+        
+    except Exception as e:
+        logger.log_error("profit_taking_execution", str(e))
+
+def set_initial_stop_loss(signal, position_size, stop_loss_price, current_price):
+    """设置初始止损订单"""
+    try:
+        side = 'long' if signal == 'BUY' else 'short'
+        
+        if side == 'long':
+            # 多头：止损卖出
+            trigger_action = 'sell'
+            trigger_price = stop_loss_price
+        else:
+            # 空头：止损买入
+            trigger_action = 'buy' 
+            trigger_price = stop_loss_price
+        
+        # 取消现有的条件单
+        cancel_existing_algo_orders()
+        
+        # 创建止损条件单
+        result = create_algo_order(
+            inst_id=TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
+            algo_order_type='conditional',
+            side=trigger_action,
+            order_type='market',
+            sz=str(position_size),
+            trigger_price=str(trigger_price)
+        )
+        
+        if result:
+            stop_loss_ratio = abs(stop_loss_price - current_price) / current_price * 100
+            direction = "below" if side == 'long' else "above"
+            logger.log_info(f"✅ 初始止损设置成功: {stop_loss_price:.2f} ({direction} {stop_loss_ratio:.2f}%)")
+        else:
+            logger.log_error("初始止损设置失败")
+            
+    except Exception as e:
+        logger.log_error("initial_stop_loss_setting", str(e))
+
+def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=0.20, price_data=None):
+    """设置移动止损"""
+    try:
+        if not current_position:
+            return False
+            
+        entry_price = current_position['entry_price']
+        current_price = price_data['price'] if price_data else get_current_price()
+        position_size = current_position['size']
+        side = current_position['side']
+        
+        if side == 'long':
+            profit_ratio = (current_price - entry_price) / entry_price
+            if profit_ratio >= activation_ratio:
+                # 计算移动止损价格
+                trailing_stop_price = current_price * (1 - trailing_ratio)
+                logger.log_info(f"📈 设置多头移动止损: {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
+                # 这里可以调用设置移动止损的API
+                return set_trailing_stop_order(current_position, trailing_stop_price)
+        else:  # short
+            profit_ratio = (entry_price - current_price) / entry_price
+            if profit_ratio >= activation_ratio:
+                # 计算移动止损价格
+                trailing_stop_price = current_price * (1 + trailing_ratio)
+                logger.log_info(f"📉 设置空头移动止损: {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
+                # 这里可以调用设置移动止损的API
+                return set_trailing_stop_order(current_position, trailing_stop_price)
+                
+        return False
+        
+    except Exception as e:
+        logger.log_error("trailing_stop_setup", str(e))
+        return False
+
+def set_trailing_stop_order(current_position, stop_price):
+    """设置移动止损订单"""
+    try:
+        # 取消现有的条件单
+        cancel_existing_algo_orders()
+        
+        side = current_position['side']
+        position_size = current_position['size']
+        
+        if side == 'long':
+            # 多头：止损卖出
+            trigger_action = 'sell'
+        else:
+            # 空头：止损买入
+            trigger_action = 'buy'
+        
+        # 创建移动止损条件单
+        result = create_algo_order(
+            inst_id=TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
+            algo_order_type='conditional',
+            side=trigger_action,
+            order_type='market',
+            sz=str(position_size),
+            trigger_price=str(stop_price)
+        )
+        
+        if result:
+            logger.log_info(f"✅ 移动止损设置成功: {stop_price:.2f}")
+            return True
+        else:
+            logger.log_error("移动止损设置失败")
+            return False
+            
+    except Exception as e:
+        logger.log_error("set_trailing_stop_order", str(e))
+        return False
+    
+def get_current_price():
+    """获取当前价格"""
+    try:
+        ticker = exchange.fetch_ticker(TRADE_CONFIG.symbol)
+        return ticker['last']
+    except Exception as e:
+        logger.log_error("get_current_price", str(e))
+        return 0
+
 def execute_intelligent_trade(signal_data, price_data):
     """Execute intelligent trading - OKX version (supports same direction position increase/decrease)"""
     global position
@@ -890,6 +1308,28 @@ def execute_intelligent_trade(signal_data, price_data):
     
     current_position = get_current_position()
 
+    # 获取风险管理配置
+    risk_config = TRADE_CONFIG.get_risk_config()
+    stop_loss_config = risk_config['stop_loss']
+
+    # 计算基于K线结构的止损 (修正缩进)
+    calculated_stop_loss = None
+    if signal_data['signal'] in ['BUY', 'SELL'] and stop_loss_config['kline_based_stop_loss']:
+        current_price = price_data['price']
+        side = 'long' if signal_data['signal'] == 'BUY' else 'short'
+        
+        # 使用K线结构计算止损
+        calculated_stop_loss = calculate_kline_based_stop_loss(
+            side, 
+            current_price, 
+            price_data,
+            stop_loss_config['max_stop_loss_ratio']
+        )
+        
+        # 更新信号中的止损价格
+        signal_data['stop_loss'] = calculated_stop_loss
+        logger.log_info(f"📊 基于K线结构设置止损: {calculated_stop_loss:.2f}")
+
     # Prevent frequent reversal logic remains unchanged
     if current_position and signal_data['signal'] != 'HOLD':
         current_side = current_position['side']  # 'long' or 'short'
@@ -901,18 +1341,6 @@ def execute_intelligent_trade(signal_data, price_data):
         else:
             new_side = None
 
-        # If direction opposite, need high confidence to execute
-        # if new_side != current_side:
-        #     if signal_data['confidence'] != 'HIGH':
-        #         logger.log_warning(f"🔒 Non-high confidence reversal signal, maintain existing {current_side} position")
-        #         return
-
-        #     if len(signal_history) >= 2:
-        #         last_signals = [s['signal'] for s in signal_history[-2:]]
-        #         if signal_data['signal'] in last_signals:
-        #             logger.log_warning(f"🔒 Recently appeared {signal_data['signal']} signal, avoid frequent reversal")
-        #             return
-
     # Calculate intelligent position
     position_size = calculate_intelligent_position(signal_data, price_data, current_position)
 
@@ -920,6 +1348,8 @@ def execute_intelligent_trade(signal_data, price_data):
     logger.log_info(f"Confidence level: {signal_data['confidence']}")
     logger.log_info(f"Intelligent position: {position_size:.2f} contracts")
     logger.log_info(f"Reason: {signal_data['reason']}")
+    logger.log_info(f"Stop Loss: {signal_data['stop_loss']:.2f}")
+    logger.log_info(f"Take Profit: {signal_data['take_profit']:.2f}")
     logger.log_info(f"Current position: {current_position}")
 
     # Risk management
@@ -1078,6 +1508,32 @@ def execute_intelligent_trade(signal_data, price_data):
         time.sleep(2)
         position = get_current_position()
         logger.log_info(f"Updated position: {position}")
+        
+        # 在执行开仓后设置止损订单 (移动到这里，确保在交易执行后)
+        if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
+            # 等待订单执行完成
+            time.sleep(2)
+            
+            # 重新获取实际持仓信息
+            actual_position = get_current_position()
+            if actual_position:
+                # 使用实际持仓大小设置止损
+                actual_position_size = actual_position['size']
+                logger.log_info(f"📊 使用实际持仓大小设置止损: {actual_position_size:.2f} 张合约")
+                
+                # 设置止损订单
+                set_initial_stop_loss(signal_data['signal'], actual_position_size, calculated_stop_loss, price_data['price'])
+            else:
+                logger.log_warning("⚠️ 交易执行后未检测到持仓，无法设置止损")
+
+        # 检查多级止盈 (移动到这里，确保在交易执行后检查)
+        current_position = get_current_position()
+        if current_position:
+            profit_taking_signal = position_manager.check_profit_taking(current_position, price_data)
+            if profit_taking_signal:
+                logger.log_info(f"🎯 执行多级止盈: {profit_taking_signal['description']}")
+                execute_profit_taking(current_position, profit_taking_signal, price_data)
+                position_manager.mark_level_executed(current_position, profit_taking_signal['level'])
 
     except Exception as e:
         logger.log_error("trade_execution", str(e))
@@ -1101,13 +1557,19 @@ def execute_intelligent_trade(signal_data, price_data):
                         params={'tag': order_tag}
                     )
                 logger.log_info("Direct position opening successful")
+                
+                # 直接开仓后也设置止损
+                if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
+                    time.sleep(2)
+                    actual_position = get_current_position()
+                    if actual_position:
+                        set_initial_stop_loss(signal_data['signal'], actual_position['size'], calculated_stop_loss, price_data['price'])
+                        
             except Exception as e2:
                 logger.log_error("Direct position opening also failed", str(e2))
 
         import traceback
         traceback.print_exc()
-
-
 def analyze_with_deepseek_with_retry(price_data, max_retries=TRADE_CONFIG.max_retries):
     """DeepSeek analysis with retry"""
     for attempt in range(max_retries):
@@ -1202,6 +1664,33 @@ def trading_bot():
     logger.log_info(f"Data period: {TRADE_CONFIG.timeframe}")
     logger.log_info(f"Price change: {price_data['price_change']:+.2f}%")
 
+    # 获取当前持仓（只获取一次，避免重复调用）
+    current_position = get_current_position()
+
+    # 检查当前持仓的多级止盈条件
+    if current_position:
+        profit_taking_signal = position_manager.check_profit_taking(current_position, price_data)
+        if profit_taking_signal:
+            logger.log_info(f"🎯 检测到止盈条件: {profit_taking_signal['description']}")
+            execute_profit_taking(current_position, profit_taking_signal, price_data)
+            position_manager.mark_level_executed(current_position, profit_taking_signal['level'])
+            # 止盈后重新获取持仓状态
+            current_position = get_current_position()
+
+    # 检查当前持仓的止损状态（在获取价格数据后）
+    if current_position:
+        # 检查是否需要设置移动止损
+        risk_config = TRADE_CONFIG.get_risk_config()
+        trailing_config = risk_config['dynamic_stop_loss']
+        
+        if trailing_config['enable_trailing_stop']:
+            setup_trailing_stop(
+                current_position,
+                trailing_config['trailing_activation_ratio'],
+                trailing_config['trailing_distance_ratio'],
+                price_data  # 添加价格数据参数
+            )
+
     # 2. Use DeepSeek analysis (with retry)
     signal_data = analyze_with_deepseek_with_retry(price_data)
 
@@ -1281,6 +1770,27 @@ def log_performance_metrics():
 def main():
     logger.log_info("BTC/USDT OKX Automated Trading Bot Started!")
     
+    # 🆕 添加配置验证
+    is_valid, errors, warnings = TRADE_CONFIG.validate_config()
+    
+    if not is_valid:
+        logger.log_error("config_validation", "配置验证失败:")
+        for error in errors:
+            logger.log_error("config_error", f"  - {error}")
+        logger.log_info("❌ 程序因配置错误而退出")
+        return
+    
+    if warnings:
+        logger.log_warning("配置警告:")
+        for warning in warnings:
+            logger.log_warning(f"  ⚠️ {warning}")
+    
+    # 记录配置摘要
+    config_summary = TRADE_CONFIG.get_config_summary()
+    logger.log_info("✅ 配置验证通过，配置摘要:")
+    for key, value in config_summary.items():
+        logger.log_info(f"   {key}: {value}")
+        
     if not setup_exchange():
         logger.log_error("exchange_setup", "Initialization failed")
         return
