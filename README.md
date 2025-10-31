@@ -52,8 +52,8 @@
 #### conda create -n trail3 python=4.10
 
 ## Start your application in shell.
-# 设置执行权限；
-# chmod +x trade t
+# 设置执行权限-每次只要更改过其中一个文件就需要设置一次(其中t没有文件后缀)；
+# chmod +x start.sh start_trading.sh t
 
 # 启动账号
 # ./t 1        # 启动账号1
