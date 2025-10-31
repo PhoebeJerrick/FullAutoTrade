@@ -12,7 +12,7 @@ import requests
 from datetime import datetime, timedelta
 
 # Trading parameter configuration - combining advantages of both versions
-from trade_config import TradingConfig
+from trade_config import TRADE_CONFIG
 
 # Global logger
 from trade_logger import logger
