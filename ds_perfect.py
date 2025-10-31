@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import sys
 from functools import wraps
+from typing import Optional, Dict, List, Any, Union
 import schedule
 from openai import OpenAI
 import ccxt
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 import json
 import requests
 from datetime import datetime, timedelta
+
 
 # Trading parameter configuration - combining advantages of both versions
 from trade_config import TRADE_CONFIG
