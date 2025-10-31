@@ -52,29 +52,32 @@
 #### conda create -n trail3 python=4.10
 
 ## Start your application in shell.
-## python ds_perfect.py
+# 设置执行权限；
+# chmod +x trade t
 
+# 启动账号
+# ./t 1        # 启动账号1
+# ./t 2        # 启动账号2
+# ./t d        # 启动默认账号
 
-## Start the application automatically in the back of the (ubuntu) server.
-## chmod +x start.sh  //给执行权限
-## ./start.sh  //运行脚本
+# 查看状态
+# ./t s        # 查看所有账号状态
 
-## Stop the application in the back.
-## Example1：use pid,for eg:12345
-## kill 12345 
+# 停止账号
+# ./t k 1      # 停止账号1
+# ./t k 2      # 停止账号2  
+# ./t k a      # 停止所有账号
 
-# Example1：use application name,for eg:ds_perfect.py
-## pkill -f "python ds_perfect.py"
+# 帮助信息
+# ./t help     # 显示帮助
 
-
-## To the application is actually on or not.
-# ps aux | grep "ds_perfect.py"
-
-## To see the real time logs
-# tail -f TradeOutput.log
-
-## Stop the application.
-# pkill -f "python your_quant_program.py"
+# 完整的文件结构
+# /AutoQuant/Projects/deepseek/FullAutoTrade/
+# ├── start.sh                 # 底层启动脚本
+# ├── start_trading.sh         # 完整管理脚本
+# ├── t                        # 极简命令脚本（推荐日常使用）
+# ├── trade                    # 简化命令脚本（备用）
+# └── ds_perfect.py            # 主程序文件
 
 
 ###### If this project helps you, you can give me a cup of coffee ☕（TRC20）：0xd711e61cfcd8d544ccbfbc3f003ac78ca397d7f6

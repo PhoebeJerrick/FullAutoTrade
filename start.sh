@@ -1,12 +1,19 @@
 #!/bin/bash
 
+# 默认账号配置
+DEFAULT_ACCOUNT="default"
+ACCOUNT=${1:-$DEFAULT_ACCOUNT}
+
 PROJECT_DIR="/AutoQuant/Projects/deepseek/FullAutoTrade"
-OUTPUT_DIR="/AutoQuant/Projects/deepseek/Output"
+OUTPUT_DIR="/AutoQuant/Projects/deepseek/Output/$ACCOUNT"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="Output_${TIMESTAMP}.log"
+DATE_ONLY=$(date +"%Y%m%d")
+# 日志文件名称格式: 账号_日期_时间.log
+LOG_FILE="${ACCOUNT}_${DATE_ONLY}_${TIMESTAMP}.log"
 FULL_LOG_PATH="$OUTPUT_DIR/$LOG_FILE"
 
 echo "=== Quantitative Trading Program Startup ==="
+echo "Account: $ACCOUNT"
 echo "Project Directory: $PROJECT_DIR"
 echo "Output Directory: $OUTPUT_DIR"
 echo "Log File: $LOG_FILE"
@@ -27,11 +34,11 @@ echo "Output directory created/exists: $OUTPUT_DIR"
 cd "$PROJECT_DIR" || { echo "Error: Cannot enter project directory"; exit 1; }
 echo "Current directory: $(pwd)"
 
-# Clean up old log files (keep latest 10)
-echo "Cleaning up old log files..."
-ls -t "$OUTPUT_DIR"/Output_*.log 2>/dev/null | tail -n +11 | xargs -r rm -f
+# Clean up old log files (keep latest 10) - 更新为按账号名称匹配
+echo "Cleaning up old log files for account: $ACCOUNT..."
+ls -t "$OUTPUT_DIR"/${ACCOUNT}_*.log 2>/dev/null | tail -n +11 | xargs -r rm -f
 
-# Fix the location of canda.Check which location is valid.
+# Fix the location of conda. Check which location is valid.
 if [ -f "/root/anaconda3/etc/profile.d/conda.sh" ]; then
     echo "Using anaconda3 path..."
     source /root/anaconda3/etc/profile.d/conda.sh
@@ -50,9 +57,9 @@ conda activate ds
 echo "Python Path: $(which python)"
 echo "Conda Environment: $CONDA_DEFAULT_ENV"
 
-# Stop any existing old processes
-echo "Checking and stopping old processes..."
-OLD_PID=$(ps aux | grep "python ds_perfect.py" | grep -v grep | awk '{print $2}')
+# Stop any existing old processes for this account
+echo "Checking and stopping old processes for account: $ACCOUNT..."
+OLD_PID=$(ps aux | grep "python ds_perfect.py $ACCOUNT" | grep -v grep | awk '{print $2}')
 if [ -n "$OLD_PID" ]; then
     echo "Found old process PID: $OLD_PID, stopping..."
     kill $OLD_PID
@@ -65,20 +72,21 @@ cat > "$FULL_LOG_PATH" << EOF
 ==============================================
 DeepSeek Quantitative Trading Program - Startup Log
 ==============================================
-Start Time:   $(date)
-Program File: ds_perfect.py
-Project Dir:  $PROJECT_DIR
-Output Dir:   $OUTPUT_DIR
-Python Env:   $(which python)
-Conda Env:    $CONDA_DEFAULT_ENV
-Log File:     $LOG_FILE
+Account:       $ACCOUNT
+Start Time:    $(date)
+Program File:  ds_perfect.py
+Project Dir:   $PROJECT_DIR
+Output Dir:    $OUTPUT_DIR
+Python Env:    $(which python)
+Conda Env:     $CONDA_DEFAULT_ENV
+Log File:      $LOG_FILE
 ==============================================
 
 EOF
 
-echo "Starting main program..."
-# Start program with unbuffered mode
-nohup python -u ds_perfect.py >> "$FULL_LOG_PATH" 2>&1 &
+echo "Starting main program for account: $ACCOUNT..."
+# Start program with unbuffered mode and account parameter
+nohup python -u ds_perfect.py $ACCOUNT >> "$FULL_LOG_PATH" 2>&1 &
 PID=$!
 
 echo "Program started, PID: $PID"
@@ -115,6 +123,7 @@ fi
 
 echo ""
 echo "Quantitative trading program startup completed!"
+echo "Account: $ACCOUNT"
 echo "View real-time logs: tail -f '$FULL_LOG_PATH'"
 echo "Log file location: $FULL_LOG_PATH"
 echo "Process ID: $PID"

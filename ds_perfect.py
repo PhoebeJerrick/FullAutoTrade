@@ -19,6 +19,7 @@ from trade_logger import logger
 
 # Use relative path
 env_path = '../ExApiConfig/ExApiConfig.env'  # .env file in config folder of parent directory
+logger.log_info(f"📁Add config file: {env_path}")
 load_dotenv(dotenv_path=env_path)
 
 # Initialize DeepSeek client with error handling
@@ -42,14 +43,58 @@ def get_deepseek_client():
             raise
     return deepseek_client
 
-# Initialize OKX exchange
+
+# 添加账号参数支持
+if len(sys.argv) > 1:
+    account = sys.argv[1]
+    logger.log_info(f"🎯 使用交易账号: {account}")
+else:
+    account = "default"
+    logger.log_info("🎯 使用默认交易账号")
+
+# 在全局变量中记录当前账号
+CURRENT_ACCOUNT = account
+
+# 根据账号选择对应的环境变量
+def get_account_config(account_name):
+    """根据账号名称获取对应的配置"""
+    if account_name == "account1":
+        return {
+            'api_key': os.getenv('OKX_API_KEY_1') or os.getenv('OKX_API_KEY'),
+            'secret': os.getenv('OKX_SECRET_1') or os.getenv('OKX_SECRET'),
+            'password': os.getenv('OKX_PASSWORD_1') or os.getenv('OKX_PASSWORD')
+        }
+    elif account_name == "account2":
+        return {
+            'api_key': os.getenv('OKX_API_KEY_2'),
+            'secret': os.getenv('OKX_SECRET_2'),
+            'password': os.getenv('OKX_PASSWORD_2')
+        }
+    else:  # default
+        return {
+            'api_key': os.getenv('OKX_API_KEY'),
+            'secret': os.getenv('OKX_SECRET'),
+            'password': os.getenv('OKX_PASSWORD')
+        }
+
+# 获取当前账号配置
+account_config = get_account_config(account)
+print(f"🔑 账号配置加载: API_KEY={account_config['api_key'][:10]}...")
+
+# 修改订单标签函数，包含账号信息
+def create_order_tag():
+    """创建包含账号信息的订单标签"""
+    base_tag = '60bb4a8d3416BCDE'
+    return f"{base_tag}_{CURRENT_ACCOUNT}"
+
+# 初始化交易所 - 使用动态配置
 exchange = ccxt.okx({
     'options': {
-        'defaultType': 'swap',  # OKX uses swap for perpetual contracts
+        'defaultType': 'swap',
     },
-    'apiKey': os.getenv('OKX_API_KEY'),
-    'secret': os.getenv('OKX_SECRET'),
-    'password': os.getenv('OKX_PASSWORD'),  # OKX requires trading password
+    'apiKey': account_config['api_key'],
+    'secret': account_config['secret'],
+    'password': account_config['password'],
 })
 
 def check_existing_positions():
@@ -833,6 +878,9 @@ def execute_intelligent_trade(signal_data, price_data):
     """Execute intelligent trading - OKX version (supports same direction position increase/decrease)"""
     global position
 
+    # add order tag
+    order_tag = create_order_tag()
+
     # Add these checks at the beginning:
     if not check_market_conditions():
         return
@@ -894,7 +942,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'buy',
                         current_position['size'],
-                        params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                        params={'reduceOnly': True, 'tag': order_tag}
                     )
                     time.sleep(1)
                     # Open long position
@@ -902,7 +950,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'buy',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
                 else:
                     logger.log_warning("⚠️ Detected short position but quantity is 0, directly opening long position")
@@ -910,7 +958,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'buy',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
 
             elif current_position and current_position['side'] == 'long':
@@ -926,7 +974,7 @@ def execute_intelligent_trade(signal_data, price_data):
                             TRADE_CONFIG.symbol,
                             'buy',
                             add_size,
-                            params={'tag': '60bb4a8d3416BCDE'}
+                            params={'tag': order_tag}
                         )
                     else:
                         # Decrease position
@@ -937,7 +985,7 @@ def execute_intelligent_trade(signal_data, price_data):
                             TRADE_CONFIG.symbol,
                             'sell',
                             reduce_size,
-                            params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                            params={'reduceOnly': True, 'tag': order_tag}
                         )
                 else:
                     logger.log_info(
@@ -949,7 +997,7 @@ def execute_intelligent_trade(signal_data, price_data):
                     TRADE_CONFIG.symbol,
                     'buy',
                     position_size,
-                    params={'tag': '60bb4a8d3416BCDE'}
+                    params={'tag': order_tag}
                 )
 
         elif signal_data['signal'] == 'SELL':
@@ -962,7 +1010,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'sell',
                         current_position['size'],
-                        params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                        params={'reduceOnly': True, 'tag': order_tag}
                     )
                     time.sleep(1)
                     # Open short position
@@ -970,7 +1018,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'sell',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
                 else:
                     logger.log_warning("⚠️ Detected long position but quantity is 0, directly opening short position")
@@ -978,7 +1026,7 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'sell',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
 
             elif current_position and current_position['side'] == 'short':
@@ -995,7 +1043,7 @@ def execute_intelligent_trade(signal_data, price_data):
                             TRADE_CONFIG.symbol,
                             'sell',
                             add_size,
-                            params={'tag': '60bb4a8d3416BCDE'}
+                            params={'tag': order_tag}
                         )
                     else:
                         # Decrease position
@@ -1006,7 +1054,7 @@ def execute_intelligent_trade(signal_data, price_data):
                             TRADE_CONFIG.symbol,
                             'buy',
                             reduce_size,
-                            params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                            params={'reduceOnly': True, 'tag': order_tag}
                         )
                 else:
                     logger.log_info(
@@ -1018,7 +1066,7 @@ def execute_intelligent_trade(signal_data, price_data):
                     TRADE_CONFIG.symbol,
                     'sell',
                     position_size,
-                    params={'tag': '60bb4a8d3416BCDE'}
+                    params={'tag': order_tag}
                 )
 
         elif signal_data['signal'] == 'HOLD':
@@ -1042,14 +1090,14 @@ def execute_intelligent_trade(signal_data, price_data):
                         TRADE_CONFIG.symbol,
                         'buy',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
                 elif signal_data['signal'] == 'SELL':
                     exchange.create_market_order(
                         TRADE_CONFIG.symbol,
                         'sell',
                         position_size,
-                        params={'tag': '60bb4a8d3416BCDE'}
+                        params={'tag': order_tag}
                     )
                 logger.log_info("Direct position opening successful")
             except Exception as e2:
