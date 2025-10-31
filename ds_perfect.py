@@ -97,7 +97,6 @@ def setup_exchange():
         logger.log_info(f"📏 Minimum trading volume: {TRADE_CONFIG.min_amount} contracts")
 
         # First check existing positions
-        logger.log_info("🔍 Checking existing position mode...")
         has_isolated_position, isolated_position_info = check_existing_positions()
         
         # 2. If there are isolated positions, prompt and exit
@@ -225,7 +224,7 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         contract_size = round(contract_size, 2)  # Keep 2 decimal places
 
         # Ensure minimum trading volume
-        min_contracts = TRADE_CONFIG.get('min_amount', 0.01)
+        min_contracts = getattr(TRADE_CONFIG, 'min_amount', 0.01)
         if contract_size < min_contracts:
             contract_size = min_contracts
             logger.log_warning(f"⚠️ Position less than minimum, adjusted to: {contract_size} contracts")
@@ -238,8 +237,8 @@ def calculate_intelligent_position(signal_data, price_data, current_position):
         # Emergency backup calculation
         base_usdt = config['base_usdt_amount']
         contract_size = (base_usdt * TRADE_CONFIG.leverage) / (
-                    price_data['price'] * TRADE_CONFIG.get('contract_size', 0.01))
-        return round(max(contract_size, TRADE_CONFIG.get('min_amount', 0.01)), 2)
+                    price_data['price'] * getattr(TRADE_CONFIG, 'contract_size', 0.01))
+        return round(max(contract_size, getattr(TRADE_CONFIG, 'min_amount', 0.01)), 2)
 
 
 def calculate_technical_indicators(df):
