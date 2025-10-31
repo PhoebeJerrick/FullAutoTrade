@@ -165,14 +165,16 @@ def setup_exchange():
                 logger.log_info("✅ One-way position mode set")
             except Exception as e:
                 logger.log_warning(f"⚠️ Position mode setting: {e}")
-            
-            logger.log_info("⚙️ Setting cross margin mode and leverage...")
+            # 🆕 修改这里：使用配置中的仓位模式
+            margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+            logger.log_info(f"⚙️ Setting {margin_mode} margin mode and leverage...")
+  
             exchange.set_leverage(
                 TRADE_CONFIG.leverage,  # 这里会自动使用配置中的50倍杠杆
                 TRADE_CONFIG.symbol,
-                {'mgnMode': 'cross'}
+                {'mgnMode': margin_mode} # 使用配置的仓位模式
             )
-            logger.log_warning(f"✅ Cross margin + Leverage {TRADE_CONFIG.leverage}x")
+            logger.log_warning(f"✅ {margin_mode.capitalize()} margin + Leverage {TRADE_CONFIG.leverage}x")
 
         # Account information
         balance = exchange.fetch_balance()
@@ -547,13 +549,30 @@ def cancel_existing_algo_orders():
     except Exception as e:
         logger.log_error("cancel_algo_orders", str(e))
 
+def check_current_margin_mode():
+    """检查当前仓位模式"""
+    try:
+        positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
+        for pos in positions:
+            if pos['symbol'] == TRADE_CONFIG.symbol:
+                mode = pos.get('mgnMode', 'unknown')
+                logger.log_info(f"📊 当前仓位模式: {mode}")
+                return mode
+        return "unknown"
+    except Exception as e:
+        logger.log_error("margin_mode_check", str(e))
+        return "unknown"
+    
 def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
     """创建算法订单（条件单）"""
     try:
+        # 🆕 获取当前仓位模式
+        margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+        
         # 构建算法订单参数
         params = {
             'instId': inst_id,
-            'tdMode': 'cross',  # 全仓模式
+            'tdMode': margin_mode,  # 使用配置的仓位模式
             'algoOrdType': algo_order_type,  # 条件单类型
         }
         
@@ -1809,6 +1828,10 @@ def main():
     consecutive_errors = 0
     TRADE_CONFIG.max_consecutive_errors = 5
     
+    # 检查当前仓位模式
+    current_mode = check_current_margin_mode()
+    logger.log_info(f"🔍 检测到当前仓位模式: {current_mode}")
+
     # Timing variables for different intervals
     last_health_check = time.time()  # 🆕 立即开始计时
     health_check_interval = TRADE_CONFIG.health_check_interval  # 300 seconds

@@ -12,6 +12,7 @@ class TradingConfig:
         self.timeframe = os.getenv('TIMEFRAME', '15m')
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
         
         # Exchange settings
         self.exchange_name = 'okx'
@@ -105,6 +106,9 @@ class TradingConfig:
         self.position_management['base_usdt_amount'] = float(
             os.getenv('BASE_USDT_AMOUNT', self.position_management['base_usdt_amount'])
         )
+
+        # 🆕 新增仓位模式配置
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
         
         # 🆕 重新加载风险管理配置
         self.risk_management['stop_loss']['max_stop_loss_ratio'] = float(
