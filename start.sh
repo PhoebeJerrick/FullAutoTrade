@@ -9,7 +9,7 @@ OUTPUT_DIR="/AutoQuant/Projects/deepseek/Output/$ACCOUNT"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 DATE_ONLY=$(date +"%Y%m%d")
 # 日志文件名称格式: 账号_日期_时间.log
-LOG_FILE="${ACCOUNT}_${DATE_ONLY}_${TIMESTAMP}.log"
+LOG_FILE="${ACCOUNT}_${TIMESTAMP}.log"
 FULL_LOG_PATH="$OUTPUT_DIR/$LOG_FILE"
 
 echo "=== Quantitative Trading Program Startup ==="
