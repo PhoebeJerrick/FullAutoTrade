@@ -434,7 +434,13 @@ def fetch_ohlcv_with_retry(max_retries=None):
     return None
 
 # Optimization: Add a unified error handling and retry decorator
-def retry_on_failure(max_retries=TRADE_CONFIG.max_retries, delay=TRADE_CONFIG.retry_delay, exceptions=(Exception,)):
+def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
+    # """Unified error handling and retry decorator"""
+    if max_retries is None:
+        max_retries = TRADE_CONFIG.max_retries
+    if delay is None:
+        delay = TRADE_CONFIG.retry_delay
+        
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):

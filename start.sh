@@ -31,9 +31,20 @@ echo "Current directory: $(pwd)"
 echo "Cleaning up old log files..."
 ls -t "$OUTPUT_DIR"/Output_*.log 2>/dev/null | tail -n +11 | xargs -r rm -f
 
+# Fix the location of canda.Check which location is valid.
+if [ -f "/root/anaconda3/etc/profile.d/conda.sh" ]; then
+    echo "Using anaconda3 path..."
+    source /root/anaconda3/etc/profile.d/conda.sh
+elif [ -f "/root/miniconda3/etc/profile.d/conda.sh" ]; then
+    echo "Using miniconda3 path..."
+    source /root/miniconda3/etc/profile.d/conda.sh
+else
+    echo "Error: Cannot find conda.sh"
+    exit 1
+fi
+
 # Activate conda environment
 echo "Activating Python environment..."
-source /root/miniconda3/etc/profile.d/conda.sh
 conda activate ds
 
 echo "Python Path: $(which python)"
