@@ -78,78 +78,59 @@ def check_existing_positions():
     return has_isolated_position, isolated_position_info
 
 def setup_exchange():
-    """Set exchange parameters - force cross margin mode"""
+    """Intelligent exchange setup"""
     try:
-
-        # First get contract specification information
+        # Get contract specifications
         logger.log_info("🔍 Getting BTC contract specifications...")
         markets = exchange.load_markets()
         btc_market = markets[TRADE_CONFIG.symbol]
-
-        # Get contract multiplier
-        contract_size = float(btc_market['contractSize'])
-        logger.log_info(f"✅ Contract specification: 1 contract = {contract_size} BTC")
-
-        # Store contract specification in global config
-        TRADE_CONFIG.contract_size = contract_size
-        TRADE_CONFIG.min_amount = btc_market['limits']['amount']['min']
-
-        logger.log_info(f"📏 Minimum trading volume: {TRADE_CONFIG.min_amount} contracts")
-
-        # First check existing positions
-        has_isolated_position, isolated_position_info = check_existing_positions()
         
-        # 2. If there are isolated positions, prompt and exit
-        if has_isolated_position:
-            logger.log_info("❌ Detected isolated positions, program cannot continue!")
-            logger.log_info(f"📊 Isolated position details:")
-            logger.log_info(f"   - Direction: {isolated_position_info['side']}")
-            logger.log_info(f"   - Quantity: {isolated_position_info['size']}")
-            logger.log_info(f"   - Entry price: {isolated_position_info['entry_price']}")
-            logger.log_info(f"   - Mode: {isolated_position_info['mode']}")
-            logger.log_info("\n🚨 Solutions:")
-            logger.log_info("1. Manually close all isolated positions")
-            logger.log_info("2. Or convert isolated positions to cross margin mode")
-            logger.log_info("3. Then restart the program")
-            return False
+        TRADE_CONFIG.contract_size = float(btc_market['contractSize'])
+        TRADE_CONFIG.min_amount = btc_market['limits']['amount']['min']
+        
+        logger.log_info(f"✅ Contract: 1 contract = {TRADE_CONFIG.contract_size} BTC")
+        logger.log_info(f"📏 Min trade: {TRADE_CONFIG.min_amount} contracts")
 
-        # 3. Set one-way position mode
-        logger.log_info("🔄 Setting one-way position mode...")
-        try:
-            exchange.set_position_mode(False, TRADE_CONFIG.symbol)  # False means one-way position
-            logger.log_info("✅ One-way position mode set")
-        except Exception as e:
-            logger.log_error("set_position_mode", str(e))
+        # Check current position status
+        current_position = get_current_position()
+        
+        if current_position:
+            logger.log_info("📦 Existing position detected")
+            logger.log_info(f"   - Side: {current_position['side']}")
+            logger.log_info(f"   - Size: {current_position['size']} contracts")
+            logger.log_info(f"   - PnL: {current_position['unrealized_pnl']:.2f} USDT")
+            
+            # If there are open positions, only set the leverage without changing the mode.
+            logger.log_info("⚙️ Setting leverage for existing position...")
+            exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
+            logger.log_warning(f"✅ Leverage set: {TRADE_CONFIG.leverage}x")
+            
+        else:
+            # No positions, you can safely set the mode
+            logger.log_info("🔄 Setting one-way position mode...")
+            try:
+                exchange.set_position_mode(False, TRADE_CONFIG.symbol)
+                logger.log_info("✅ One-way position mode set")
+            except Exception as e:
+                logger.log_warning(f"⚠️ Position mode setting: {e}")
+            
+            logger.log_info("⚙️ Setting cross margin mode and leverage...")
+            exchange.set_leverage(
+                TRADE_CONFIG.leverage,
+                TRADE_CONFIG.symbol,
+                {'mgnMode': 'cross'}
+            )
+            logger.log_warning(f"✅ Cross margin + Leverage {TRADE_CONFIG.leverage}x")
 
-        # 4. Set cross margin mode and leverage
-        logger.log_info("⚙️ Setting cross margin mode and leverage...")
-        exchange.set_leverage(
-            TRADE_CONFIG.leverage,
-            TRADE_CONFIG.symbol,
-            {'mgnMode': 'cross'}  # Force cross margin mode
-        )
-        logger.log_warning(f"✅ Cross margin mode set, leverage: {TRADE_CONFIG.leverage}x")
-
-        # 5. Verify settings
-        logger.log_info("🔍 Verifying account settings...")
+        # Account information
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
-        logger.log_info(f"💰 Current USDT balance: {usdt_balance:.2f}")
-
-        # Get current position status
-        current_pos = get_current_position()
-        if current_pos:
-            logger.log_info(f"📦 Current position: {current_pos['side']} position {current_pos['size']} contracts")
-        else:
-            logger.log_info("📦 No current position")
-
-        logger.log_info("🎯 Program configuration completed: Cross margin mode + One-way position")
+        logger.log_info(f"💰 USDT balance: {usdt_balance:.2f}")
+        
         return True
 
     except Exception as e:
         logger.log_error("exchange_setup", str(e))
-        import traceback
-        traceback.print_exc()
         return False
 
 
@@ -1097,7 +1078,6 @@ def analyze_with_deepseek_with_retry(price_data, max_retries=TRADE_CONFIG.max_re
 
     return create_fallback_signal(price_data)
 
-
 def wait_for_next_period():
     """Wait until next 15-minute mark"""
     now = datetime.now()
@@ -1117,9 +1097,21 @@ def wait_for_next_period():
 
     seconds_to_wait = minutes_to_wait * 60 - current_second
 
+    # If the waiting time exceeds 10 minutes, reduce the waiting time to the next 5-minute interval.
+    if seconds_to_wait > 600:  # 10 minutes
+        logger.log_warning(f"🕒 Long wait detected ({seconds_to_wait}s), adjusting to shorter interval...")
+        # Adjust to wait until the next 5-minute mark
+        next_5min = ((current_minute // 5) + 1) * 5
+        if next_5min == 60:
+            next_5min = 0
+        minutes_to_wait = next_5min - current_minute
+        if minutes_to_wait < 0:
+            minutes_to_wait += 60
+        seconds_to_wait = minutes_to_wait * 60 - current_second
+
     # Display friendly waiting time
-    display_minutes = minutes_to_wait - 1 if current_second > 0 else minutes_to_wait
-    display_seconds = 60 - current_second if current_second > 0 else 0
+    display_minutes = int(seconds_to_wait // 60)
+    display_seconds = int(seconds_to_wait % 60)
 
     if display_minutes > 0:
         logger.log_info(f"🕒 Waiting {display_minutes} minutes {display_seconds} seconds until mark...")
@@ -1164,7 +1156,7 @@ def trading_bot():
     # 2. Use DeepSeek analysis (with retry)
     signal_data = analyze_with_deepseek_with_retry(price_data)
 
-    # 过滤信号
+    # Filter signals
     signal_data = filter_signal(signal_data, price_data)
 
     if signal_data.get('is_fallback', False):
@@ -1172,6 +1164,7 @@ def trading_bot():
 
     # 3. Execute intelligent trading
     execute_intelligent_trade(signal_data, price_data)
+
 def health_check():
     """Check the health of the system."""
     checks = []
@@ -1193,18 +1186,23 @@ def health_check():
         checks.append(("Network", "❌"))
         logger.log_error("health_check_network", str(e))
     
-    # Check data freshness
+    # Check data freshness - improvements
     if price_history:
         latest_data = price_history[-1]
-        data_age = (datetime.now() - datetime.strptime(latest_data['timestamp'], '%Y-%m-%d %H:%M:%S')).total_seconds()
-        status = "✅" if data_age < 300 else "⚠️"
-        checks.append(("Data Freshness", f"{status} ({data_age:.0f}s)"))
+        try:
+            data_age = (datetime.now() - datetime.strptime(latest_data['timestamp'], '%Y-%m-%d %H:%M:%S')).total_seconds()
+            status = "✅" if data_age < 300 else "⚠️"
+            checks.append(("Data Freshness", f"{status} ({data_age:.0f}s)"))
+        except Exception as e:
+            checks.append(("Data Freshness", f"⚠️ (Parse error: {e})"))
     else:
-        checks.append(("Data Freshness", "❌ (No data)"))
+        checks.append(("Data Freshness", "⚠️ (No data yet)"))
     
     # Build detailed status string for logging
     details = "; ".join([f"{check}: {status}" for check, status in checks])
-    overall_status = all("✅" in status for _, status in checks)
+    
+    # 🆕Improvement: Temporary data loss should not cause the overall health check to fail.
+    overall_status = all("❌" not in status for _, status in checks)
     
     # Use logger.log_health_check instead of print
     logger.log_health_check(overall_status, details)
@@ -1231,7 +1229,6 @@ def log_performance_metrics():
     }
     logger.log_performance(performance_metrics)
 
-
 def main():
     logger.log_info("BTC/USDT OKX Automated Trading Bot Started!")
     
@@ -1239,17 +1236,26 @@ def main():
         logger.log_error("exchange_setup", "Initialization failed")
         return
     
+    # 🆕 在健康检查前先获取一次数据
+    logger.log_info("🔄 Initial data fetch...")
+    initial_price_data = get_btc_ohlcv_enhanced()
+    if initial_price_data:
+        add_to_price_history(initial_price_data)
+        logger.log_info("✅ Initial data fetched successfully")
+    else:
+        logger.log_warning("⚠️ Initial data fetch failed")
+    
     consecutive_errors = 0
     TRADE_CONFIG.max_consecutive_errors = 5
     
     # Timing variables for different intervals
-    last_health_check = 0
+    last_health_check = time.time()  # 🆕 立即开始计时
     health_check_interval = TRADE_CONFIG.health_check_interval  # 300 seconds
     
-    last_config_check = 0
+    last_config_check = time.time()
     config_check_interval = TRADE_CONFIG.config_check_interval  # 300 seconds
 
-    last_perf_log = 0
+    last_perf_log = time.time()
     perf_log_interval = TRADE_CONFIG.perf_log_interval  # 600 seconds
 
     while True:
