@@ -65,13 +65,13 @@ CURRENT_ACCOUNT = account
 # 根据账号选择对应的环境变量
 def get_account_config(account_name):
     """根据账号名称获取对应的配置"""
-    if account_name == "account1":
+    if account_name == "okxMain":
         return {
             'api_key': os.getenv('OKX_API_KEY_1') or os.getenv('OKX_API_KEY'),
             'secret': os.getenv('OKX_SECRET_1') or os.getenv('OKX_SECRET'),
             'password': os.getenv('OKX_PASSWORD_1') or os.getenv('OKX_PASSWORD')
         }
-    elif account_name == "account2":
+    elif account_name == "okxSub1":
         return {
             'api_key': os.getenv('OKX_API_KEY_2'),
             'secret': os.getenv('OKX_SECRET_2'),

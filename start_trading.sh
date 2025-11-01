@@ -3,10 +3,10 @@
 # 统一的交易程序启动脚本
 # 用法: 
 #   ./start_trading.sh                 # 启动默认账号
-#   ./start_trading.sh account1        # 启动账号1
-#   ./start_trading.sh account2        # 启动账号2
+#   ./start_trading.sh okxMain        # 启动okxMain
+#   ./start_trading.sh okxSub1        # 启动okxSub1
 #   ./start_trading.sh status          # 查看所有账号状态
-#   ./start_trading.sh stop account1   # 停止账号1
+#   ./start_trading.sh stop okxMain   # 停止okxMain
 #   ./start_trading.sh stop all        # 停止所有账号
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,8 +19,8 @@ show_usage() {
     echo ""
     echo "账号选项:"
     echo "  (空)             启动默认账号"
-    echo "  account1         启动账号1"
-    echo "  account2         启动账号2"
+    echo "  okxMain         启动okxMain"
+    echo "  okxSub1         启动okxSub1"
     echo "  default          启动默认账号"
     echo ""
     echo "命令选项:"
@@ -30,9 +30,9 @@ show_usage() {
     echo ""
     echo "示例:"
     echo "  $0               # 启动默认账号"
-    echo "  $0 account1      # 启动账号1"
+    echo "  $0 okxMain      # 启动okxMain"
     echo "  $0 status        # 查看状态"
-    echo "  $0 stop account1 # 停止账号1"
+    echo "  $0 stop okxMain # 停止okxMain"
 }
 
 # 检查主启动脚本是否存在
@@ -56,7 +56,7 @@ show_status() {
     echo ""
     
     # 检查进程状态
-    declare -A accounts=(["default"]="默认账号" ["account1"]="账号1" ["account2"]="账号2")
+    declare -A accounts=(["default"]="默认账号" ["okxMain"]="okxMain" ["okxSub1"]="okxSub1")
     
     for account in "${!accounts[@]}"; do
         echo "🔍 检查 ${accounts[$account]} ($account):"
@@ -150,20 +150,20 @@ main() {
             check_main_script
             start_account "default"
             ;;
-        "account1")
+        "okxMain")
             check_main_script
-            start_account "account1"
+            start_account "okxMain"
             ;;
-        "account2")
+        "okxSub1")
             check_main_script
-            start_account "account2"
+            start_account "okxSub1"
             ;;
         "status")
             show_status
             ;;
         "stop")
             if [ -z "$sub_command" ]; then
-                echo "错误: 请指定要停止的账号 (account1, account2, default 或 all)"
+                echo "错误: 请指定要停止的账号 (okxMain, okxSub1, default 或 all)"
                 echo "用法: $0 stop [账号|all]"
                 exit 1
             fi
@@ -185,7 +185,7 @@ main "$@"
 
 
 # 日常管理就用这一个脚本
-# ./start_trading.sh account1      # 启动账号1
+# ./start_trading.sh okxMain      # 启动okxMain
 # ./start_trading.sh status        # 查看状态
-# ./start_trading.sh stop account1 # 停止账号1
+# ./start_trading.sh stop okxMain # 停止okxMain
 

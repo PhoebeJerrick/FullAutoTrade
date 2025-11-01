@@ -56,16 +56,16 @@
 # chmod +x start.sh start_trading.sh t
 
 # 启动账号
-# ./t 1        # 启动账号1
-# ./t 2        # 启动账号2
+# ./t 1        # 启动okxMain
+# ./t 2        # 启动okxSub1
 # ./t d        # 启动默认账号
 
 # 查看状态
 # ./t s        # 查看所有账号状态
 
 # 停止账号
-# ./t k 1      # 停止账号1
-# ./t k 2      # 停止账号2  
+# ./t k 1      # 停止okxMain
+# ./t k 2      # 停止okxSub1  
 # ./t k a      # 停止所有账号
 
 # 帮助信息

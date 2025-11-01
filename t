@@ -2,10 +2,10 @@
 
 # 终极简化交易命令 - 文件名: t
 # 用法:
-#   ./t 1        # 启动账号1
-#   ./t 2        # 启动账号2  
+#   ./t 1        # 启动okxMain
+#   ./t 2        # 启动okxSub1  
 #   ./t s        # 查看状态
-#   ./t k 1      # 停止账号1
+#   ./t k 1      # 停止okxMain
 #   ./t k a      # 停止所有
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,20 +18,20 @@ show_usage() {
     echo "停止:    ./t k [1|2|d|a]"
     echo ""
     echo "示例:"
-    echo "  ./t 1     # 启动账号1"
+    echo "  ./t 1     # 启动okxMain"
     echo "  ./t s     # 查看状态"
-    echo "  ./t k 1   # 停止账号1"
+    echo "  ./t k 1   # 停止okxMain"
     echo "  ./t k a   # 停止所有"
 }
 
 case "$1" in
     "1")
-        echo "🚀 启动账号1..."
-        "$MAIN_SCRIPT" "account1"
+        echo "🚀 启动okxMain..."
+        "$MAIN_SCRIPT" "okxMain"
         ;;
     "2") 
-        echo "🚀 启动账号2..."
-        "$MAIN_SCRIPT" "account2"
+        echo "🚀 启动okxSub1..."
+        "$MAIN_SCRIPT" "okxSub1"
         ;;
     "d"|"default")
         echo "🚀 启动默认账号..."
@@ -43,12 +43,12 @@ case "$1" in
     "k"|"stop")
         case "$2" in
             "1") 
-                echo "🛑 停止账号1..."
-                "$MAIN_SCRIPT" "stop" "account1" 
+                echo "🛑 停止okxMain..."
+                "$MAIN_SCRIPT" "stop" "okxMain" 
                 ;;
             "2")
-                echo "🛑 停止账号2..." 
-                "$MAIN_SCRIPT" "stop" "account2"
+                echo "🛑 停止okxSub1..." 
+                "$MAIN_SCRIPT" "stop" "okxSub1"
                 ;;
             "d"|"default")
                 echo "🛑 停止默认账号..."
@@ -60,7 +60,7 @@ case "$1" in
                 ;;
             *)
                 echo "错误: 用法: ./t k [1|2|d|a]"
-                echo "  1=账号1, 2=账号2, d=默认, a=全部"
+                echo "  1=okxMain, 2=okxSub1, d=默认, a=全部"
                 ;;
         esac
         ;;
