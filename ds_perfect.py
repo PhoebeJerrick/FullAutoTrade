@@ -166,66 +166,48 @@ def set_margin_mode(mode, symbol):
         return False
 
 def check_current_margin_mode():
-    """检查当前仓位模式 - 修复版本"""
+    """检查当前仓位模式 - 增强版本"""
     try:
         # 方法1: 通过持仓信息获取
         positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
         for pos in positions:
             if pos['symbol'] == TRADE_CONFIG.symbol:
-                mode = pos.get('mgnMode', 'unknown')
-                if mode != 'unknown':
+                mode = pos.get('mgnMode', '').lower()
+                if mode in ['isolated', 'cross']:
                     logger.log_info(f"📊 Current margin mode from positions: {mode}")
                     return mode
         
-        # 方法2: 通过账户配置获取
-        try:
-            account_config = exchange.private_get_account_config()
-            if account_config and account_config.get('code') == '0' and account_config.get('data'):
-                for config in account_config['data']:
-                    if config.get('instType') == 'SWAP' and config.get('instId') == TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'):
-                        pos_mode = config.get('posMode', '')
-                        if pos_mode == 'long_short_mode':
-                            margin_mode = 'cross'
-                        elif pos_mode == 'net_mode':
-                            margin_mode = 'isolated'
-                        else:
-                            margin_mode = 'unknown'
-                        
-                        if margin_mode != 'unknown':
-                            logger.log_info(f"📊 Current margin mode from account config: {margin_mode}")
-                            return margin_mode
-        except Exception as e:
-            logger.log_warning(f"Account config check failed: {e}")
+        # 方法2: 强制设置并验证
+        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+        logger.log_info(f"🔄 Forcing margin mode to: {target_mode}")
         
-        # 方法3: 通过更详细的API获取
-        try:
-            # 使用更具体的API端点
-            response = exchange.private_get_account_config({'instType': 'SWAP'})
-            if response and response.get('code') == '0' and response.get('data'):
-                for config in response['data']:
-                    pos_mode = config.get('posMode', '')
-                    if pos_mode == 'long_short_mode':
-                        margin_mode = 'cross'
-                    elif pos_mode == 'net_mode':
-                        margin_mode = 'isolated'
-                    else:
-                        continue
-                    
-                    logger.log_info(f"📊 Current margin mode from detailed API: {margin_mode}")
-                    return margin_mode
-        except Exception as e:
-            logger.log_warning(f"Detailed API check failed: {e}")
+        if target_mode == 'cross':
+            exchange.private_post_account_set_position_mode({'posMode': 'long_short_mode'})
+        else:
+            exchange.private_post_account_set_position_mode({'posMode': 'net_mode'})
         
-        logger.log_warning("📊 Unable to determine current margin mode, using default: isolated")
-        return 'UNKNOWN'  # 默认返回UNKNOWN
+        time.sleep(2)
+        
+        # 再次检查
+        positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
+        for pos in positions:
+            if pos['symbol'] == TRADE_CONFIG.symbol:
+                mode = pos.get('mgnMode', '').lower()
+                if mode in ['isolated', 'cross']:
+                    logger.log_info(f"📊 Verified margin mode: {mode}")
+                    return mode
+        
+        logger.log_warning(f"📊 Using target margin mode: {target_mode}")
+        return target_mode
         
     except Exception as e:
         logger.log_error("margin_mode_check", str(e))
-        logger.log_warning("📊 Margin mode check failed, using default: isolated")
-        return 'UNKNOWN'  # 出错时返回UNKNOWN
+        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+        logger.log_warning(f"📊 Using default margin mode: {target_mode}")
+        return target_mode
 
 def setup_exchange():
-    """Intelligent exchange setup - 修复版本"""
+    """智能交易所设置 - 修复保证金模式问题"""
     try:
         # 获取合约规格...
         markets = exchange.load_markets()
@@ -241,6 +223,25 @@ def setup_exchange():
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         logger.log_info(f"🎯 Target margin mode: {margin_mode}")
 
+        # 🆕 首先设置保证金模式，无论是否有持仓
+        logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
+        try:
+            if margin_mode == 'cross':
+                # 全仓模式
+                exchange.private_post_account_set_position_mode({
+                    'posMode': 'long_short_mode'
+                })
+            else:
+                # 逐仓模式
+                exchange.private_post_account_set_position_mode({
+                    'posMode': 'net_mode'  # 使用 net_mode 而不是 isolated
+                })
+            logger.log_info(f"✅ Margin mode set to: {margin_mode}")
+            time.sleep(1)  # 等待设置生效
+        except Exception as e:
+            logger.log_error(f"margin_mode_setting", str(e))
+            logger.log_warning(f"⚠️ Margin mode setting failed, using {margin_mode} as default")
+
         # 检查当前持仓状态
         current_position = get_current_position()
         
@@ -250,38 +251,19 @@ def setup_exchange():
             logger.log_info(f"   - Size: {current_position['size']} contracts")
             logger.log_info(f"   - PnL: {current_position['unrealized_pnl']:.2f} USDT")
             
-            # 如果有持仓，只设置杠杆不改变模式
+            # 如果有持仓，只设置杠杆
             logger.log_info("⚙️ Setting leverage for existing position...")
             exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
             logger.log_warning(f"✅ Leverage set: {TRADE_CONFIG.leverage}x")
             
         else:
-            # 没有持仓，可以安全设置模式
+            # 没有持仓，设置单向持仓模式
             logger.log_info("🔄 Setting one-way position mode...")
             try:
                 exchange.set_position_mode(False, TRADE_CONFIG.symbol)
                 logger.log_info("✅ One-way position mode set")
             except Exception as e:
                 logger.log_warning(f"⚠️ Position mode setting: {e}")
-            
-            # 设置保证金模式 - 简化逻辑
-            logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
-            try:
-                if margin_mode == 'cross':
-                    # 全仓模式
-                    exchange.private_post_account_set_position_mode({
-                        'posMode': 'long_short_mode'
-                    })
-                else:
-                    # 逐仓模式
-                    exchange.private_post_account_set_position_mode({
-                        'posMode': 'net_mode'
-                    })
-                logger.log_info(f"✅ Margin mode set to: {margin_mode}")
-            except Exception as e:
-                logger.log_error(f"margin_mode_setting", str(e))
-                # 如果设置失败，使用默认模式
-                logger.log_warning(f"⚠️ Margin mode setting failed, using {margin_mode} as default")
             
             # 设置杠杆
             logger.log_info("⚙️ Setting leverage...")
@@ -292,6 +274,11 @@ def setup_exchange():
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
         logger.log_info(f"💰 USDT balance: {usdt_balance:.2f}")
+        
+        # 🆕 验证保证金模式设置
+        time.sleep(2)
+        final_mode = check_current_margin_mode()
+        logger.log_info(f"🎯 Final verified margin mode: {final_mode}")
         
         return True
 
@@ -575,6 +562,73 @@ def get_market_trend(df):
         logger.log_error("trend_analysis", str(e))
         return {}
 
+def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
+    """创建算法订单（条件单）- 修复参数错误"""
+    try:
+        # 获取当前仓位模式
+        margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+        
+        # 构建算法订单参数 - 使用OKX要求的参数名
+        params = {
+            'instId': inst_id,
+            'tdMode': margin_mode.upper(),  # 使用大写：ISOLATED 或 CROSS
+            'algoOrdType': algo_order_type,
+        }
+        
+        if algo_order_type == 'conditional':
+            # 条件单特定参数 - 修正参数名
+            params.update({
+                'side': side.upper(),  # 使用大写：BUY 或 SELL
+                'ordType': 'market',   # 固定为 market，不要使用变量
+                'sz': sz,
+                'tpTriggerPx': str(trigger_price),  # 使用正确的触发价格参数名
+                'tpOrdPx': '-1'  # 委托价格为-1表示市价单
+            })
+        
+        logger.log_info(f"📊 创建算法订单参数: {params}")
+        
+        # 调用OKX算法订单API
+        response = exchange.private_post_trade_order_algo(params)
+        
+        if response['code'] == '0':
+            logger.log_info(f"✅ 算法订单创建成功: {response['data'][0]['algoId']}")
+            return True
+        else:
+            logger.log_error("algo_order_failed", f"算法订单创建失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.log_error("create_algo_order", str(e))
+        return False
+
+def cancel_existing_algo_orders():
+    """取消现有的算法订单 - 修复参数错误"""
+    try:
+        # 获取未完成的算法订单
+        params = {
+            'instType': 'SWAP',
+            'algoOrdType': 'conditional'
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response['code'] == '0' and response['data']:
+            for order in response['data']:
+                # 取消每个条件单
+                cancel_params = {
+                    'instId': TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'),
+                    'algoId': order['algoId'],
+                    'algoOrdType': 'conditional'
+                }
+                cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+                if cancel_response['code'] == '0':
+                    logger.log_info(f"✅ 取消现有条件单: {order['algoId']}")
+                else:
+                    logger.log_warning(f"⚠️ 取消条件单失败: {cancel_response}")
+                    
+    except Exception as e:
+        logger.log_error("cancel_algo_orders", str(e))
+
 def set_breakeven_stop(current_position, price_data):
     """使用OKX算法订单设置保本止损"""
     try:
@@ -631,76 +685,6 @@ def set_breakeven_stop(current_position, price_data):
     except Exception as e:
         logger.log_error("breakeven_stop_setting", str(e))
         return False
-
-def cancel_existing_algo_orders():
-    """取消现有的算法订单"""
-    try:
-        # 获取未完成的算法订单
-        endpoint = '/api/v5/trade/orders-algo-pending'
-        params = {
-            'instType': 'SWAP',
-            'algoOrdType': 'conditional'
-        }
-        
-        response = exchange.private_get_trade_orders_algo_pending(params)
-        
-        if response['code'] == '0' and response['data']:
-            for order in response['data']:
-                # 取消每个条件单
-                cancel_params = {
-                    'instId': TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
-                    'algoId': order['algoId'],
-                    'algoOrdType': 'conditional'
-                }
-                cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
-                if cancel_response['code'] == '0':
-                    logger.log_info(f"✅ 取消现有条件单: {order['algoId']}")
-                else:
-                    logger.log_warning(f"⚠️ 取消条件单失败: {cancel_response}")
-                    
-    except Exception as e:
-        logger.log_error("cancel_algo_orders", str(e))
-
-def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
-    """创建算法订单（条件单）"""
-    try:
-        # 🆕 获取当前仓位模式
-        margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
-        
-        # 构建算法订单参数
-        params = {
-            'instId': inst_id,
-            'tdMode': margin_mode,  # 使用配置的仓位模式
-            'algoOrdType': algo_order_type,  # 条件单类型
-        }
-        
-        if algo_order_type == 'conditional':
-            # 条件单特定参数
-            params.update({
-                'side': side,
-                'ordType': order_type,
-                'sz': sz,  # 委托数量
-                'triggerPrice': trigger_price,  # 触发价格
-                'orderPrice': '-1'  # 委托价格为-1表示市价单
-            })
-        
-        logger.log_info(f"📊 创建算法订单参数: {params}")
-        
-        # 调用OKX算法订单API
-        response = exchange.private_post_trade_order_algo(params)
-        
-        if response['code'] == '0':
-            logger.log_info(f"✅ 算法订单创建成功: {response['data'][0]['algoId']}")
-            return True
-        else:
-            logger.log_error(f"算法订单创建失败: {response}")
-            return False
-            
-    except Exception as e:
-        logger.log_error("create_algo_order", str(e))
-        return False
-
-
 
 def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
     """
@@ -1296,7 +1280,7 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         logger.log_error("profit_taking_execution", str(e))
 
 def set_initial_stop_loss(signal, position_size, stop_loss_price, current_price):
-    """设置初始止损订单"""
+    """设置初始止损订单 - 修复日志错误"""
     try:
         side = 'long' if signal == 'BUY' else 'short'
         
@@ -1314,7 +1298,7 @@ def set_initial_stop_loss(signal, position_size, stop_loss_price, current_price)
         
         # 创建止损条件单
         result = create_algo_order(
-            inst_id=TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
+            inst_id=TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'),
             algo_order_type='conditional',
             side=trigger_action,
             order_type='market',
@@ -1327,10 +1311,10 @@ def set_initial_stop_loss(signal, position_size, stop_loss_price, current_price)
             direction = "below" if side == 'long' else "above"
             logger.log_info(f"✅ 初始止损设置成功: {stop_loss_price:.2f} ({direction} {stop_loss_ratio:.2f}%)")
         else:
-            logger.log_error("初始止损设置失败")
+            logger.log_error("stop_loss_failed", "初始止损设置失败")
             
     except Exception as e:
-        logger.log_error("initial_stop_loss_setting", str(e))
+        logger.log_error("initial_stop_loss_setting", str(e))  # 修复：传递两个参数
 
 def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=0.20, price_data=None):
     """设置移动止损"""
