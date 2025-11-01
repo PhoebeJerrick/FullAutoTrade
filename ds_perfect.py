@@ -89,21 +89,27 @@ account_config = get_account_config(account)
 print(f"🔑 账号配置加载: API_KEY={account_config['api_key'][:10]}...")
 
 # 修改订单标签函数，包含账号信息
+# def create_order_tag():
+#     """创建符合OKX要求的订单标签"""
+#     # 使用固定格式，避免特殊字符
+#     base_tag = 'DS60bb4a8d3416BCDE'  # 添加前缀确保格式正确
+    
+#     # 简单处理账号名称
+#     account_suffix = CURRENT_ACCOUNT.replace('account', 'A')
+    
+#     tag = f"{base_tag}{account_suffix}"
+    
+#     # 确保不超过32字符
+#     tag = tag[:32]
+    
+#     logger.log_info(f"📝 生成的订单标签: {tag}")
+#     return tag
+
 def create_order_tag():
-    """创建符合OKX要求的订单标签"""
-    # 使用固定格式，避免特殊字符
-    base_tag = 'DS60bb4a8d3416BCDE'  # 添加前缀确保格式正确
-    
-    # 简单处理账号名称
-    account_suffix = CURRENT_ACCOUNT.replace('account', 'A')
-    
-    tag = f"{base_tag}{account_suffix}"
-    
-    # 确保不超过32字符
-    tag = tag[:32]
-    
-    logger.log_info(f"📝 生成的订单标签: {tag}")
-    return tag
+    """创建与现有持仓兼容的订单标签"""
+    # 使用与现有持仓相同的标签格式
+    return '60bb4a8d3416BCDE'  # 简化为原有格式
+
 
 # 初始化交易所 - 使用动态配置
 exchange = ccxt.okx({
