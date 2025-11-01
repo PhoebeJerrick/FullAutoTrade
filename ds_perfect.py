@@ -166,40 +166,68 @@ def set_margin_mode(mode, symbol):
         return False
 
 def check_current_margin_mode():
-    """检查当前仓位模式"""
+    """检查当前仓位模式 - 修复版本"""
     try:
+        # 方法1: 通过持仓信息获取
         positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
         for pos in positions:
             if pos['symbol'] == TRADE_CONFIG.symbol:
                 mode = pos.get('mgnMode', 'unknown')
-                logger.log_info(f"📊 Current margin mode: {mode}")
-                return mode
+                if mode != 'unknown':
+                    logger.log_info(f"📊 Current margin mode from positions: {mode}")
+                    return mode
         
-        # 如果没有持仓，尝试通过账户配置获取
+        # 方法2: 通过账户配置获取
         try:
             account_config = exchange.private_get_account_config()
-            if account_config and 'data' in account_config:
+            if account_config and account_config.get('code') == '0' and account_config.get('data'):
                 for config in account_config['data']:
-                    if config.get('instType') == 'SWAP':
-                        pos_mode = config.get('posMode', 'unknown')
-                        margin_mode = 'cross' if pos_mode == 'long_short_mode' else 'isolated'
-                        logger.log_info(f"📊 Current position mode from account: {margin_mode}")
-                        return margin_mode
+                    if config.get('instType') == 'SWAP' and config.get('instId') == TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'):
+                        pos_mode = config.get('posMode', '')
+                        if pos_mode == 'long_short_mode':
+                            margin_mode = 'cross'
+                        elif pos_mode == 'net_mode':
+                            margin_mode = 'isolated'
+                        else:
+                            margin_mode = 'unknown'
+                        
+                        if margin_mode != 'unknown':
+                            logger.log_info(f"📊 Current margin mode from account config: {margin_mode}")
+                            return margin_mode
         except Exception as e:
             logger.log_warning(f"Account config check failed: {e}")
         
-        logger.log_info("📊 Unable to determine current margin mode")
-        return 'unknown'
+        # 方法3: 通过更详细的API获取
+        try:
+            # 使用更具体的API端点
+            response = exchange.private_get_account_config({'instType': 'SWAP'})
+            if response and response.get('code') == '0' and response.get('data'):
+                for config in response['data']:
+                    pos_mode = config.get('posMode', '')
+                    if pos_mode == 'long_short_mode':
+                        margin_mode = 'cross'
+                    elif pos_mode == 'net_mode':
+                        margin_mode = 'isolated'
+                    else:
+                        continue
+                    
+                    logger.log_info(f"📊 Current margin mode from detailed API: {margin_mode}")
+                    return margin_mode
+        except Exception as e:
+            logger.log_warning(f"Detailed API check failed: {e}")
+        
+        logger.log_warning("📊 Unable to determine current margin mode, using default: isolated")
+        return 'UNKNOWN'  # 默认返回UNKNOWN
         
     except Exception as e:
         logger.log_error("margin_mode_check", str(e))
-        return 'unknown'
-    
+        logger.log_warning("📊 Margin mode check failed, using default: isolated")
+        return 'UNKNOWN'  # 出错时返回UNKNOWN
+
 def setup_exchange():
-    """Intelligent exchange setup"""
+    """Intelligent exchange setup - 修复版本"""
     try:
-        # Get contract specifications
-        logger.log_info("🔍 Getting BTC contract specifications...")
+        # 获取合约规格...
         markets = exchange.load_markets()
         btc_market = markets[TRADE_CONFIG.symbol]
         
@@ -209,11 +237,11 @@ def setup_exchange():
         logger.log_info(f"✅ Contract: 1 contract = {TRADE_CONFIG.contract_size} BTC")
         logger.log_info(f"📏 Min trade: {TRADE_CONFIG.min_amount} contracts")
 
-        # 🆕 获取配置的仓位模式
+        # 获取配置的仓位模式
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         logger.log_info(f"🎯 Target margin mode: {margin_mode}")
 
-        # Check current position status
+        # 检查当前持仓状态
         current_position = get_current_position()
         
         if current_position:
@@ -222,13 +250,13 @@ def setup_exchange():
             logger.log_info(f"   - Size: {current_position['size']} contracts")
             logger.log_info(f"   - PnL: {current_position['unrealized_pnl']:.2f} USDT")
             
-            # If there are open positions, only set the leverage without changing the mode.
+            # 如果有持仓，只设置杠杆不改变模式
             logger.log_info("⚙️ Setting leverage for existing position...")
             exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
             logger.log_warning(f"✅ Leverage set: {TRADE_CONFIG.leverage}x")
             
         else:
-            # No positions, you can safely set the mode
+            # 没有持仓，可以安全设置模式
             logger.log_info("🔄 Setting one-way position mode...")
             try:
                 exchange.set_position_mode(False, TRADE_CONFIG.symbol)
@@ -236,10 +264,9 @@ def setup_exchange():
             except Exception as e:
                 logger.log_warning(f"⚠️ Position mode setting: {e}")
             
-            # 🆕 使用配置的仓位模式 - 直接使用OKX API
+            # 设置保证金模式 - 简化逻辑
             logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
             try:
-                # 使用OKX私有API设置保证金模式
                 if margin_mode == 'cross':
                     # 全仓模式
                     exchange.private_post_account_set_position_mode({
@@ -253,14 +280,15 @@ def setup_exchange():
                 logger.log_info(f"✅ Margin mode set to: {margin_mode}")
             except Exception as e:
                 logger.log_error(f"margin_mode_setting", str(e))
-                logger.log_warning(f"⚠️ Margin mode setting failed, using default")
+                # 如果设置失败，使用默认模式
+                logger.log_warning(f"⚠️ Margin mode setting failed, using {margin_mode} as default")
             
             # 设置杠杆
             logger.log_info("⚙️ Setting leverage...")
             exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
             logger.log_warning(f"✅ Leverage {TRADE_CONFIG.leverage}x")
 
-        # Account information
+        # 账户信息
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
         logger.log_info(f"💰 USDT balance: {usdt_balance:.2f}")
@@ -270,7 +298,7 @@ def setup_exchange():
     except Exception as e:
         logger.log_error("exchange_setup", str(e))
         return False
-    
+
 # Global variables to store historical data
 price_history = []
 signal_history = []
