@@ -121,6 +121,48 @@ exchange = ccxt.okx({
     'password': account_config['password'],
 })
 
+def log_order_params(order_type, params, function_name=""):
+    """记录订单参数到日志 - 永续合约专用"""
+    try:
+        # 隐藏敏感信息
+        safe_params = params.copy()
+        sensitive_keys = ['apiKey', 'secret', 'password', 'signature']
+        for key in sensitive_keys:
+            if key in safe_params:
+                safe_params[key] = '***'
+        
+        logger.log_info(f"📋 {function_name} - {order_type}订单参数:")
+        for key, value in safe_params.items():
+            logger.log_info(f"   {key}: {value}")
+            
+        # 特别标注订单类型
+        logger.log_info(f"   🔍 订单类型确认: 永续合约{order_type}")
+    except Exception as e:
+        logger.log_error("log_order_params", f"记录订单参数失败: {str(e)}")
+
+def log_perpetual_order_details(side, amount, order_type, reduce_only=False, stop_loss=False, take_profit=False):
+    """记录永续合约订单详细信息"""
+    try:
+        order_info = {
+            'symbol': TRADE_CONFIG.symbol,
+            'side': side,
+            'amount': amount,
+            'order_type': order_type,
+            'contract_type': 'PERPETUAL_SWAP',
+            'reduce_only': reduce_only,
+            'is_stop_loss': stop_loss,
+            'is_take_profit': take_profit,
+            'margin_mode': getattr(TRADE_CONFIG, 'margin_mode', 'isolated'),
+            'leverage': TRADE_CONFIG.leverage
+        }
+        
+        logger.log_info(f"🎯 永续合约订单详情:")
+        for key, value in order_info.items():
+            logger.log_info(f"   {key}: {value}")
+            
+    except Exception as e:
+        logger.log_error("log_perpetual_order_details", f"记录订单详情失败: {str(e)}")
+
 def check_existing_positions():
     # Check existing positions and return whether there are isolated positions and the information of isolated positions.
     logger.log_info("🔍 Checking existing position mode..")
@@ -563,51 +605,55 @@ def get_correct_inst_id():
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
 
 def create_algo_order(inst_id, side, sz, trigger_price, algo_order_type='conditional'):
-    """创建算法订单 - 修正参数格式"""
+    """创建算法订单 - 永续合约条件单"""
     try:
-        # 修正inst_id格式
-        if '--' in inst_id or ':-' in inst_id:
-            inst_id = get_correct_inst_id()
+        # 确保使用正确的合约ID
+        inst_id = get_correct_inst_id()
         
         # 确保参数类型正确
         if isinstance(trigger_price, str):
             trigger_price = float(trigger_price)
         if isinstance(sz, (int, float)):
-            sz = str(sz)
+            sz = str(round(sz, 2))
             
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         
-        # 构建条件单参数 - 根据OKX官方API文档
+        # 构建永续合约条件单参数
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
             'algoOrdType': algo_order_type,
             'side': side.upper(),
             'sz': sz,
-            'tpTriggerPx': str(round(trigger_price, 1)),  # 保留1位小数
-            'tpOrdPx': '-1',  # 市价单
-            # 添加必要的参数
+            'tpTriggerPx': str(round(trigger_price, 1)),
+            'tpOrdPx': '-1',
             'posSide': 'net',  # 单向持仓
             'ordType': 'market'  # 触发后使用市价单
         }
         
-        logger.log_info(f"📊 创建条件单参数: {params}")
+        # 记录完整的订单参数
+        log_order_params("永续合约条件单", params, "create_algo_order")
+        log_perpetual_order_details(side, sz, 'conditional_stop', stop_loss=True)
+        
+        logger.log_info(f"📊 创建永续合约条件单: {side} {sz} @ {trigger_price}")
         
         # 调用OKX算法订单API
         response = exchange.privatePostTradeOrderAlgo(params)
         
+        # 记录API响应
+        log_api_response(response, "create_algo_order")
+        
         if response['code'] == '0':
             algo_id = response['data'][0]['algoId']
-            logger.log_info(f"✅ 条件单创建成功: {algo_id}")
+            logger.log_info(f"✅ 永续合约条件单创建成功: {algo_id}")
             return True
         else:
-            logger.log_error("algo_order_failed", f"条件单创建失败: {response}")
+            logger.log_error("algo_order_failed", f"永续合约条件单创建失败: {response}")
             return False
             
     except Exception as e:
-        logger.log_error("create_algo_order", f"创建条件单异常: {str(e)}")
+        logger.log_error("create_algo_order", f"创建永续合约条件单异常: {str(e)}")
         return False
-
 
 def cancel_existing_algo_orders():
     """取消现有的算法订单 - 完全重写"""
@@ -1249,7 +1295,7 @@ def check_trading_frequency():
     return True
 
 def execute_profit_taking(current_position, profit_taking_signal, price_data):
-    """执行多级止盈逻辑"""
+    """执行多级止盈逻辑 - 永续合约市价平仓"""
     try:
         order_tag = create_order_tag()
         position_size = current_position['size']
@@ -1257,7 +1303,7 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         
         # 计算需要平仓的数量
         close_size = position_size * take_profit_ratio
-        close_size = round(close_size, 2)  # 保留2位小数
+        close_size = round(close_size, 2)
         
         if close_size < getattr(TRADE_CONFIG, 'min_amount', 0.01):
             close_size = getattr(TRADE_CONFIG, 'min_amount', 0.01)
@@ -1265,8 +1311,21 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         logger.log_info(f"💰 执行部分止盈: 平仓{close_size:.2f}张合约 ({take_profit_ratio:.1%}仓位)")
         
         if not TRADE_CONFIG.test_mode:
-            # 执行平仓
+            # 记录止盈订单参数 - 永续合约市价平仓
             if current_position['side'] == 'long':
+                profit_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'sell',
+                    'amount': close_size,
+                    'type': 'market',
+                    'profit_taking_ratio': take_profit_ratio,
+                    'original_position_size': position_size
+                }
+                log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
+                log_perpetual_order_details('sell', close_size, 'market', reduce_only=True, take_profit=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'sell',
@@ -1274,6 +1333,19 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
                     params={'reduceOnly': True, 'tag': order_tag}
                 )
             else:  # short
+                profit_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'buy',
+                    'amount': close_size,
+                    'type': 'market',
+                    'profit_taking_ratio': take_profit_ratio,
+                    'original_position_size': position_size
+                }
+                log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
+                log_perpetual_order_details('buy', close_size, 'market', reduce_only=True, take_profit=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'buy',
@@ -1281,8 +1353,12 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
                     params={'reduceOnly': True, 'tag': order_tag}
                 )
             
+            # 记录止盈订单执行结果
+            logger.log_info(f"✅ 永续合约止盈订单执行完成: 平仓{close_size}张")
+            
             # 如果设置保本止损，更新剩余仓位的止损
             if profit_taking_signal.get('set_breakeven_stop', False):
+                logger.log_info("🛡️ 设置保本止损...")
                 set_breakeven_stop(current_position, price_data)
                 
         logger.log_info("✅ 多级止盈执行完成")
@@ -1416,7 +1492,7 @@ def get_current_price():
         return 0
 
 def execute_intelligent_trade(signal_data, price_data):
-    """执行智能交易 - 修正止损设置时机"""
+    """执行智能交易 - 永续合约专用"""
     global position
 
     # 订单标签
@@ -1460,13 +1536,269 @@ def execute_intelligent_trade(signal_data, price_data):
         return
     
     try:
-        # 执行交易逻辑
+        # 执行交易逻辑 - 永续合约市价单
         if signal_data['signal'] == 'BUY':
-            # BUY逻辑保持不变...
-            pass
+            if current_position and current_position['side'] == 'short':
+                if current_position['size'] > 0:
+                    logger.log_info(f"平空仓 {current_position['size']:.2f} 张并开多仓 {position_size:.2f} 张...")
+                    
+                    # 平空仓 - 永续合约市价单
+                    close_params = {
+                        'reduceOnly': True, 
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'buy',
+                        'amount': current_position['size'],
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('buy', current_position['size'], 'market', reduce_only=True)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'buy',
+                        current_position['size'],
+                        params={'reduceOnly': True, 'tag': order_tag}
+                    )
+                    
+                    time.sleep(1)
+                    
+                    # 开多仓 - 永续合约市价单
+                    open_params = {
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'buy',
+                        'amount': position_size,
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('buy', position_size, 'market', reduce_only=False)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'buy',
+                        position_size,
+                        params={'tag': order_tag}
+                    )
+                else:
+                    logger.log_warning("⚠️ 检测到空头仓位但数量为0，直接开多仓")
+                    open_params = {
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'buy',
+                        'amount': position_size,
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('buy', position_size, 'market', reduce_only=False)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'buy',
+                        position_size,
+                        params={'tag': order_tag}
+                    )
+
+            elif current_position and current_position['side'] == 'long':
+                # 同方向加减仓逻辑
+                size_diff = position_size - current_position['size']
+                if abs(size_diff) >= 0.01:
+                    if size_diff > 0:
+                        # 加多仓 - 永续合约市价单
+                        add_size = round(size_diff, 2)
+                        logger.log_info(f"多头加仓 {add_size:.2f} 张")
+                        add_params = {
+                            'tag': order_tag,
+                            'symbol': TRADE_CONFIG.symbol,
+                            'side': 'buy',
+                            'amount': add_size,
+                            'type': 'market'
+                        }
+                        log_order_params("永续合约加仓", add_params, "execute_intelligent_trade")
+                        log_perpetual_order_details('buy', add_size, 'market', reduce_only=False)
+                        
+                        exchange.create_market_order(
+                            TRADE_CONFIG.symbol,
+                            'buy',
+                            add_size,
+                            params={'tag': order_tag}
+                        )
+                    else:
+                        # 减多仓 - 永续合约市价单（减仓）
+                        reduce_size = round(abs(size_diff), 2)
+                        logger.log_info(f"多头减仓 {reduce_size:.2f} 张")
+                        reduce_params = {
+                            'reduceOnly': True,
+                            'tag': order_tag,
+                            'symbol': TRADE_CONFIG.symbol,
+                            'side': 'sell',
+                            'amount': reduce_size,
+                            'type': 'market'
+                        }
+                        log_order_params("永续合约减仓", reduce_params, "execute_intelligent_trade")
+                        log_perpetual_order_details('sell', reduce_size, 'market', reduce_only=True)
+                        
+                        exchange.create_market_order(
+                            TRADE_CONFIG.symbol,
+                            'sell',
+                            reduce_size,
+                            params={'reduceOnly': True, 'tag': order_tag}
+                        )
+                else:
+                    logger.log_info(f"现有多头仓位合适，维持现状")
+            else:
+                # 无仓位开多仓 - 永续合约市价单
+                logger.log_info(f"开多仓 {position_size:.2f} 张...")
+                open_params = {
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'buy',
+                    'amount': position_size,
+                    'type': 'market'
+                }
+                log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                log_perpetual_order_details('buy', position_size, 'market', reduce_only=False)
+                
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'buy',
+                    position_size,
+                    params={'tag': order_tag}
+                )
+
         elif signal_data['signal'] == 'SELL':
-            # SELL逻辑保持不变...
-            pass
+            # SELL逻辑类似，确保使用永续合约订单类型
+            if current_position and current_position['side'] == 'long':
+                if current_position['size'] > 0:
+                    logger.log_info(f"平多仓 {current_position['size']:.2f} 张并开空仓 {position_size:.2f} 张...")
+                    
+                    # 平多仓 - 永续合约市价单
+                    close_params = {
+                        'reduceOnly': True,
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'sell',
+                        'amount': current_position['size'],
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('sell', current_position['size'], 'market', reduce_only=True)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'sell',
+                        current_position['size'],
+                        params={'reduceOnly': True, 'tag': order_tag}
+                    )
+                    
+                    time.sleep(1)
+                    
+                    # 开空仓 - 永续合约市价单
+                    open_params = {
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'sell',
+                        'amount': position_size,
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('sell', position_size, 'market', reduce_only=False)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'sell',
+                        position_size,
+                        params={'tag': order_tag}
+                    )
+                else:
+                    logger.log_warning("⚠️ 检测到多头仓位但数量为0，直接开空仓")
+                    open_params = {
+                        'tag': order_tag,
+                        'symbol': TRADE_CONFIG.symbol,
+                        'side': 'sell',
+                        'amount': position_size,
+                        'type': 'market'
+                    }
+                    log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                    log_perpetual_order_details('sell', position_size, 'market', reduce_only=False)
+                    
+                    exchange.create_market_order(
+                        TRADE_CONFIG.symbol,
+                        'sell',
+                        position_size,
+                        params={'tag': order_tag}
+                    )
+
+            elif current_position and current_position['side'] == 'short':
+                # 同方向加减仓逻辑
+                size_diff = position_size - current_position['size']
+                if abs(size_diff) >= 0.01:
+                    if size_diff > 0:
+                        # 加空仓 - 永续合约市价单
+                        add_size = round(size_diff, 2)
+                        logger.log_info(f"空头加仓 {add_size:.2f} 张")
+                        add_params = {
+                            'tag': order_tag,
+                            'symbol': TRADE_CONFIG.symbol,
+                            'side': 'sell',
+                            'amount': add_size,
+                            'type': 'market'
+                        }
+                        log_order_params("永续合约加仓", add_params, "execute_intelligent_trade")
+                        log_perpetual_order_details('sell', add_size, 'market', reduce_only=False)
+                        
+                        exchange.create_market_order(
+                            TRADE_CONFIG.symbol,
+                            'sell',
+                            add_size,
+                            params={'tag': order_tag}
+                        )
+                    else:
+                        # 减空仓 - 永续合约市价单（减仓）
+                        reduce_size = round(abs(size_diff), 2)
+                        logger.log_info(f"空头减仓 {reduce_size:.2f} 张")
+                        reduce_params = {
+                            'reduceOnly': True,
+                            'tag': order_tag,
+                            'symbol': TRADE_CONFIG.symbol,
+                            'side': 'buy',
+                            'amount': reduce_size,
+                            'type': 'market'
+                        }
+                        log_order_params("永续合约减仓", reduce_params, "execute_intelligent_trade")
+                        log_perpetual_order_details('buy', reduce_size, 'market', reduce_only=True)
+                        
+                        exchange.create_market_order(
+                            TRADE_CONFIG.symbol,
+                            'buy',
+                            reduce_size,
+                            params={'reduceOnly': True, 'tag': order_tag}
+                        )
+                else:
+                    logger.log_info(f"现有空头仓位合适，维持现状")
+            else:
+                # 无仓位开空仓 - 永续合约市价单
+                logger.log_info(f"开空仓 {position_size:.2f} 张...")
+                open_params = {
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'sell',
+                    'amount': position_size,
+                    'type': 'market'
+                }
+                log_order_params("永续合约开仓", open_params, "execute_intelligent_trade")
+                log_perpetual_order_details('sell', position_size, 'market', reduce_only=False)
+                
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'sell',
+                    position_size,
+                    params={'tag': order_tag}
+                )
+
+        elif signal_data['signal'] == 'HOLD':
+            logger.log_info("建议观望，不执行交易")
+            return
 
         logger.log_info("智能交易执行成功")
         
@@ -1476,7 +1808,7 @@ def execute_intelligent_trade(signal_data, price_data):
         # 重新获取实际持仓信息
         actual_position = get_current_position()
         
-        # 🛡️ 关键修复：在执行开仓后设置止损订单
+        # 设置止损订单 - 永续合约条件单
         if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss and actual_position:
             logger.log_info(f"📊 使用实际持仓设置止损: {actual_position['size']:.2f} 张合约")
             
@@ -1503,6 +1835,7 @@ def execute_intelligent_trade(signal_data, price_data):
 
     except Exception as e:
         logger.log_error("trade_execution", str(e))
+        # 错误处理逻辑...
 
         # If it's a position doesn't exist error, try to directly open new position
         if "don't have any positions" in str(e):
