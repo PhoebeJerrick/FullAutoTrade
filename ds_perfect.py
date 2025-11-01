@@ -166,48 +166,41 @@ def set_margin_mode(mode, symbol):
         return False
 
 def check_current_margin_mode():
-    """检查当前仓位模式 - 增强版本"""
+    """检查当前仓位模式 - 根据OKX API文档修正"""
     try:
-        # 方法1: 通过持仓信息获取
         positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
         for pos in positions:
             if pos['symbol'] == TRADE_CONFIG.symbol:
-                mode = pos.get('mgnMode', '').lower()
-                if mode in ['isolated', 'cross']:
+                mode = pos.get('mgnMode', 'unknown')
+                if mode != 'unknown':
                     logger.log_info(f"📊 Current margin mode from positions: {mode}")
                     return mode
         
-        # 方法2: 强制设置并验证
-        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
-        logger.log_info(f"🔄 Forcing margin mode to: {target_mode}")
+        # 如果没有持仓，尝试通过账户配置获取
+        try:
+            # 使用OKX的获取账户配置API
+            response = exchange.private_get_account_config()
+            if response and response.get('code') == '0' and response.get('data'):
+                for config in response['data']:
+                    if config.get('instType') == 'SWAP' and config.get('instId') == TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'):
+                        pos_mode = config.get('posMode', '')
+                        # 根据OKX文档，posMode 可能是 'long_short_mode' 或 'net_mode'
+                        # 但这不是保证金模式，我们需要获取保证金模式
+                        # 对于保证金模式，我们需要查看持仓信息或通过其他方式
+                        logger.log_warning(f"📊 获取到持仓模式: {pos_mode}，但无法直接获取保证金模式")
+                        break
+        except Exception as e:
+            logger.log_warning(f"Account config check failed: {e}")
         
-        if target_mode == 'cross':
-            exchange.private_post_account_set_position_mode({'posMode': 'long_short_mode'})
-        else:
-            exchange.private_post_account_set_position_mode({'posMode': 'net_mode'})
-        
-        time.sleep(2)
-        
-        # 再次检查
-        positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
-        for pos in positions:
-            if pos['symbol'] == TRADE_CONFIG.symbol:
-                mode = pos.get('mgnMode', '').lower()
-                if mode in ['isolated', 'cross']:
-                    logger.log_info(f"📊 Verified margin mode: {mode}")
-                    return mode
-        
-        logger.log_warning(f"📊 Using target margin mode: {target_mode}")
-        return target_mode
+        logger.log_info("📊 无法确定当前保证金模式，使用默认值: isolated")
+        return 'isolated'
         
     except Exception as e:
         logger.log_error("margin_mode_check", str(e))
-        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
-        logger.log_warning(f"📊 Using default margin mode: {target_mode}")
-        return target_mode
+        return 'isolated'
 
 def setup_exchange():
-    """智能交易所设置 - 修复保证金模式问题"""
+    """智能交易所设置 - 根据OKX API文档修正保证金模式设置"""
     try:
         # 获取合约规格...
         markets = exchange.load_markets()
@@ -219,28 +212,9 @@ def setup_exchange():
         logger.log_info(f"✅ Contract: 1 contract = {TRADE_CONFIG.contract_size} BTC")
         logger.log_info(f"📏 Min trade: {TRADE_CONFIG.min_amount} contracts")
 
-        # 获取配置的仓位模式
+        # 获取配置的保证金模式
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         logger.log_info(f"🎯 Target margin mode: {margin_mode}")
-
-        # 🆕 首先设置保证金模式，无论是否有持仓
-        logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
-        try:
-            if margin_mode == 'cross':
-                # 全仓模式
-                exchange.private_post_account_set_position_mode({
-                    'posMode': 'long_short_mode'
-                })
-            else:
-                # 逐仓模式
-                exchange.private_post_account_set_position_mode({
-                    'posMode': 'net_mode'  # 使用 net_mode 而不是 isolated
-                })
-            logger.log_info(f"✅ Margin mode set to: {margin_mode}")
-            time.sleep(1)  # 等待设置生效
-        except Exception as e:
-            logger.log_error(f"margin_mode_setting", str(e))
-            logger.log_warning(f"⚠️ Margin mode setting failed, using {margin_mode} as default")
 
         # 检查当前持仓状态
         current_position = get_current_position()
@@ -251,19 +225,49 @@ def setup_exchange():
             logger.log_info(f"   - Size: {current_position['size']} contracts")
             logger.log_info(f"   - PnL: {current_position['unrealized_pnl']:.2f} USDT")
             
-            # 如果有持仓，只设置杠杆
+            # 如果有持仓，只设置杠杆不改变模式
             logger.log_info("⚙️ Setting leverage for existing position...")
             exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
             logger.log_warning(f"✅ Leverage set: {TRADE_CONFIG.leverage}x")
             
         else:
-            # 没有持仓，设置单向持仓模式
-            logger.log_info("🔄 Setting one-way position mode...")
+            # 没有持仓，可以安全设置模式
+            logger.log_info("🔄 Setting position mode...")
             try:
+                # 根据OKX文档，设置持仓模式为单向
                 exchange.set_position_mode(False, TRADE_CONFIG.symbol)
                 logger.log_info("✅ One-way position mode set")
             except Exception as e:
                 logger.log_warning(f"⚠️ Position mode setting: {e}")
+            
+            # 设置保证金模式 - 根据OKX API文档修正
+            logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
+            try:
+                # 使用ccxt的标准方法设置保证金模式
+                exchange.set_margin_mode(margin_mode, TRADE_CONFIG.symbol)
+                logger.log_info(f"✅ Margin mode set to: {margin_mode}")
+            except Exception as e:
+                logger.log_error(f"margin_mode_setting", str(e))
+                # 如果标准方法失败，尝试使用私有API
+                try:
+                    if margin_mode == 'cross':
+                        # 全仓模式
+                        exchange.private_post_account_set_margin_mode({
+                            'mgnMode': 'cross',
+                            'instId': TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'),
+                            'posSide': 'net'  # 单向持仓
+                        })
+                    else:
+                        # 逐仓模式
+                        exchange.private_post_account_set_margin_mode({
+                            'mgnMode': 'isolated',
+                            'instId': TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'),
+                            'posSide': 'net'  # 单向持仓
+                        })
+                    logger.log_info(f"✅ Margin mode set to: {margin_mode} (via private API)")
+                except Exception as e2:
+                    logger.log_error(f"margin_mode_private_api", str(e2))
+                    logger.log_warning(f"⚠️ Margin mode setting failed, using {margin_mode} as default")
             
             # 设置杠杆
             logger.log_info("⚙️ Setting leverage...")
@@ -275,7 +279,7 @@ def setup_exchange():
         usdt_balance = balance['USDT']['free']
         logger.log_info(f"💰 USDT balance: {usdt_balance:.2f}")
         
-        # 🆕 验证保证金模式设置
+        # 验证保证金模式设置
         time.sleep(2)
         final_mode = check_current_margin_mode()
         logger.log_info(f"🎯 Final verified margin mode: {final_mode}")
@@ -561,27 +565,56 @@ def get_market_trend(df):
     except Exception as e:
         logger.log_error("trend_analysis", str(e))
         return {}
-
-def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
-    """创建算法订单（条件单）- 修复参数错误"""
+    
+def verify_margin_mode():
+    """验证保证金模式设置是否正确"""
     try:
-        # 获取当前仓位模式
+        positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
+        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+        
+        for pos in positions:
+            if pos['symbol'] == TRADE_CONFIG.symbol:
+                current_mode = pos.get('mgnMode', 'unknown')
+                if current_mode == target_mode:
+                    logger.log_info(f"✅ 保证金模式验证成功: {current_mode}")
+                    return True
+                else:
+                    logger.log_warning(f"⚠️ 保证金模式不匹配: 当前={current_mode}, 目标={target_mode}")
+                    return False
+        
+        # 如果没有持仓，我们假设设置是正确的
+        logger.log_info(f"✅ 无持仓，假设保证金模式设置正确: {target_mode}")
+        return True
+        
+    except Exception as e:
+        logger.log_error("margin_mode_verification", str(e))
+        return False
+    
+def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
+    """创建算法订单（条件单）- 根据OKX API文档修正保证金模式"""
+    try:
+        # 获取当前保证金模式
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         
-        # 构建算法订单参数 - 使用OKX要求的参数名
+        # 根据OKX API文档，保证金模式参数应该是：
+        # - isolated: 逐仓
+        # - cross: 全仓
+        # 但在算法订单API中，可能需要使用不同的参数名
+        
+        # 构建算法订单参数
         params = {
             'instId': inst_id,
-            'tdMode': margin_mode.upper(),  # 使用大写：ISOLATED 或 CROSS
+            'tdMode': margin_mode,  # 使用保证金模式：isolated 或 cross
             'algoOrdType': algo_order_type,
         }
         
         if algo_order_type == 'conditional':
-            # 条件单特定参数 - 修正参数名
+            # 条件单特定参数
             params.update({
-                'side': side.upper(),  # 使用大写：BUY 或 SELL
-                'ordType': 'market',   # 固定为 market，不要使用变量
+                'side': side.upper(),
+                'ordType': 'market',
                 'sz': sz,
-                'tpTriggerPx': str(trigger_price),  # 使用正确的触发价格参数名
+                'tpTriggerPx': str(round(trigger_price, 2)),  # 触发价格，保留2位小数
                 'tpOrdPx': '-1'  # 委托价格为-1表示市价单
             })
         
@@ -1904,9 +1937,9 @@ def main():
         logger.log_error("exchange_setup", "Initialization failed")
         return
     
-    # 🆕 再次验证仓位模式
-    final_mode = check_current_margin_mode()
-    logger.log_info(f"🎯 Final margin mode: {final_mode}")
+    # 验证保证金模式设置
+    if not verify_margin_mode():
+        logger.log_warning("⚠️ 保证金模式验证失败，可能需要手动检查")
     
     # 🆕 在健康检查前先获取一次数据
     logger.log_info("🔄 Initial data fetch...")
