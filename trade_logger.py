@@ -1,5 +1,3 @@
-[file name]: trade_logger.py
-[file content begin]
 import logging
 import os
 import sys
@@ -122,4 +120,3 @@ logger = TradingLogger()
 
 # OLD: print(f"Trade execution failed: {e}")
 # NEW: logger.log_error("trade_execution", str(e))
-[file content end]
