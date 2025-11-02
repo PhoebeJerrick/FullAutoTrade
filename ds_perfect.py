@@ -448,11 +448,12 @@ def get_support_resistance_levels(df, lookback=20):
         return {}
 
 
-def get_sentiment_indicators():
+def get_sentiment_indicators(SYMBOL: str):
     """Get sentiment indicators - simplified version"""
+    config = SYMBOL_CONFIGS[SYMBOL]
     try:
-        API_URL = TRADE_CONFIG.sentiment_api_url
-        API_KEY = TRADE_CONFIG.sentiment_api_key
+        API_URL = config.sentiment_api_url
+        API_KEY = config.sentiment_api_key
 
         # Get recent 4-hour data
         end_time = datetime.now()
@@ -750,13 +751,16 @@ class PositionManager:
     def __init__(self):
         self.position_levels = {}  # 记录每个持仓的止盈级别
         
-    def check_profit_taking(self, current_position, price_data):
+    def check_profit_taking(self, symbol: str, current_position, price_data):
         """检查是否需要执行多级止盈"""
         if not current_position:
             return None
             
         position_key = f"{current_position['side']}_{current_position['entry_price']}"
-        risk_config = TRADE_CONFIG.get_risk_config()
+        
+        # ✅ 正确的配置获取方式
+        config = SYMBOL_CONFIGS[symbol]
+        risk_config = config.get_risk_config()
         profit_taking_config = risk_config['profit_taking']
         
         if not profit_taking_config['enable_multilevel_take_profit']:
@@ -790,7 +794,7 @@ class PositionManager:
                 
         return None
         
-    def mark_level_executed(self, current_position, level):
+    def mark_level_executed(self, symbol: str, current_position, level):
         """标记止盈级别已执行"""
         position_key = f"{current_position['side']}_{current_position['entry_price']}"
         level_key = f"{position_key}_level_{level}"
@@ -800,9 +804,33 @@ class PositionManager:
 position_manager = PositionManager()
 
 
+# Optimization: Add a unified error handling and retry decorator
+def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
+    # """Unified error handling and retry decorator"""
+    if max_retries is None:
+        max_retries = 3
+    if delay is None:
+        delay = 2
+        
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    logger.log_error(f"⚠️ {func.__name__} attempt {attempt + 1}", str(e))
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
+
+@retry_on_failure(max_retries=3, delay=2)
 def fetch_ohlcv_with_retry(symbol: str,max_retries=None):
     if max_retries is None:
-        max_retries = TradingConfig.max_retries
+        max_retries = 3
 
     # 从全局字典中获取该品种的配置
     config = SYMBOL_CONFIGS[symbol]
@@ -870,29 +898,6 @@ def fetch_ohlcv(symbol: str):
     except Exception as e:
         logger.log_error(f"fetch_ohlcv_{symbol}", str(e))
         return None, None
-
-# Optimization: Add a unified error handling and retry decorator
-def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
-    # """Unified error handling and retry decorator"""
-    if max_retries is None:
-        max_retries = TRADE_CONFIG.max_retries
-    if delay is None:
-        delay = TRADE_CONFIG.retry_delay
-        
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as e:
-                    logger.log_error(f"⚠️ {func.__name__} attempt {attempt + 1}", str(e))
-                    if attempt == max_retries - 1:
-                        raise
-                    time.sleep(delay)
-            return None
-        return wrapper
-    return decorator
 
 
 def add_to_signal_history(signal_data):
@@ -1310,7 +1315,7 @@ def create_fallback_signal(price_data):
         "is_fallback": True
     }
 
-@retry_on_failure(max_retries=TradingConfig.max_retries, delay=TradingConfig.retry_delay)
+@retry_on_failure(max_retries=3, delay=2)
 def analyze_with_deepseek(symbol: str, price_data: dict):
     """Use DeepSeek to analyze market and generate trading signals (enhanced version)"""
     config = SYMBOL_CONFIGS[symbol]
@@ -1335,7 +1340,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
             signal_text = f"\n【Previous Trading Signal】\nSignal: {last_signal.get('signal', 'N/A')}\nConfidence: {last_signal.get('confidence', 'N/A')}"
 
         # Get sentiment data
-        sentiment_data = get_sentiment_indicators()
+        sentiment_data = get_sentiment_indicators(symbol)
         # Simplified sentiment text - too much is useless
         if sentiment_data:
             sign = '+' if sentiment_data['net_sentiment'] >= 0 else ''
@@ -2058,7 +2063,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 adjust_take_profit_dynamically(symbol, current_position, price_data)
                 
                 # 检查多级止盈
-                profit_taking_signal = position_manager.check_profit_taking(current_position, price_data)
+                profit_taking_signal = position_manager.check_profit_taking(symbol, current_position, price_data)
                 if profit_taking_signal:
                     logger.log_info(f"🎯 {symbol}: 执行多级止盈 - {profit_taking_signal['description']}")
                     execute_profit_taking(symbol, current_position, profit_taking_signal, price_data)
@@ -2081,7 +2086,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             adjust_take_profit_dynamically(symbol, actual_position, price_data)
             
             # 检查多级止盈
-            profit_taking_signal = position_manager.check_profit_taking(actual_position, price_data)
+            profit_taking_signal = position_manager.check_profit_taking(symbol, actual_position, price_data)
             if profit_taking_signal:
                 logger.log_info(f"🎯 {symbol}: 执行多级止盈 - {profit_taking_signal['description']}")
                 execute_profit_taking(symbol, actual_position, profit_taking_signal, price_data)
