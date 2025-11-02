@@ -704,14 +704,12 @@ def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
         
         # 创建算法订单
         result = create_algo_order(
-            inst_id=config.symbol.replace('/', '').replace(':', '-'),
-            algo_order_type=algo_order_type,
-            side=trigger_action,
-            order_type=order_type,
-            sz=str(remaining_size),
-            trigger_price=str(trigger_price)
+        symbol=symbol,  # ✅ 修正参数名
+        side=trigger_action,
+        sz=remaining_size,
+        trigger_price=trigger_price
         )
-        
+
         if result:
             logger.log_info("✅ 保本止损设置成功")
             return True
@@ -722,59 +720,15 @@ def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
     except Exception as e:
         logger.log_error("breakeven_stop_setting", str(e))
         return False
-
-def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
-    """
-    基于K线结构计算止损价格
-    side: 'long' 或 'short'
-    entry_price: 开仓价格
-    price_data: 价格数据
-    max_stop_loss_ratio: 最大止损比例
-    """
+    
+def log_limit_order_params(order_type, params, limit_price, stop_loss_price, function_name=""):
+    """记录限价单参数"""
     try:
-        df = price_data['full_data']
-        current_price = price_data['price']
-        
-        if side == 'long':
-            # 多头止损：基于支撑位和ATR计算
-            support_level = price_data['levels_analysis'].get('static_support', current_price)
-            atr = calculate_atr(df)  # 需要添加ATR计算函数
-            
-            # 使用支撑位或基于ATR的止损，取较宽松的一个
-            stop_loss_by_support = support_level
-            stop_loss_by_atr = current_price - (atr * 2)  # 2倍ATR
-            
-            stop_loss_price = min(stop_loss_by_support, stop_loss_by_atr)
-            
-            # 确保止损不超过最大比例
-            max_stop_loss_price = current_price * (1 - max_stop_loss_ratio)
-            stop_loss_price = max(stop_loss_price, max_stop_loss_price)
-            
-        else:  # short
-            # 空头止损：基于阻力位和ATR计算
-            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price)
-            atr = calculate_atr(df)
-            
-            # 使用阻力位或基于ATR的止损，取较宽松的一个
-            stop_loss_by_resistance = resistance_level
-            stop_loss_by_atr = current_price + (atr * 2)
-            
-            stop_loss_price = max(stop_loss_by_resistance, stop_loss_by_atr)
-            
-            # 确保止损不超过最大比例
-            max_stop_loss_price = current_price * (1 + max_stop_loss_ratio)
-            stop_loss_price = min(stop_loss_price, max_stop_loss_price)
-        
-        logger.log_info(f"🎯 K线结构止损计算: {side}方向, 入场{entry_price:.2f}, 止损{stop_loss_price:.2f}")
-        return stop_loss_price
-        
+        safe_params = params.copy()
+        # ... 实现日志记录逻辑
+        logger.log_info(f"📋 {function_name} - {order_type}限价单: 限价{limit_price:.2f}, 止损{stop_loss_price:.2f}")
     except Exception as e:
-        logger.log_error("stop_loss_calculation", str(e))
-        # 备用止损计算
-        if side == 'long':
-            return entry_price * (1 - max_stop_loss_ratio)
-        else:
-            return entry_price * (1 + max_stop_loss_ratio)
+        logger.log_error("log_limit_order_params", f"记录限价单参数失败: {str(e)}")
 
 def calculate_atr(df, period=14):
     """计算平均真实波幅(ATR)"""
@@ -1061,8 +1015,8 @@ def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -
         logger.log_error(f"trailing_stop_setup_{symbol}", f"移动止损设置失败: {str(e)}")
         return False
 
-def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float) -> bool:
-    """设置移动止损订单"""
+def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float):
+    """设置移动止损订单 - 先设置新的，再取消旧的"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         side = current_position['side']
@@ -1075,27 +1029,32 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
             # 空头：止损买入
             trigger_action = 'buy'
         
-        # 先取消旧的止损单
-        cancel_existing_algo_orders(symbol)
-        
-        # 创建新的移动止损条件单
+        # 先创建新的移动止损条件单
         result = create_algo_order(
-            symbol,
+            symbol=symbol,
             side=trigger_action,
             sz=position_size,
             trigger_price=stop_price
         )
         
         if result:
-            logger.log_info(f"✅ {symbol}: 移动止损设置成功 - {stop_price:.2f}")
+            logger.log_info(f"✅ 新移动止损设置成功: {stop_price:.2f}")
+            
+            # 等待新订单处理完成
+            time.sleep(1)
+            
+            # 现在取消旧的止损单
+            cancel_existing_algo_orders()
+            
             return True
         else:
-            logger.log_error(f"trailing_stop_failed_{symbol}", "移动止损设置失败")
+            logger.log_error("移动止损设置失败")
             return False
             
     except Exception as e:
-        logger.log_error(f"set_trailing_stop_order_{symbol}", f"移动止损订单设置异常: {str(e)}")
+        logger.log_error("set_trailing_stop_order", str(e))
         return False
+
 
 def adjust_take_profit_dynamically(symbol: str, current_position: dict, price_data: dict) -> bool:
     """动态调整止盈位置"""
@@ -1762,48 +1721,6 @@ def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=
         logger.log_error("trailing_stop_setup", str(e))
         return False
 
-def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float):
-    """设置移动止损订单 - 先设置新的，再取消旧的"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        side = current_position['side']
-        position_size = current_position['size']
-        
-        if side == 'long':
-            # 多头：止损卖出
-            trigger_action = 'sell'
-        else:
-            # 空头：止损买入
-            trigger_action = 'buy'
-        
-        # 先创建新的移动止损条件单
-        result = create_algo_order(
-            inst_id=config.symbol.replace('/', '').replace(':', '-'),
-            algo_order_type='conditional',
-            side=trigger_action,
-            order_type='market',
-            sz=str(position_size),
-            trigger_price=str(stop_price)
-        )
-        
-        if result:
-            logger.log_info(f"✅ 新移动止损设置成功: {stop_price:.2f}")
-            
-            # 等待新订单处理完成
-            time.sleep(1)
-            
-            # 现在取消旧的止损单
-            cancel_existing_algo_orders()
-            
-            return True
-        else:
-            logger.log_error("移动止损设置失败")
-            return False
-            
-    except Exception as e:
-        logger.log_error("set_trailing_stop_order", str(e))
-        return False
-
 def get_current_price(symbol: str): # 新增 symbol 参数
     """获取当前价格"""
     try:
@@ -2181,7 +2098,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 logger.log_info(f"🔄 条件单开多仓: {position_size}张 @ {ask_price * 0.999:.2f}")
                 
                 result = create_algo_order(
-                    inst_id=get_correct_inst_id(),
+                    inst_id=get_correct_inst_id(symbol),
                     side='buy',
                     sz=position_size,
                     trigger_price=ask_price * 0.999,
@@ -2195,7 +2112,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 logger.log_info(f"🔄 条件单开空仓: {position_size}张 @ {bid_price * 1.001:.2f}")
                 
                 result = create_algo_order(
-                    inst_id=get_correct_inst_id(),
+                    inst_id=get_correct_inst_id(symbol),
                     side='sell',
                     sz=position_size,
                     trigger_price=bid_price * 1.001,
