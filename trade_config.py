@@ -1,8 +1,8 @@
 import os
 import time
+from typing import Tuple, List, Dict, Any  # 添加类型导入
 
 # --- NEW: Multi-Symbol Configuration Structure ---
-# 定义多交易品种的个性化配置，未指定的参数将使用默认值
 MULTI_SYMBOL_CONFIGS = {
     # 默认/参考配置 (BTC)
     'BTC/USDT:USDT': {
@@ -18,7 +18,7 @@ MULTI_SYMBOL_CONFIGS = {
     },
     # SOL 配置 (示例)
     'SOL/USDT:USDT': {
-        'leverage': int(os.getenv('SOL_LEVERAGE', 30)),
+        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
         'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
         'max_position_ratio': 5,
     },
@@ -30,34 +30,35 @@ MULTI_SYMBOL_CONFIGS = {
     },
     # BCH 配置 (示例)
     'BCH/USDT:USDT': {
-        'leverage': int(os.getenv('BCH_LEVERAGE', 30)),
+        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
         'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
         'max_position_ratio': 7,
     },
 }
 
 class TradingConfig:
-    """
-    Dynamic configuration management for trading bot
-    """
+    """Dynamic configuration management for trading bot"""
+    
     def __init__(self, symbol: str, config_data: dict):
         # 1. 设置品种信息
         self.symbol = symbol
-        current_config = self.get_symbol_config(self.symbol)
         
+        # 使用传入的配置数据
+        current_config = config_data  # 直接使用传入的配置
+
         # Trading parameters
-        # 使用品种特定的杠杆，如果没有配置则使用环境变量或默认值
-        self.leverage = config_data.get('leverage', int(os.getenv('LEVERAGE', 50)))
+        self.leverage = current_config.get('leverage', int(os.getenv('LEVERAGE', 50)))
+        self.base_usdt_amount = current_config.get('base_usdt_amount', float(os.getenv('BASE_USDT_AMOUNT', 100)))
         self.timeframe = os.getenv('TIMEFRAME', '15m')
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
-        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
         
         # Exchange settings
         self.exchange_name = 'okx'
         self.default_type = 'swap'
         
-        # 🆕 添加缺失的配置属性
+        # 添加缺失的配置属性
         self.config_check_interval = 300  # 5 minutes
         self.perf_log_interval = 600      # 10 minutes
         
@@ -71,46 +72,41 @@ class TradingConfig:
         # Position management
         self.position_management = {
             'enable_intelligent_position': True,
-            # 使用品种特定的基础投资额
-            'base_usdt_amount': config_data.get('base_usdt_amount', 100.0),
+            'base_usdt_amount': current_config.get('base_usdt_amount', 100.0),
             'high_confidence_multiplier': 1.5,
             'medium_confidence_multiplier': 1.0,
             'low_confidence_multiplier': 0.5,
-            # 使用品种特定的最大仓位比例
-            'max_position_ratio': config_data.get('max_position_ratio', 10),
+            'max_position_ratio': current_config.get('max_position_ratio', 10),
             'trend_strength_multiplier': 1.2
         }
         
-        # 🆕 新增风险管理和止盈止损配置
+        # 风险管理和止盈止损配置
         self.risk_management = {
-            # 止损配置
             'stop_loss': {
-                'max_stop_loss_ratio': 0.40,  # 最大止损比例40%
-                'kline_based_stop_loss': True,  # 基于K线结构设置止损
-                'min_stop_loss_ratio': 0.02,   # 最小止损比例2%
+                'max_stop_loss_ratio': 0.40,
+                'kline_based_stop_loss': True,
+                'min_stop_loss_ratio': 0.02,
             },
-            # 多级止盈配置
             'profit_taking': {
                 'enable_multilevel_take_profit': True,
                 'levels': [
                     {
-                        'profit_multiplier': 1.0,  # 盈利翻倍
-                        'take_profit_ratio': 0.40,  # 止盈40%
+                        'profit_multiplier': 1.0,
+                        'take_profit_ratio': 0.40,
                         'description': '第一目标：盈利100%时止盈40%'
                     },
                     {
-                        'profit_multiplier': 2.0,  # 再翻一倍（总盈利200%）
-                        'take_profit_ratio': 0.30,  # 止盈30%
-                        'set_breakeven_stop': True,  # 剩余部分止损设置为开仓价
+                        'profit_multiplier': 2.0,
+                        'take_profit_ratio': 0.30,
+                        'set_breakeven_stop': True,
                         'description': '第二目标：总盈利200%时再止盈30%，剩余部分保本'
                     }
                 ]
             },
-            # 动态止损调整
             'dynamic_stop_loss': {
                 'enable_trailing_stop': True,
-                'trailing_activation_ratio': 0.50,  # 盈利50%后启动移动止损
-                'trailing_distance_ratio': 0.20,    # 移动止损距离20%
+                'trailing_activation_ratio': 0.50,
+                'trailing_distance_ratio': 0.20,
             }
         }
         
@@ -125,7 +121,7 @@ class TradingConfig:
         self.max_consecutive_errors = 5
         
         # Monitoring
-        self.health_check_interval = 300  # 5 minutes
+        self.health_check_interval = 300
         self.max_signal_history = 100
         
         self._last_update = time.time()
@@ -136,7 +132,7 @@ class TradingConfig:
     
     def reload(self):
         """Reload configuration from environment variables"""
-        # 重新加载当前品种的配置
+        # 重新获取当前品种配置
         current_config = self.get_symbol_config(self.symbol)
         
         # Trading parameters
@@ -150,12 +146,12 @@ class TradingConfig:
         self.position_management['base_usdt_amount'] = float(
             os.getenv('BASE_USDT_AMOUNT', current_config.get('base_usdt_amount', self.position_management['base_usdt_amount']))
         )
-        self.position_management['max_position_ratio'] = current_config.get('max_position_ratio', self.position_management['max_position_ratio'])
+        self.position_management['max_position_ratio'] = current_config.get(
+            'max_position_ratio', self.position_management['max_position_ratio']
+        )
 
-        # 🆕 新增仓位模式配置
-        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
         
-        # 🆕 重新加载风险管理配置
         self.risk_management['stop_loss']['max_stop_loss_ratio'] = float(
             os.getenv('MAX_STOP_LOSS_RATIO', self.risk_management['stop_loss']['max_stop_loss_ratio'])
         )
@@ -186,23 +182,17 @@ class TradingConfig:
             'data_points': self.data_points,
             'analysis_periods': self.analysis_periods,
             'position_management': self.position_management,
-            'risk_management': self.risk_management,  # 🆕 添加风险管理配置
+            'risk_management': self.risk_management,
             'contract_size': getattr(self, 'contract_size', 0.01),
             'min_amount': getattr(self, 'min_amount', 0.01)
         }
 
     def get_symbol_config(self, symbol: str) -> dict:
-        """
-        [NEW METHOD] 获取特定交易品种的配置，未找到则返回 BTC 默认配置
-        """
-        # 使用 MULTI_SYMBOL_CONFIGS 字典
+        """获取特定交易品种的配置，未找到则返回 BTC 默认配置"""
         return MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS.get('BTC/USDT:USDT', {}))
 
     def validate_config(self, symbol: str = None) -> Tuple[bool, List[str], List[str]]:
-        """
-        验证配置是否有效
-        返回: (is_valid: bool, error_messages: list)
-        """
+        """验证配置是否有效"""
         errors = []
         warnings = []
 
@@ -279,9 +269,7 @@ class TradingConfig:
         return len(errors) == 0, errors, warnings
 
     def get_config_summary(self) -> dict:
-        """
-        获取配置摘要（用于日志记录）
-        """
+        """获取配置摘要（用于日志记录）"""
         return {
             'symbol': self.symbol,
             'leverage': self.leverage,
@@ -294,7 +282,13 @@ class TradingConfig:
             'min_amount': getattr(self, 'min_amount', 'Not set')
         }
 
-# Create global instance
-TRADE_CONFIG = TradingConfig()
+def create_trade_config(symbol: str = None) -> TradingConfig:
+    """创建交易配置实例"""
+    if symbol is None:
+        symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
+    
+    symbol_config = MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS['BTC/USDT:USDT'])
+    return TradingConfig(symbol=symbol, config_data=symbol_config)
 
-# For example, TRADE_CONFIG['symbol'] becomes TRADE_CONFIG.symbol.
+# Create global instance
+TRADE_CONFIG = create_trade_config()
