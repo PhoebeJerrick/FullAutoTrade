@@ -121,6 +121,48 @@ exchange = ccxt.okx({
     'password': account_config['password'],
 })
 
+def log_order_params(order_type, params, function_name=""):
+    """记录订单参数到日志 - 永续合约专用"""
+    try:
+        # 隐藏敏感信息
+        safe_params = params.copy()
+        sensitive_keys = ['apiKey', 'secret', 'password', 'signature']
+        for key in sensitive_keys:
+            if key in safe_params:
+                safe_params[key] = '***'
+        
+        logger.log_info(f"📋 {function_name} - {order_type}订单参数:")
+        for key, value in safe_params.items():
+            logger.log_info(f"   {key}: {value}")
+            
+        # 特别标注订单类型
+        logger.log_info(f"   🔍 订单类型确认: 永续合约{order_type}")
+    except Exception as e:
+        logger.log_error("log_order_params", f"记录订单参数失败: {str(e)}")
+
+def log_perpetual_order_details(side, amount, order_type, reduce_only=False, stop_loss=False, take_profit=False):
+    """记录永续合约订单详细信息"""
+    try:
+        order_info = {
+            'symbol': TRADE_CONFIG.symbol,
+            'side': side,
+            'amount': amount,
+            'order_type': order_type,
+            'contract_type': 'PERPETUAL_SWAP',
+            'reduce_only': reduce_only,
+            'is_stop_loss': stop_loss,
+            'is_take_profit': take_profit,
+            'margin_mode': getattr(TRADE_CONFIG, 'margin_mode', 'isolated'),
+            'leverage': TRADE_CONFIG.leverage
+        }
+        
+        logger.log_info(f"🎯 永续合约订单详情:")
+        for key, value in order_info.items():
+            logger.log_info(f"   {key}: {value}")
+            
+    except Exception as e:
+        logger.log_error("log_perpetual_order_details", f"记录订单详情失败: {str(e)}")
+
 def check_existing_positions():
     # Check existing positions and return whether there are isolated positions and the information of isolated positions.
     logger.log_info("🔍 Checking existing position mode..")
@@ -166,41 +208,25 @@ def set_margin_mode(mode, symbol):
         return False
 
 def check_current_margin_mode():
-    """检查当前仓位模式 - 根据OKX API文档修正"""
+    """检查当前仓位模式 - 简化版本"""
     try:
         positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
         for pos in positions:
             if pos['symbol'] == TRADE_CONFIG.symbol:
                 mode = pos.get('mgnMode', 'unknown')
                 if mode != 'unknown':
-                    logger.log_info(f"📊 Current margin mode from positions: {mode}")
                     return mode
         
-        # 如果没有持仓，尝试通过账户配置获取
-        try:
-            # 使用OKX的获取账户配置API
-            response = exchange.private_get_account_config()
-            if response and response.get('code') == '0' and response.get('data'):
-                for config in response['data']:
-                    if config.get('instType') == 'SWAP' and config.get('instId') == TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'):
-                        pos_mode = config.get('posMode', '')
-                        # 根据OKX文档，posMode 可能是 'long_short_mode' 或 'net_mode'
-                        # 但这不是保证金模式，我们需要获取保证金模式
-                        # 对于保证金模式，我们需要查看持仓信息或通过其他方式
-                        logger.log_warning(f"📊 获取到持仓模式: {pos_mode}，但无法直接获取保证金模式")
-                        break
-        except Exception as e:
-            logger.log_warning(f"Account config check failed: {e}")
-        
-        logger.log_info("📊 无法确定当前保证金模式，使用默认值: isolated")
-        return 'isolated'
+        # 如果没有持仓，返回默认值
+        return getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         
     except Exception as e:
         logger.log_error("margin_mode_check", str(e))
-        return 'isolated'
+        return getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
+
 
 def setup_exchange():
-    """智能交易所设置 - 修正保证金模式设置"""
+    """智能交易所设置 - 简化保证金模式设置"""
     try:
         # 获取合约规格
         markets = exchange.load_markets()
@@ -216,53 +242,28 @@ def setup_exchange():
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         logger.log_info(f"🎯 Target margin mode: {margin_mode}")
 
-        # 首先设置持仓模式为单向
-        logger.log_info("🔄 Setting position mode to one-way...")
-        try:
-            exchange.set_position_mode(False, TRADE_CONFIG.symbol)  # False 表示单向持仓
-            logger.log_info("✅ One-way position mode set")
-        except Exception as e:
-            logger.log_warning(f"⚠️ Position mode setting: {e}")
-
-        # 设置保证金模式
-        logger.log_info(f"⚙️ Setting {margin_mode} margin mode...")
-        try:
-            # 使用ccxt的标准方法设置保证金模式
-            exchange.set_margin_mode(margin_mode, TRADE_CONFIG.symbol)
-            logger.log_info(f"✅ Margin mode set to: {margin_mode}")
-        except Exception as e:
-            logger.log_warning(f"⚠️ Standard margin mode setting failed: {e}")
-            # 如果标准方法失败，使用私有API
-            try:
-                inst_id = TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP')
-                if margin_mode == 'cross':
-                    exchange.private_post_account_set_margin_mode({
-                        'mgnMode': 'cross',
-                        'instId': inst_id
-                    })
-                else:
-                    exchange.private_post_account_set_margin_mode({
-                        'mgnMode': 'isolated', 
-                        'instId': inst_id
-                    })
-                logger.log_info(f"✅ Margin mode set to: {margin_mode} (via private API)")
-            except Exception as e2:
-                logger.log_error(f"margin_mode_private_api", str(e2))
-
-        # 设置杠杆
+        # 简化设置流程 - 只设置必要的参数
+        logger.log_info("🔄 Setting basic exchange parameters...")
+        
+        # 设置杠杆（这是最重要的）
         logger.log_info("⚙️ Setting leverage...")
-        exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
-        logger.log_warning(f"✅ Leverage {TRADE_CONFIG.leverage}x")
+        try:
+            exchange.set_leverage(TRADE_CONFIG.leverage, TRADE_CONFIG.symbol)
+            logger.log_warning(f"✅ Leverage {TRADE_CONFIG.leverage}x")
+        except Exception as e:
+            logger.log_warning(f"⚠️ Leverage setting: {e}")
 
+        # 对于OKX，很多时候保证金模式在开仓时自动设置
+        # 我们主要确保杠杆设置正确即可
+        
         # 账户信息
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
         logger.log_info(f"💰 USDT balance: {usdt_balance:.2f}")
         
-        # 验证保证金模式设置
-        time.sleep(2)
-        final_mode = check_current_margin_mode()
-        logger.log_info(f"🎯 Final verified margin mode: {final_mode}")
+        # 记录当前模式（但不强制设置）
+        current_mode = check_current_margin_mode()
+        logger.log_info(f"📊 Current margin mode: {current_mode}")
         
         return True
 
@@ -591,76 +592,96 @@ def verify_margin_mode():
         logger.log_error("margin_mode_verification", str(e))
         return False
 
-def create_algo_order(inst_id, algo_order_type, side, order_type, sz, trigger_price):
-    """创建算法订单（条件单）- 修正数据类型"""
+def get_correct_inst_id():
+    """获取正确的合约ID"""
+    # 对于 BTC/USDT:USDT，正确的instId是 BTC-USDT-SWAP
+    symbol = TRADE_CONFIG.symbol
+    if symbol == 'BTC/USDT:USDT':
+        return 'BTC-USDT-SWAP'
+    elif symbol == 'ETH/USDT:USDT':
+        return 'ETH-USDT-SWAP'
+    else:
+        # 通用处理
+        return symbol.replace('/', '-').replace(':USDT', '-SWAP')
+
+def create_algo_order(inst_id, side, sz, trigger_price, algo_order_type='conditional'):
+    """创建算法订单 - 永续合约条件单（不取消现有订单）"""
     try:
-        # 确保 trigger_price 是数字类型
+        # 确保使用正确的合约ID
+        inst_id = get_correct_inst_id()
+        
+        # 确保参数类型正确
         if isinstance(trigger_price, str):
             trigger_price = float(trigger_price)
-        
-        # 确保 sz 是字符串
         if isinstance(sz, (int, float)):
-            sz = str(sz)
+            sz = str(round(sz, 2))
             
         margin_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
         
-        # 构建算法订单参数
+        # 构建永续合约条件单参数
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
             'algoOrdType': algo_order_type,
+            'side': side.upper(),
+            'sz': sz,
+            'tpTriggerPx': str(round(trigger_price, 1)),
+            'tpOrdPx': '-1',
+            'posSide': 'net',  # 单向持仓
+            'ordType': 'market'  # 触发后使用市价单
         }
         
-        if algo_order_type == 'conditional':
-            # 条件单特定参数
-            params.update({
-                'side': side.upper(),
-                'ordType': 'market',
-                'sz': sz,
-                'tpTriggerPx': str(round(trigger_price, 2)),  # 现在 trigger_price 是数字
-                'tpOrdPx': '-1'
-            })
+        # 记录完整的订单参数
+        log_order_params("永续合约条件单", params, "create_algo_order")
+        log_perpetual_order_details(side, sz, 'conditional_stop', stop_loss=True, stop_loss_price=trigger_price)
         
-        logger.log_info(f"📊 创建算法订单参数: {params}")
+        logger.log_info(f"📊 创建永续合约条件单: {side} {sz} @ {trigger_price}")
         
         # 调用OKX算法订单API
-        response = exchange.private_post_trade_order_algo(params)
+        response = exchange.privatePostTradeOrderAlgo(params)
+        
+        # 记录API响应
+        log_api_response(response, "create_algo_order")
         
         if response['code'] == '0':
-            logger.log_info(f"✅ 算法订单创建成功: {response['data'][0]['algoId']}")
+            algo_id = response['data'][0]['algoId']
+            logger.log_info(f"✅ 永续合约条件单创建成功: {algo_id}")
             return True
         else:
-            logger.log_error("algo_order_failed", f"算法订单创建失败: {response}")
+            logger.log_error("algo_order_failed", f"永续合约条件单创建失败: {response}")
             return False
             
     except Exception as e:
-        logger.log_error("create_algo_order", str(e))
+        logger.log_error("create_algo_order", f"创建永续合约条件单异常: {str(e)}")
         return False
 
 def cancel_existing_algo_orders():
-    """取消现有的算法订单 - 修正参数"""
+    """取消现有的算法订单 - 完全重写"""
     try:
-        # 修正参数名
+        # 使用正确的API端点获取待处理算法订单
         params = {
             'instType': 'SWAP',
-            'algoOrdType': 'conditional'  # 使用正确的参数名
+            'algoOrdType': 'conditional'
         }
         
-        response = exchange.private_get_trade_orders_algo_pending(params)
+        # 使用正确的API方法
+        response = exchange.privateGetTradeOrdersAlgoPending(params)
         
         if response['code'] == '0' and response['data']:
             for order in response['data']:
-                # 取消每个条件单
+                # 取消条件单
                 cancel_params = {
-                    'instId': TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP'),
                     'algoId': order['algoId'],
+                    'instId': order['instId'],
                     'algoOrdType': 'conditional'
                 }
-                cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+                cancel_response = exchange.privatePostTradeCancelAlgoOrder(cancel_params)
                 if cancel_response['code'] == '0':
                     logger.log_info(f"✅ 取消现有条件单: {order['algoId']}")
                 else:
                     logger.log_warning(f"⚠️ 取消条件单失败: {cancel_response}")
+        else:
+            logger.log_info("✅ 没有找到待取消的条件单")
                     
     except Exception as e:
         logger.log_error("cancel_algo_orders", str(e))
@@ -1091,6 +1112,26 @@ def analyze_with_deepseek(price_data):
         position_text = "No position" if not current_pos else f"{current_pos['side']} position, Quantity: {current_pos['size']}, P&L: {current_pos['unrealized_pnl']:.2f}USDT"
         pnl_text = f", Position P&L: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
 
+        # 🆕 Enhanced Trend Reversal Analysis Criteria
+        trend_reversal_criteria = """
+        【Trend Reversal Judgment Criteria - Must meet at least 2 conditions】
+        1. Price breaks through key support/resistance levels + volume amplification
+        2. Break of major moving averages (e.g., 20-period, 50-period)  
+        3. RSI reversal from overbought/oversold areas and forms divergence
+        4. MACD shows clear death cross/golden cross signal
+
+        【Position Management Principles】
+        - Existing position opposite to current signal → Strongly consider closing position
+        - Existing position same as current signal → Continue holding, check stop loss
+        - Signal is HOLD but position exists → Decide whether to hold based on technical indicators
+
+        【Key Technical Levels for BTC/USDT】
+        - Strong Resistance: When price approaches recent high + Bollinger Band upper
+        - Strong Support: When price approaches recent low + Bollinger Band lower
+        - Breakout Confirmation: Requires closing price break + volume > 20-period average
+        - False Breakout: Price breaks but fails to sustain, immediately reverses
+        """
+
         prompt = f"""
         You are a professional cryptocurrency trading analyst. Please analyze based on the following BTC/USDT {TRADE_CONFIG.timeframe} period data:
 
@@ -1110,6 +1151,8 @@ def analyze_with_deepseek(price_data):
         - Current K-line volume: {price_data['volume']:.2f} BTC
         - Price change: {price_data['price_change']:+.2f}%
         - Current position: {position_text}{pnl_text}
+
+        {trend_reversal_criteria}  # 🆕 Add enhanced trend reversal criteria
 
         【Anti-Frequent Trading Important Principles】
         1. **Trend Continuity Priority**: Do not change overall trend judgment based on single K-line or short-term fluctuations
@@ -1178,12 +1221,23 @@ def analyze_with_deepseek(price_data):
 
         try:
             response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system",
-                    "content": f"You are a professional trader focusing on {TRADE_CONFIG.timeframe} period trend analysis. Please make judgments combining K-line patterns and technical indicators, and strictly follow JSON format requirements."},
-                    {"role": "user", "content": prompt}
-                ],
+    model="deepseek-chat",
+    messages=[
+        {"role": "system",
+         "content": f"""You are a professional trader specializing in {TRADE_CONFIG.timeframe} period trend analysis and trend reversal detection. 
+                Key Responsibilities:
+                1. Analyze trend strength and identify potential reversal points
+                2. Use multiple confirmation criteria for trend reversals
+                3. Provide clear trading signals based on technical analysis
+                4. Consider existing positions in your analysis
+                5. Strictly follow JSON format requirements
+
+                Trend Reversal Focus:
+                - Pay special attention to breakouts of key support/resistance levels
+                - Look for confirmation from multiple indicators (RSI divergence, MACD cross, volume)
+                - Consider the broader market context in your analysis"""},
+            {"role": "user", "content": prompt}
+            ],
                 stream=False,
                 temperature=0.1
             )
@@ -1274,7 +1328,7 @@ def check_trading_frequency():
     return True
 
 def execute_profit_taking(current_position, profit_taking_signal, price_data):
-    """执行多级止盈逻辑"""
+    """执行多级止盈逻辑 - 永续合约市价平仓"""
     try:
         order_tag = create_order_tag()
         position_size = current_position['size']
@@ -1282,7 +1336,7 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         
         # 计算需要平仓的数量
         close_size = position_size * take_profit_ratio
-        close_size = round(close_size, 2)  # 保留2位小数
+        close_size = round(close_size, 2)
         
         if close_size < getattr(TRADE_CONFIG, 'min_amount', 0.01):
             close_size = getattr(TRADE_CONFIG, 'min_amount', 0.01)
@@ -1290,8 +1344,21 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         logger.log_info(f"💰 执行部分止盈: 平仓{close_size:.2f}张合约 ({take_profit_ratio:.1%}仓位)")
         
         if not TRADE_CONFIG.test_mode:
-            # 执行平仓
+            # 记录止盈订单参数 - 永续合约市价平仓
             if current_position['side'] == 'long':
+                profit_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'sell',
+                    'amount': close_size,
+                    'type': 'market',
+                    'profit_taking_ratio': take_profit_ratio,
+                    'original_position_size': position_size
+                }
+                log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
+                log_perpetual_order_details('sell', close_size, 'market', reduce_only=True, take_profit=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'sell',
@@ -1299,6 +1366,19 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
                     params={'reduceOnly': True, 'tag': order_tag}
                 )
             else:  # short
+                profit_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag,
+                    'symbol': TRADE_CONFIG.symbol,
+                    'side': 'buy',
+                    'amount': close_size,
+                    'type': 'market',
+                    'profit_taking_ratio': take_profit_ratio,
+                    'original_position_size': position_size
+                }
+                log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
+                log_perpetual_order_details('buy', close_size, 'market', reduce_only=True, take_profit=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'buy',
@@ -1306,8 +1386,12 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
                     params={'reduceOnly': True, 'tag': order_tag}
                 )
             
+            # 记录止盈订单执行结果
+            logger.log_info(f"✅ 永续合约止盈订单执行完成: 平仓{close_size}张")
+            
             # 如果设置保本止损，更新剩余仓位的止损
             if profit_taking_signal.get('set_breakeven_stop', False):
+                logger.log_info("🛡️ 设置保本止损...")
                 set_breakeven_stop(current_position, price_data)
                 
         logger.log_info("✅ 多级止盈执行完成")
@@ -1316,49 +1400,53 @@ def execute_profit_taking(current_position, profit_taking_signal, price_data):
         logger.log_error("profit_taking_execution", str(e))
 
 def set_initial_stop_loss(signal, position_size, stop_loss_price, current_price):
-    """设置初始止损订单 - 修正参数传递"""
+    """设置初始止损订单 - 先设置新止损单，再取消旧的"""
     try:
-        side = 'long' if signal == 'BUY' else 'short'
+        # 确定止损方向
+        if signal == 'BUY':
+            # 多头持仓，止损是卖出
+            side = 'sell'
+        else:  # SELL
+            # 空头持仓，止损是买入平仓
+            side = 'buy'
         
-        if side == 'long':
-            # 多头：止损卖出
-            trigger_action = 'sell'
-            trigger_price = stop_loss_price
-        else:
-            # 空头：止损买入
-            trigger_action = 'buy' 
-            trigger_price = stop_loss_price
-        
-        # 确保 position_size 是数字类型
-        if isinstance(position_size, str):
-            position_size = float(position_size)
+        # 确保参数正确
+        if isinstance(position_size, (int, float)):
+            position_size = str(round(position_size, 2))
+        if isinstance(stop_loss_price, str):
+            stop_loss_price = float(stop_loss_price)
             
-        # 取消现有的条件单
-        cancel_existing_algo_orders()
+        # 获取正确的合约ID
+        inst_id = get_correct_inst_id()
         
-        # 修正 inst_id 格式
-        inst_id = TRADE_CONFIG.symbol.replace('/', '-').replace('USDT', '-USDT-SWAP')
+        logger.log_info(f"🛡️ 设置新止损单: {side} {position_size}张, 触发价{stop_loss_price:.1f}")
         
-        # 创建止损条件单 - 修正参数传递
+        # 先创建新的止损单
         result = create_algo_order(
             inst_id=inst_id,
-            algo_order_type='conditional',
-            side=trigger_action,
-            order_type='market',
-            sz=position_size,  # 直接传递数字，函数内部会处理
-            trigger_price=stop_loss_price  # 直接传递数字
+            side=side,
+            sz=position_size,
+            trigger_price=stop_loss_price
         )
         
         if result:
             stop_loss_ratio = abs(stop_loss_price - current_price) / current_price * 100
-            direction = "below" if side == 'long' else "above"
-            logger.log_info(f"✅ 初始止损设置成功: {stop_loss_price:.2f} ({direction} {stop_loss_ratio:.2f}%)")
+            logger.log_info(f"✅ 新止损单设置成功: {stop_loss_price:.1f} (距离{stop_loss_ratio:.2f}%)")
+            
+            # 等待新止损单处理完成
+            time.sleep(1)
+            
+            # 现在取消旧的止损单（如果有的话）
+            cancel_existing_algo_orders()
+            
+            return True
         else:
-            logger.log_error("stop_loss_failed", "初始止损设置失败")
+            logger.log_error("stop_loss_failed", "新止损单设置失败")
+            return False
             
     except Exception as e:
-        logger.log_error("initial_stop_loss_setting", str(e))
-
+        logger.log_error("initial_stop_loss_setting", f"止损设置异常: {str(e)}")
+        return False
 
 def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=0.20, price_data=None):
     """设置移动止损"""
@@ -1395,11 +1483,8 @@ def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=
         return False
 
 def set_trailing_stop_order(current_position, stop_price):
-    """设置移动止损订单"""
+    """设置移动止损订单 - 先设置新的，再取消旧的"""
     try:
-        # 取消现有的条件单
-        cancel_existing_algo_orders()
-        
         side = current_position['side']
         position_size = current_position['size']
         
@@ -1410,7 +1495,7 @@ def set_trailing_stop_order(current_position, stop_price):
             # 空头：止损买入
             trigger_action = 'buy'
         
-        # 创建移动止损条件单
+        # 先创建新的移动止损条件单
         result = create_algo_order(
             inst_id=TRADE_CONFIG.symbol.replace('/', '').replace(':', '-'),
             algo_order_type='conditional',
@@ -1421,7 +1506,14 @@ def set_trailing_stop_order(current_position, stop_price):
         )
         
         if result:
-            logger.log_info(f"✅ 移动止损设置成功: {stop_price:.2f}")
+            logger.log_info(f"✅ 新移动止损设置成功: {stop_price:.2f}")
+            
+            # 等待新订单处理完成
+            time.sleep(1)
+            
+            # 现在取消旧的止损单
+            cancel_existing_algo_orders()
+            
             return True
         else:
             logger.log_error("移动止损设置失败")
@@ -1430,7 +1522,7 @@ def set_trailing_stop_order(current_position, stop_price):
     except Exception as e:
         logger.log_error("set_trailing_stop_order", str(e))
         return False
-    
+
 def get_current_price():
     """获取当前价格"""
     try:
@@ -1439,15 +1531,269 @@ def get_current_price():
     except Exception as e:
         logger.log_error("get_current_price", str(e))
         return 0
+    
+def verify_stop_loss_setting(signal, position_size, stop_loss_price):
+    """验证止损订单是否设置成功 - 增强版本"""
+    try:
+        # 等待一段时间让订单处理
+        time.sleep(2)
+        
+        # 获取未完成的算法订单
+        params = {
+            'instType': 'SWAP',
+            'algoOrdType': 'conditional'
+        }
+        
+        response = exchange.privateGetTradeOrdersAlgoPending(params)
+        
+        if response['code'] == '0' and response['data']:
+            for order in response['data']:
+                if order['instId'] == get_correct_inst_id():
+                    # 检查止损订单 - 根据方向匹配
+                    if signal == 'BUY':
+                        # 多头持仓的止损应该是卖出
+                        if order['side'] == 'sell' and 'slTriggerPx' in order:
+                            trigger_price = float(order['slTriggerPx'])
+                            if abs(trigger_price - stop_loss_price) < 0.1:  # 允许微小误差
+                                logger.log_info(f"✅ 止损订单验证成功: {stop_loss_price}")
+                                return True
+                    else:  # SELL
+                        # 空头持仓的止损应该是买入
+                        if order['side'] == 'buy' and 'slTriggerPx' in order:
+                            trigger_price = float(order['slTriggerPx'])
+                            if abs(trigger_price - stop_loss_price) < 0.1:
+                                logger.log_info(f"✅ 止损订单验证成功: {stop_loss_price}")
+                                return True
+        
+        logger.log_warning(f"⚠️ 止损订单验证失败，未找到匹配的止损单")
+        return False
+        
+    except Exception as e:
+        logger.log_error("stop_loss_verification", str(e))
+        return False
+
+def log_perpetual_order_details(side, amount, order_type, reduce_only=False, stop_loss=False, take_profit=False, stop_loss_price=None):
+    """记录永续合约订单详细信息 - 增强版本"""
+    try:
+        order_info = {
+            'symbol': TRADE_CONFIG.symbol,
+            'side': side,
+            'amount': amount,
+            'order_type': order_type,
+            'contract_type': 'PERPETUAL_SWAP',
+            'reduce_only': reduce_only,
+            'is_stop_loss': stop_loss,
+            'is_take_profit': take_profit,
+            'margin_mode': getattr(TRADE_CONFIG, 'margin_mode', 'isolated'),
+            'leverage': TRADE_CONFIG.leverage
+        }
+        
+        if stop_loss_price:
+            order_info['stop_loss_price'] = stop_loss_price
+            stop_loss_ratio = abs(stop_loss_price - get_current_price()) / get_current_price() * 100
+            order_info['stop_loss_ratio'] = f"{stop_loss_ratio:.2f}%"
+        
+        logger.log_info(f"🎯 永续合约订单详情:")
+        for key, value in order_info.items():
+            logger.log_info(f"   {key}: {value}")
+            
+    except Exception as e:
+        logger.log_error("log_perpetual_order_details", f"记录订单详情失败: {str(e)}")
+
+def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
+    """
+    基于K线结构计算止损价格 - 优化版本
+    """
+    try:
+        df = price_data['full_data']
+        current_price = price_data['price']
+        
+        # 计算ATR
+        atr = calculate_atr(df)
+        
+        if side == 'long':
+            # 多头止损：取支撑位和ATR止损中的较小值（更严格的止损）
+            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.98)
+            
+            # 基于ATR的止损
+            stop_loss_by_atr = current_price - (atr * 1.5)  # 1.5倍ATR
+            
+            # 选择较严格的止损
+            stop_loss_price = min(support_level, stop_loss_by_atr)
+            
+            # 确保止损不超过最大比例
+            max_stop_loss_price = current_price * (1 - max_stop_loss_ratio)
+            stop_loss_price = max(stop_loss_price, max_stop_loss_price)
+            
+            # 确保止损在合理范围内（不低于当前价格的2%）
+            min_stop_loss = current_price * 0.98
+            stop_loss_price = max(stop_loss_price, min_stop_loss)
+            
+        else:  # short
+            # 空头止损：取阻力位和ATR止损中的较大值（更严格的止损）
+            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.02)
+            
+            # 基于ATR的止损
+            stop_loss_by_atr = current_price + (atr * 1.5)
+            
+            # 选择较严格的止损
+            stop_loss_price = max(resistance_level, stop_loss_by_atr)
+            
+            # 确保止损不超过最大比例
+            max_stop_loss_price = current_price * (1 + max_stop_loss_ratio)
+            stop_loss_price = min(stop_loss_price, max_stop_loss_price)
+            
+            # 确保止损在合理范围内（不高于当前价格的2%）
+            max_stop_loss = current_price * 1.02
+            stop_loss_price = min(stop_loss_price, max_stop_loss)
+        
+        stop_loss_ratio = abs(stop_loss_price - current_price) / current_price * 100
+        logger.log_info(f"🎯 K线结构止损计算: {side}方向, 入场{current_price:.2f}, 止损{stop_loss_price:.2f} (距离{stop_loss_ratio:.2f}%)")
+        return stop_loss_price
+        
+    except Exception as e:
+        logger.log_error("stop_loss_calculation", str(e))
+        # 备用止损计算
+        if side == 'long':
+            return current_price * (1 - 0.02)  # 2%止损
+        else:
+            return current_price * (1 + 0.02)  # 2%止损
+
+def validate_and_adjust_prices(side, calculated_stop_loss, current_price, bid_price, ask_price):
+    """验证并调整价格参数"""
+    try:
+        # 验证止损价格
+        if side == 'buy':
+            # 多头：止损必须低于当前价格
+            if calculated_stop_loss >= current_price:
+                logger.log_warning(f"⚠️ 多头止损价格调整: {calculated_stop_loss:.2f} >= {current_price:.2f}")
+                calculated_stop_loss = current_price * 0.98
+                logger.log_info(f"🔄 调整后止损: {calculated_stop_loss:.2f}")
+            
+            # 计算限价单价格（确保高于卖一价）
+            limit_price = max(ask_price * 1.001, current_price * 1.001)
+            
+        else:  # sell
+            # 空头：止损必须高于当前价格
+            if calculated_stop_loss <= current_price:
+                logger.log_warning(f"⚠️ 空头止损价格调整: {calculated_stop_loss:.2f} <= {current_price:.2f}")
+                calculated_stop_loss = current_price * 1.02
+                logger.log_info(f"🔄 调整后止损: {calculated_stop_loss:.2f}")
+            
+            # 计算限价单价格（确保低于买一价）
+            limit_price = min(bid_price * 0.999, current_price * 0.999)
+        
+        logger.log_info(f"✅ 价格验证完成: 限价{limit_price:.2f}, 止损{calculated_stop_loss:.2f}")
+        return limit_price, calculated_stop_loss
+        
+    except Exception as e:
+        logger.log_error("price_validation", str(e))
+        # 备用价格计算
+        if side == 'buy':
+            return current_price * 1.001, current_price * 0.98
+        else:
+            return current_price * 0.999, current_price * 1.02
+
+def log_limit_order_params(order_type, params, limit_price, stop_loss_price, function_name=""):
+    """记录限价单参数到日志 - 永续合约专用"""
+    try:
+        # 隐藏敏感信息
+        safe_params = params.copy()
+        sensitive_keys = ['apiKey', 'secret', 'password', 'signature']
+        for key in sensitive_keys:
+            if key in safe_params:
+                safe_params[key] = '***'
+        
+        logger.log_info(f"📋 {function_name} - 限价{order_type}订单参数:")
+        logger.log_info(f"   限价价格: {limit_price:.2f}")
+        logger.log_info(f"   止损价格: {stop_loss_price:.2f}")
+        
+        # 计算止损距离
+        if order_type == "开仓" and 'stopLoss' in safe_params:
+            stop_loss_trigger = safe_params['stopLoss'].get('triggerPrice', stop_loss_price)
+            stop_loss_distance = abs(limit_price - stop_loss_trigger) / limit_price * 100
+            logger.log_info(f"   止损距离: {stop_loss_distance:.2f}%")
+        
+        for key, value in safe_params.items():
+            if key != 'stopLoss':  # 止损参数已经单独显示
+                logger.log_info(f"   {key}: {value}")
+            
+        # 特别显示止损参数
+        if 'stopLoss' in safe_params:
+            sl_params = safe_params['stopLoss']
+            logger.log_info(f"   止损参数:")
+            for sl_key, sl_value in sl_params.items():
+                logger.log_info(f"     {sl_key}: {sl_value}")
+                
+        # 特别标注订单类型
+        logger.log_info(f"   🔍 订单类型确认: 永续合约限价{order_type}")
+            
+    except Exception as e:
+        logger.log_error("log_limit_order_params", f"记录限价单参数失败: {str(e)}")
+
+def validate_stop_loss_for_order(side, stop_loss_price, current_price):
+    """验证止损价格是否符合订单规则"""
+    try:
+        if side == 'buy':
+            # 多头：止损价格必须低于当前价格
+            if stop_loss_price >= current_price:
+                logger.log_error("stop_loss_validation", 
+                               f"多头止损价格无效: {stop_loss_price:.2f} >= {current_price:.2f}")
+                # 自动调整为合理的止损价格
+                adjusted_stop_loss = current_price * 0.98
+                logger.log_warning(f"🔄 自动调整止损价格为: {adjusted_stop_loss:.2f}")
+                return adjusted_stop_loss
+            else:
+                return stop_loss_price
+        else:  # sell
+            # 空头：止损价格必须高于当前价格
+            if stop_loss_price <= current_price:
+                logger.log_error("stop_loss_validation", 
+                               f"空头止损价格无效: {stop_loss_price:.2f} <= {current_price:.2f}")
+                # 自动调整为合理的止损价格
+                adjusted_stop_loss = current_price * 1.02
+                logger.log_warning(f"🔄 自动调整止损价格为: {adjusted_stop_loss:.2f}")
+                return adjusted_stop_loss
+            else:
+                return stop_loss_price
+                
+    except Exception as e:
+        logger.log_error("stop_loss_validation", str(e))
+        # 备用：使用默认止损
+        if side == 'buy':
+            return current_price * 0.98
+        else:
+            return current_price * 1.02
+
+def calculate_limit_price(side, current_price, ticker):
+    """计算限价单价格"""
+    try:
+        if side == 'buy':
+            # 开多仓：使用卖一价或稍高价格确保成交
+            ask_price = ticker['ask']
+            limit_price = ask_price * 1.001  # 比卖一价高0.1%
+            logger.log_info(f"📊 多头限价单价格: {limit_price:.2f} (卖一价: {ask_price:.2f})")
+        else:  # sell
+            # 开空仓：使用买一价或稍低价格确保成交
+            bid_price = ticker['bid']
+            limit_price = bid_price * 0.999  # 比买一价低0.1%
+            logger.log_info(f"📊 空头限价单价格: {limit_price:.2f} (买一价: {bid_price:.2f})")
+        
+        return limit_price
+        
+    except Exception as e:
+        logger.log_error("limit_price_calculation", str(e))
+        # 备用计算：使用当前价格
+        return current_price
 
 def execute_intelligent_trade(signal_data, price_data):
-    """Execute intelligent trading - OKX version (supports same direction position increase/decrease)"""
+    """执行智能交易 - 限价单版本，开单同时设置止损"""
     global position
 
-    # add order tag
+    # 订单标签
     order_tag = create_order_tag()
 
-    # Add these checks at the beginning:
+    # 市场条件检查
     if not check_market_conditions():
         return
     if not check_trading_frequency():
@@ -1455,17 +1801,15 @@ def execute_intelligent_trade(signal_data, price_data):
     
     current_position = get_current_position()
 
-    # 获取风险管理配置
+    # 计算基于K线结构的止损
+    calculated_stop_loss = None
     risk_config = TRADE_CONFIG.get_risk_config()
     stop_loss_config = risk_config['stop_loss']
-
-    # 计算基于K线结构的止损 (修正缩进)
-    calculated_stop_loss = None
+    
     if signal_data['signal'] in ['BUY', 'SELL'] and stop_loss_config['kline_based_stop_loss']:
         current_price = price_data['price']
         side = 'long' if signal_data['signal'] == 'BUY' else 'short'
         
-        # 使用K线结构计算止损
         calculated_stop_loss = calculate_kline_based_stop_loss(
             side, 
             current_price, 
@@ -1473,250 +1817,197 @@ def execute_intelligent_trade(signal_data, price_data):
             stop_loss_config['max_stop_loss_ratio']
         )
         
-        # 更新信号中的止损价格
         signal_data['stop_loss'] = calculated_stop_loss
-        logger.log_info(f"📊 基于K线结构设置止损: {calculated_stop_loss:.2f}")
+        logger.log_info(f"📊 基于K线结构计算止损: {calculated_stop_loss:.2f}")
 
-    # Prevent frequent reversal logic remains unchanged
-    if current_position and signal_data['signal'] != 'HOLD':
-        current_side = current_position['side']  # 'long' or 'short'
-
-        if signal_data['signal'] == 'BUY':
-            new_side = 'long'
-        elif signal_data['signal'] == 'SELL':
-            new_side = 'short'
-        else:
-            new_side = None
-
-    # Calculate intelligent position
+    # 计算智能仓位
     position_size = calculate_intelligent_position(signal_data, price_data, current_position)
 
-    logger.log_info(f"Trading signal: {signal_data['signal']}")
-    logger.log_info(f"Confidence level: {signal_data['confidence']}")
-    logger.log_info(f"Intelligent position: {position_size:.2f} contracts")
-    logger.log_info(f"Reason: {signal_data['reason']}")
-    logger.log_info(f"Stop Loss: {signal_data['stop_loss']:.2f}")
-    logger.log_info(f"Take Profit: {signal_data['take_profit']:.2f}")
-    logger.log_info(f"Current position: {current_position}")
-
-    # Risk management
-    if signal_data['confidence'] == 'LOW' and not TRADE_CONFIG.test_mode:
-        logger.log_warning("⚠️ Low confidence signal, skipping execution")
-        return
+    logger.log_info(f"交易信号: {signal_data['signal']}")
+    logger.log_info(f"仓位大小: {position_size:.2f} 张合约")
 
     if TRADE_CONFIG.test_mode:
-        logger.log_info("Test mode - simulated trading only")
+        logger.log_info("测试模式 - 仅模拟交易")
         return
     
     try:
-        # Execute trading logic - supports same direction position increase/decrease
+        # 获取当前市场数据
+        ticker = exchange.fetch_ticker(TRADE_CONFIG.symbol)
+        current_price = ticker['last']
+        bid_price = ticker['bid']  # 买一价
+        ask_price = ticker['ask']  # 卖一价
+        
+        logger.log_info(f"📊 当前市场: 价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
+
+        # 验证和调整价格参数
+        if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
+            side = 'buy' if signal_data['signal'] == 'BUY' else 'sell'
+            limit_price, calculated_stop_loss = validate_and_adjust_prices(
+                side, calculated_stop_loss, current_price, bid_price, ask_price
+            )
+
+        # 执行交易逻辑 - 限价单同时设置止损
         if signal_data['signal'] == 'BUY':
+            # 检查是否有现有空头持仓，先平仓
             if current_position and current_position['side'] == 'short':
-                # First check if short position actually exists and quantity is correct
-                if current_position['size'] > 0:
-                    logger.log_info(f"Closing short position {current_position['size']:.2f} contracts and opening long position {position_size:.2f} contracts...")
-                    # Close short position
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'buy',
-                        current_position['size'],
-                        params={'reduceOnly': True, 'tag': order_tag}
-                    )
-                    time.sleep(1)
-                    # Open long position
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'buy',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-                else:
-                    logger.log_warning("⚠️ Detected short position but quantity is 0, directly opening long position")
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'buy',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-
-            elif current_position and current_position['side'] == 'long':
-                # Same direction, check if position adjustment needed
-                size_diff = position_size - current_position['size']
-
-                if abs(size_diff) >= 0.01:  # Adjustable difference exists
-                    if size_diff > 0:
-                        # Increase position
-                        add_size = round(size_diff, 2)
-                        logger.log_info(f"Long position increase {add_size:.2f} contracts (Current:{current_position['size']:.2f} → Target:{position_size:.2f})")
-                        exchange.create_market_order(
-                            TRADE_CONFIG.symbol,
-                            'buy',
-                            add_size,
-                            params={'tag': order_tag}
-                        )
-                    else:
-                        # Decrease position
-                        reduce_size = round(abs(size_diff), 2)
-                        logger.log_info(
-                            f"Long position decrease {reduce_size:.2f} contracts (Current:{current_position['size']:.2f} → Target:{position_size:.2f})")
-                        exchange.create_market_order(
-                            TRADE_CONFIG.symbol,
-                            'sell',
-                            reduce_size,
-                            params={'reduceOnly': True, 'tag': order_tag}
-                        )
-                else:
-                    logger.log_info(
-                        f"Existing long position, position appropriate maintaining status (Current:{current_position['size']:.2f}, Target:{position_size:.2f})")
-            else:
-                # Open long position when no position
-                logger.log_info(f"Opening long position {position_size:.2f} contracts...")
+                logger.log_info("🔄 平空仓，开多仓")
+                close_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag
+                }
+                log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
+                log_perpetual_order_details('buy', current_position['size'], 'market', reduce_only=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'buy',
-                    position_size,
-                    params={'tag': order_tag}
+                    current_position['size'],
+                    params=close_params
                 )
+                time.sleep(1)
+
+            # 使用限价单开多仓，同时设置止损
+            # 构建限价单参数，包含止损
+            open_params = {
+                'tag': order_tag,
+                'stopLoss': {
+                    'triggerPrice': calculated_stop_loss,
+                    'price': calculated_stop_loss,  # 止损触发后的执行价格
+                    'type': 'market'  # 止损触发后使用市价单
+                }
+            }
+            
+            # 调用限价单日志函数
+            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
+            log_perpetual_order_details('buy', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
+            
+            logger.log_info(f"🎯 限价开多仓: 价格{limit_price:.2f}, 止损{calculated_stop_loss:.2f}")
+            
+            # 创建限价开仓订单
+            exchange.create_limit_order(
+                TRADE_CONFIG.symbol,
+                'buy',
+                position_size,
+                limit_price,
+                params=open_params
+            )
 
         elif signal_data['signal'] == 'SELL':
+            # 检查是否有现有多头持仓，先平仓
             if current_position and current_position['side'] == 'long':
-                # First check if long position actually exists and quantity is correct
-                if current_position['size'] > 0:
-                    logger.log_warning(f"Closing long position {current_position['size']:.2f} contracts and opening short position {position_size:.2f} contracts...")
-                    # Close long position
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'sell',
-                        current_position['size'],
-                        params={'reduceOnly': True, 'tag': order_tag}
-                    )
-                    time.sleep(1)
-                    # Open short position
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'sell',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-                else:
-                    logger.log_warning("⚠️ Detected long position but quantity is 0, directly opening short position")
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'sell',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-
-            elif current_position and current_position['side'] == 'short':
-                # Same direction, check if position adjustment needed
-                size_diff = position_size - current_position['size']
-
-                if abs(size_diff) >= 0.01:  # Adjustable difference exists
-                    if size_diff > 0:
-                        # Increase position
-                        add_size = round(size_diff, 2)
-                        logger.log_warning(
-                            f"Short position increase {add_size:.2f} contracts (Current:{current_position['size']:.2f} → Target:{position_size:.2f})")
-                        exchange.create_market_order(
-                            TRADE_CONFIG.symbol,
-                            'sell',
-                            add_size,
-                            params={'tag': order_tag}
-                        )
-                    else:
-                        # Decrease position
-                        reduce_size = round(abs(size_diff), 2)
-                        logger.log_warning(
-                            f"Short position decrease {reduce_size:.2f} contracts (Current:{current_position['size']:.2f} → Target:{position_size:.2f})")
-                        exchange.create_market_order(
-                            TRADE_CONFIG.symbol,
-                            'buy',
-                            reduce_size,
-                            params={'reduceOnly': True, 'tag': order_tag}
-                        )
-                else:
-                    logger.log_info(
-                        f"Existing short position, position appropriate maintaining status (Current:{current_position['size']:.2f}, Target:{position_size:.2f})")
-            else:
-                # Open short position when no position
-                logger.log_info(f"Opening short position {position_size:.2f} contracts...")
+                logger.log_info("🔄 平多仓，开空仓")
+                close_params = {
+                    'reduceOnly': True,
+                    'tag': order_tag
+                }
+                log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
+                log_perpetual_order_details('sell', current_position['size'], 'market', reduce_only=True)
+                
                 exchange.create_market_order(
                     TRADE_CONFIG.symbol,
                     'sell',
-                    position_size,
-                    params={'tag': order_tag}
+                    current_position['size'],
+                    params=close_params
                 )
+                time.sleep(1)
+
+            # 使用限价单开空仓，同时设置止损
+            # 构建限价单参数，包含止损
+            open_params = {
+                'tag': order_tag,
+                'stopLoss': {
+                    'triggerPrice': calculated_stop_loss,
+                    'price': calculated_stop_loss,  # 止损触发后的执行价格
+                    'type': 'market'  # 止损触发后使用市价单
+                }
+            }
+            
+            # 调用限价单日志函数
+            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
+            log_perpetual_order_details('sell', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
+            
+            logger.log_info(f"🎯 限价开空仓: 价格{limit_price:.2f}, 止损{calculated_stop_loss:.2f}")
+            
+            exchange.create_limit_order(
+                TRADE_CONFIG.symbol,
+                'sell',
+                position_size,
+                limit_price,
+                params=open_params
+            )
 
         elif signal_data['signal'] == 'HOLD':
-            logger.log_info("Suggest observing, no trade execution")
+            logger.log_info("建议观望，不执行交易")
             return
 
-        logger.log_info("Intelligent trading executed successfully")
-        time.sleep(2)
-        position = get_current_position()
-        logger.log_info(f"Updated position: {position}")
+        logger.log_info("✅ 限价开仓订单提交成功")
         
-        # 在执行开仓后设置止损订单 (移动到这里，确保在交易执行后)
-        if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
-            # 等待订单执行完成
-            time.sleep(2)
-            
-            # 重新获取实际持仓信息
-            actual_position = get_current_position()
-            if actual_position:
-                # 使用实际持仓大小设置止损
-                actual_position_size = actual_position['size']
-                logger.log_info(f"📊 使用实际持仓大小设置止损: {actual_position_size:.2f} 张合约")
-                
-                # 设置止损订单
-                set_initial_stop_loss(signal_data['signal'], actual_position_size, calculated_stop_loss, price_data['price'])
-            else:
-                logger.log_warning("⚠️ 交易执行后未检测到持仓，无法设置止损")
-
-        # 检查多级止盈 (移动到这里，确保在交易执行后检查)
-        current_position = get_current_position()
-        if current_position:
-            profit_taking_signal = position_manager.check_profit_taking(current_position, price_data)
+        # 等待订单执行
+        time.sleep(3)
+        
+        # 检查多级止盈
+        actual_position = get_current_position()
+        if actual_position:
+            profit_taking_signal = position_manager.check_profit_taking(actual_position, price_data)
             if profit_taking_signal:
                 logger.log_info(f"🎯 执行多级止盈: {profit_taking_signal['description']}")
-                execute_profit_taking(current_position, profit_taking_signal, price_data)
-                position_manager.mark_level_executed(current_position, profit_taking_signal['level'])
+                execute_profit_taking(actual_position, profit_taking_signal, price_data)
+                position_manager.mark_level_executed(actual_position, profit_taking_signal['level'])
 
     except Exception as e:
         logger.log_error("trade_execution", str(e))
-
-        # If it's a position doesn't exist error, try to directly open new position
-        if "don't have any positions" in str(e):
-            logger.log_warning("Attempting to directly open new position...")
-            try:
-                if signal_data['signal'] == 'BUY':
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'buy',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-                elif signal_data['signal'] == 'SELL':
-                    exchange.create_market_order(
-                        TRADE_CONFIG.symbol,
-                        'sell',
-                        position_size,
-                        params={'tag': order_tag}
-                    )
-                logger.log_info("Direct position opening successful")
-                
-                # 直接开仓后也设置止损
-                if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
-                    time.sleep(2)
-                    actual_position = get_current_position()
-                    if actual_position:
-                        set_initial_stop_loss(signal_data['signal'], actual_position['size'], calculated_stop_loss, price_data['price'])
-                        
-            except Exception as e2:
-                logger.log_error("Direct position opening also failed", str(e2))
+        
+        # 如果限价单失败，尝试使用条件单
+        logger.log_warning("⚠️ 限价单失败，尝试使用条件单...")
+        try:
+            if signal_data['signal'] == 'BUY':
+                # 使用条件单开多仓
+                result = create_algo_order(
+                    inst_id=get_correct_inst_id(),
+                    side='buy',
+                    sz=position_size,
+                    trigger_price=ask_price * 0.999,  # 比卖一价稍低
+                    algo_order_type='conditional'
+                )
+                if result and calculated_stop_loss:
+                    # 设置止损单
+                    set_initial_stop_loss('BUY', position_size, calculated_stop_loss, current_price)
+                    
+            elif signal_data['signal'] == 'SELL':
+                # 使用条件单开空仓
+                result = create_algo_order(
+                    inst_id=get_correct_inst_id(),
+                    side='sell',
+                    sz=position_size,
+                    trigger_price=bid_price * 1.001,  # 比买一价稍高
+                    algo_order_type='conditional'
+                )
+                if result and calculated_stop_loss:
+                    # 设置止损单
+                    set_initial_stop_loss('SELL', position_size, calculated_stop_loss, current_price)
+                    
+            logger.log_info("✅ 条件单开仓成功")
+        except Exception as e2:
+            logger.log_error("fallback_order", f"备用订单也失败: {str(e2)}")
 
         import traceback
         traceback.print_exc()
+
+def debug_algo_order_api():
+    """调试算法订单API"""
+    try:
+        # 测试获取算法订单
+        params = {'instType': 'SWAP', 'algoOrdType': 'conditional'}
+        response = exchange.privateGetTradeOrdersAlgoPending(params)
+        logger.log_info(f"🔍 算法订单API测试: {response}")
+        
+        # 测试合约ID
+        inst_id = get_correct_inst_id()
+        logger.log_info(f"🔍 正确合约ID: {inst_id}")
+        
+    except Exception as e:
+        logger.log_error("api_debug", str(e))
+
 def analyze_with_deepseek_with_retry(price_data, max_retries=TRADE_CONFIG.max_retries):
     """DeepSeek analysis with retry"""
     for attempt in range(max_retries):
@@ -1894,6 +2185,257 @@ def health_check():
     
     return overall_status
 
+def close_position_due_to_trend_reversal(position, price_data, reason):
+    """因趋势反转而平仓"""
+    try:
+        order_tag = create_order_tag()
+        position_size = position['size']
+        
+        logger.log_warning(f"🔄 执行趋势反转平仓: {reason}")
+        
+        if position['side'] == 'long':
+            # 平多仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
+            log_perpetual_order_details('sell', position_size, 'market', reduce_only=True)
+            
+            if not TRADE_CONFIG.test_mode:
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'sell',
+                    position_size,
+                    params=close_params
+                )
+        else:  # short
+            # 平空仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
+            log_perpetual_order_details('buy', position_size, 'market', reduce_only=True)
+            
+            if not TRADE_CONFIG.test_mode:
+                exchange.create_market_order(
+                    TRADE_CONFIG.symbol,
+                    'buy',
+                    position_size,
+                    params=close_params
+                )
+        
+        logger.log_info("✅ 趋势反转平仓执行完成")
+        return False  # 表示持仓已平
+        
+    except Exception as e:
+        logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
+        return True  # 平仓失败，保持持仓
+
+def check_existing_stop_loss_orders(position):
+    """检查是否已有止损单"""
+    try:
+        params = {
+            'instType': 'SWAP',
+            'algoOrdType': 'conditional'
+        }
+        
+        response = exchange.privateGetTradeOrdersAlgoPending(params)
+        
+        if response['code'] == '0' and response['data']:
+            for order in response['data']:
+                if order['instId'] == get_correct_inst_id():
+                    # 根据持仓方向检查止损单
+                    if position['side'] == 'long' and order['side'] == 'sell':
+                        logger.log_info(f"✅ 找到多头止损单: {order.get('slTriggerPx', 'N/A')}")
+                        return True
+                    elif position['side'] == 'short' and order['side'] == 'buy':
+                        logger.log_info(f"✅ 找到空头止损单: {order.get('slTriggerPx', 'N/A')}")
+                        return True
+        
+        logger.log_warning("❌ 未找到匹配的止损单")
+        return False
+        
+    except Exception as e:
+        logger.log_error("check_existing_stop_loss", f"检查现有止损单失败: {str(e)}")
+        return False
+
+def ensure_stop_loss_setting(position, price_data, strict=False):
+    """确保持仓有止损设置，支持严格模式"""
+    try:
+        # 检查是否已有止损单
+        if check_existing_stop_loss_orders(position):
+            logger.log_info("✅ 持仓已有止损单设置")
+            return True
+        
+        logger.log_warning("⚠️ 持仓没有止损单，正在设置...")
+        
+        # 计算止损价格
+        current_price = price_data['price']
+        side = position['side']
+        
+        # 🆕 严格模式使用更紧的止损
+        max_ratio = TRADE_CONFIG.get_risk_config()['stop_loss']['max_stop_loss_ratio']
+        if strict:
+            max_ratio = max_ratio * 0.5  # 严格模式下止损减半
+            logger.log_info("🔒 严格止损模式: 使用更紧的止损距离")
+        
+        calculated_stop_loss = calculate_kline_based_stop_loss(
+            side, 
+            current_price, 
+            price_data,
+            max_ratio
+        )
+        
+        # 设置止损
+        if set_initial_stop_loss(
+            'BUY' if side == 'long' else 'SELL', 
+            position['size'], 
+            calculated_stop_loss, 
+            current_price
+        ):
+            stop_loss_ratio = abs(calculated_stop_loss - current_price) / current_price * 100
+            mode_text = "严格" if strict else "常规"
+            logger.log_info(f"✅ {mode_text}止损设置成功: 距离{stop_loss_ratio:.2f}%")
+            return True
+        else:
+            logger.log_error("ensure_stop_loss", "止损设置失败")
+            return False
+            
+    except Exception as e:
+        logger.log_error("ensure_stop_loss_setting", f"确保止损设置失败: {str(e)}")
+        return False
+
+def is_trend_reversal_strong(position_side, signal_side, price_data, signal_data):
+    """使用增强标准判断趋势是否强烈反转"""
+    try:
+        reversal_info = {
+            'reversed': False,
+            'strength': 'WEAK',
+            'reason': ''
+        }
+        
+        # 基础方向判断
+        if position_side == 'long' and signal_side == 'SELL':
+            direction_reversed = True
+        elif position_side == 'short' and signal_side == 'BUY':
+            direction_reversed = True
+        else:
+            direction_reversed = False
+            
+        if not direction_reversed:
+            return reversal_info
+        
+        # 🆕 增强的技术指标确认
+        tech = price_data['technical_data']
+        confirmation_count = 0
+        reasons = []
+        
+        # 1. RSI 背离确认
+        rsi = tech.get('rsi', 50)
+        if (position_side == 'long' and rsi > 70) or (position_side == 'short' and rsi < 30):
+            confirmation_count += 1
+            reasons.append("RSI in extreme zone")
+        
+        # 2. 移动平均线突破确认
+        price = price_data['price']
+        sma_20 = tech.get('sma_20', price)
+        if (position_side == 'long' and price < sma_20) or (position_side == 'short' and price > sma_20):
+            confirmation_count += 1
+            reasons.append("Price crossed key moving average")
+        
+        # 3. MACD 信号确认
+        macd = tech.get('macd', 0)
+        macd_signal = tech.get('macd_signal', 0)
+        if (position_side == 'long' and macd < macd_signal) or (position_side == 'short' and macd > macd_signal):
+            confirmation_count += 1
+            reasons.append("MACD shows reversal signal")
+        
+        # 4. 布林带位置确认
+        bb_position = tech.get('bb_position', 0.5)
+        if (position_side == 'long' and bb_position > 0.8) or (position_side == 'short' and bb_position < 0.2):
+            confirmation_count += 1
+            reasons.append("Price at Bollinger Band extreme")
+        
+        # 判断反转强度
+        if confirmation_count >= 3:
+            reversal_info.update({
+                'reversed': True,
+                'strength': 'STRONG',
+                'reason': f"Strong reversal confirmed by {confirmation_count} indicators: {', '.join(reasons)}"
+            })
+        elif confirmation_count >= 2:
+            reversal_info.update({
+                'reversed': True,
+                'strength': 'MEDIUM', 
+                'reason': f"Medium reversal confirmed by {confirmation_count} indicators: {', '.join(reasons)}"
+            })
+        elif direction_reversed and signal_data.get('confidence') == 'HIGH':
+            reversal_info.update({
+                'reversed': True,
+                'strength': 'MEDIUM',
+                'reason': "Direction reversed with high confidence signal"
+            })
+            
+        return reversal_info
+        
+    except Exception as e:
+        logger.log_error("trend_reversal_analysis", f"趋势反转分析失败: {str(e)}")
+        return {'reversed': False, 'strength': 'WEAK', 'reason': 'Analysis error'}
+
+def analyze_existing_position_on_startup():
+    """启动时分析现有持仓，使用增强的趋势判断标准"""
+    try:
+        current_position = get_current_position()
+        if not current_position:
+            logger.log_info("✅ 启动检查: 当前无持仓")
+            return True
+        
+        logger.log_warning(f"🔍 启动检查: 发现现有持仓 - {current_position['side']} {current_position['size']}张")
+        
+        # 获取当前市场数据
+        price_data = get_btc_ohlcv_enhanced()
+        if not price_data:
+            logger.log_warning("⚠️ 无法获取市场数据，暂时保持现有持仓")
+            return True
+        
+        # 使用DeepSeek分析当前趋势（包含增强的趋势反转判断）
+        signal_data = analyze_with_deepseek_with_retry(price_data)
+        if not signal_data:
+            logger.log_warning("⚠️ 无法获取分析信号，暂时保持现有持仓")
+            return True
+        
+        # 分析趋势是否反转 - 使用更严格的标准
+        position_side = current_position['side']
+        signal_side = signal_data['signal']
+        
+        logger.log_info(f"📊 持仓方向: {position_side}, 当前信号: {signal_side}")
+        
+        # 🆕 增强的趋势反转判断
+        trend_reversed = is_trend_reversal_strong(position_side, signal_side, price_data, signal_data)
+        
+        if trend_reversed['reversed']:
+            logger.log_warning(f"🔄 检测到强烈趋势反转信号: {trend_reversed['reason']}")
+            
+            # 根据反转强度决定是否平仓
+            if trend_reversed['strength'] == 'STRONG':
+                logger.log_info("🎯 强烈反转信号，执行平仓")
+                return close_position_due_to_trend_reversal(current_position, price_data, trend_reversed['reason'])
+            else:
+                logger.log_info("⚠️ 中等强度反转信号，设置严格止损继续观察")
+                ensure_stop_loss_setting(current_position, price_data, strict=True)
+                return True
+        else:
+            # 趋势未反转，确保有止损设置
+            logger.log_info("✅ 趋势未反转，继续持有持仓")
+            ensure_stop_loss_setting(current_position, price_data)
+            return True
+            
+    except Exception as e:
+        logger.log_error("startup_position_analysis", f"启动持仓分析失败: {str(e)}")
+        return True  # 出错时保持现状
+
 def log_performance_metrics():
     """Log performance metrics."""
     if not signal_history:
@@ -1916,6 +2458,10 @@ def log_performance_metrics():
 
 def main():
     logger.log_info("BTC/USDT OKX Automated Trading Bot Started!")
+    
+    # 添加API调试
+    logger.log_info("🔍 Testing API connectivity...")
+    debug_algo_order_api()
 
     # 🆕 先检查当前仓位模式
     current_mode = check_current_margin_mode()
@@ -1951,6 +2497,14 @@ def main():
     # 验证保证金模式设置
     if not verify_margin_mode():
         logger.log_warning("⚠️ 保证金模式验证失败，可能需要手动检查")
+
+    # 🆕 启动时持仓分析 - 新增的关键步骤
+    logger.log_info("🔍 执行启动时持仓分析...")
+    position_handled = analyze_existing_position_on_startup()
+    if not position_handled:
+        logger.log_info("🔄 现有持仓已处理，等待下一次分析周期")
+    else:
+        logger.log_info("✅ 启动持仓分析完成")
     
     # 🆕 在健康检查前先获取一次数据
     logger.log_info("🔄 Initial data fetch...")
