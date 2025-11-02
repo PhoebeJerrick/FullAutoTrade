@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 
 class TradingLogger:
-    def __init__(self, log_file='trading.log', log_level=logging.INFO):
+    def __init__(self, log_file='../Output/trading.log', log_level=logging.INFO):
         self.log_file = log_file
         self.setup_logging(log_level)
     
@@ -18,14 +18,14 @@ class TradingLogger:
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         
-        # Create formatter
+        # Create formatter - 修改格式
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            '%(asctime)s-%(name)s-%(levelname)s-%(message)s',  # 移除空格和冒号，使用连字符分隔
+            datefmt='%Y%m%d-%H%M%S'  # 修改日期格式为 YYYYMMDD-HHMMSS
         )
         
-        # Setup logger
-        self.logger = logging.getLogger('TradingBot')
+        # Setup logger - 修改记录器名称
+        self.logger = logging.getLogger('TradeBot')  # 改为 TradeBot
         self.logger.setLevel(log_level)
         
         # File handler
@@ -63,19 +63,19 @@ class TradingLogger:
     
     def log_error(self, context, error):
         """Log error messages with context"""
-        self.logger.error(f"ERROR in {context}: {error}")
+        self.logger.error(f"{context}: {error}")
     
     def log_warning(self, message):
         """Log warning messages"""
-        self.logger.warning(f"WARNING: {message}")
+        self.logger.warning(f"{message}")
     
     def log_info(self, message):
         """Log general info messages"""
-        self.logger.info(f"INFO: {message}")
+        self.logger.info(f"{message}")
     
     def log_debug(self, message):
         """Log debug messages"""
-        self.logger.debug(f"DEBUG: {message}")
+        self.logger.debug(f"{message}")
     
     def log_performance(self, metrics_dict):
         """Log performance metrics"""
