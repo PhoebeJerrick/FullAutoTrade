@@ -1,5 +1,8 @@
+[file name]: trade_logger.py
+[file content begin]
 import logging
 import os
+import sys
 from datetime import datetime
 
 class TradingLogger:
@@ -40,30 +43,31 @@ class TradingLogger:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
     
+    def _format_message(self, message):
+        """内部方法：获取当前品种并格式化消息"""
+        try:
+            # 尝试从 ds_perfect 模块获取 CURRENT_SYMBOL
+            from ds_perfect import CURRENT_SYMBOL
+            if CURRENT_SYMBOL:
+                # 仅保留基础货币（如 BTC, ETH）作为日志前缀
+                base_asset = CURRENT_SYMBOL.split('/')[0]
+                return f"[{base_asset}] {message}"
+        except (ImportError, AttributeError):
+            # 模块未加载或变量不存在
+            pass
+        return message
+
     def log_signal(self, signal_data, price_data):
         """Log trading signals"""
-        self.logger.info(
+        message = (
             f"SIGNAL: {signal_data['signal']} | "
             f"Confidence: {signal_data['confidence']} | "
             f"Price: ${price_data['price']:.2f} | "
             f"Reason: {signal_data.get('reason', 'N/A')}"
         )
+        self.logger.info(self._format_message(message))
 
-    def _format_message(self, message):
-        """内部方法：获取当前品种并格式化消息"""
-        try:
-            # 尝试从 ds_perfect 模块获取 CURRENT_SYMBOL
-            current_symbol = sys.modules['ds_perfect'].CURRENT_SYMBOL
-            if current_symbol:
-                # 仅保留基础货币（如 BTC, ETH）作为日志前缀
-                base_asset = current_symbol.split('/')[0]
-                return f"[{base_asset}] {message}"
-        except (KeyError, AttributeError):
-            # 模块未加载或变量不存在
-            pass
-        return message
-
-def log_trade(self, order_id, side, amount, price, status, details="", success=True):
+    def log_trade(self, order_id, side, amount, price, status, details="", success=True):
         """Log trade messages"""
         message = f"TRADE | ID: {order_id} | Side: {side} | Amount: {amount} | Price: {price} | Status: {status}"
         if details:
@@ -118,3 +122,4 @@ logger = TradingLogger()
 
 # OLD: print(f"Trade execution failed: {e}")
 # NEW: logger.log_error("trade_execution", str(e))
+[file content end]
