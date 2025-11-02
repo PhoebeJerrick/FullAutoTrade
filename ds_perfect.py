@@ -554,51 +554,6 @@ def get_market_trend(df):
         logger.log_error("trend_analysis", str(e))
         return {}
     
-def verify_margin_mode():
-    """验证保证金模式设置是否正确"""
-    try:
-        positions = exchange.fetch_positions([TRADE_CONFIG.symbol])
-        target_mode = getattr(TRADE_CONFIG, 'margin_mode', 'isolated')
-        
-        for pos in positions:
-            if pos['symbol'] == TRADE_CONFIG.symbol:
-                current_mode = pos.get('mgnMode', 'unknown')
-                logger.log_info(f"📊 当前持仓保证金模式: {current_mode}, 目标模式: {target_mode}")
-                
-                if current_mode == target_mode:
-                    logger.log_info(f"✅ 保证金模式验证成功: {current_mode}")
-                    return True
-                else:
-                    logger.log_warning(f"⚠️ 保证金模式不匹配: 当前={current_mode}, 目标={target_mode}")
-                    # 尝试重新设置
-                    try:
-                        exchange.set_margin_mode(target_mode, TRADE_CONFIG.symbol)
-                        logger.log_info(f"🔄 重新设置保证金模式为: {target_mode}")
-                        return True
-                    except Exception as e:
-                        logger.log_error("margin_mode_recovery", str(e))
-                        return False
-        
-        # 如果没有持仓，检查账户配置
-        try:
-            response = exchange.private_get_account_config()
-            if response and response.get('code') == '0' and response.get('data'):
-                for config in response['data']:
-                    if config.get('instType') == 'SWAP':
-                        mgn_mode = config.get('mgnMode', 'unknown')
-                        logger.log_info(f"📊 账户配置保证金模式: {mgn_mode}")
-                        if mgn_mode == target_mode:
-                            return True
-        except Exception as e:
-            logger.log_warning(f"账户配置检查失败: {e}")
-            
-        logger.log_info(f"✅ 无持仓，假设保证金模式设置正确: {target_mode}")
-        return True
-        
-    except Exception as e:
-        logger.log_error("margin_mode_verification", str(e))
-        return False
-
 def get_correct_inst_id(symbol: str):
     """获取正确的合约ID"""
     # 对于 BTC/USDT:USDT，正确的instId是 BTC-USDT-SWAP
@@ -985,60 +940,7 @@ def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
         return wrapper
     return decorator
 
-@retry_on_failure(max_retries=TRADE_CONFIG.max_retries, delay=TRADE_CONFIG.retry_delay)
-def get_btc_ohlcv_enhanced():
-    """Enhanced version: Get BTC K-line data and calculate technical indicators"""
-    try:
-        # Get K-line data
-        ohlcv = fetch_ohlcv_with_retry()
 
-        if ohlcv is None:
-            logger.log_warning("❌ Failed to fetch K-line data")
-            return None
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-        # Calculate technical indicators
-        df = calculate_technical_indicators(df)
-
-        current_data = df.iloc[-1]
-        previous_data = df.iloc[-2]
-
-        # Get technical analysis data
-        trend_analysis = get_market_trend(df)
-        levels_analysis = get_support_resistance_levels(df)
-
-        return {
-            'price': current_data['close'],
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'high': current_data['high'],
-            'low': current_data['low'],
-            'volume': current_data['volume'],
-            'timeframe': TRADE_CONFIG.timeframe,
-            'price_change': ((current_data['close'] - previous_data['close']) / previous_data['close']) * 100,
-            'kline_data': df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records'),
-            'technical_data': {
-                'sma_5': current_data.get('sma_5', 0),
-                'sma_20': current_data.get('sma_20', 0),
-                'sma_50': current_data.get('sma_50', 0),
-                'rsi': current_data.get('rsi', 0),
-                'macd': current_data.get('macd', 0),
-                'macd_signal': current_data.get('macd_signal', 0),
-                'macd_histogram': current_data.get('macd_histogram', 0),
-                'bb_upper': current_data.get('bb_upper', 0),
-                'bb_lower': current_data.get('bb_lower', 0),
-                'bb_position': current_data.get('bb_position', 0),
-                'volume_ratio': current_data.get('volume_ratio', 0)
-            },
-            'trend_analysis': trend_analysis,
-            'levels_analysis': levels_analysis,
-            'full_data': df
-        }
-    except Exception as e:
-        logger.log_error("kline_data", str(e))
-        return None
-    
 def add_to_signal_history(signal_data):
     global signal_history
     
@@ -1605,46 +1507,6 @@ def get_current_price(symbol: str): # 新增 symbol 参数
         logger.log_error("current_price", str(e))
         return None
     
-def verify_stop_loss_setting(signal, position_size, stop_loss_price):
-    """验证止损订单是否设置成功 - 增强版本"""
-    try:
-        # 等待一段时间让订单处理
-        time.sleep(2)
-        
-        # 获取未完成的算法订单
-        params = {
-            'instType': 'SWAP',
-            'algoOrdType': 'conditional'
-        }
-        
-        response = exchange.privateGetTradeOrdersAlgoPending(params)
-        
-        if response['code'] == '0' and response['data']:
-            for order in response['data']:
-                if order['instId'] == get_correct_inst_id():
-                    # 检查止损订单 - 根据方向匹配
-                    if signal == 'BUY':
-                        # 多头持仓的止损应该是卖出
-                        if order['side'] == 'sell' and 'slTriggerPx' in order:
-                            trigger_price = float(order['slTriggerPx'])
-                            if abs(trigger_price - stop_loss_price) < 0.1:  # 允许微小误差
-                                logger.log_info(f"✅ 止损订单验证成功: {stop_loss_price}")
-                                return True
-                    else:  # SELL
-                        # 空头持仓的止损应该是买入
-                        if order['side'] == 'buy' and 'slTriggerPx' in order:
-                            trigger_price = float(order['slTriggerPx'])
-                            if abs(trigger_price - stop_loss_price) < 0.1:
-                                logger.log_info(f"✅ 止损订单验证成功: {stop_loss_price}")
-                                return True
-        
-        logger.log_warning(f"⚠️ 止损订单验证失败，未找到匹配的止损单")
-        return False
-        
-    except Exception as e:
-        logger.log_error("stop_loss_verification", str(e))
-        return False
-
 def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
     """
     基于K线结构计算止损价格 - 优化版本
@@ -1739,42 +1601,6 @@ def validate_and_adjust_prices(side, calculated_stop_loss, current_price, bid_pr
         else:
             return current_price * 0.999, current_price * 1.02
 
-def log_limit_order_params(order_type, params, limit_price, stop_loss_price, function_name=""):
-    """记录限价单参数到日志 - 永续合约专用"""
-    try:
-        # 隐藏敏感信息
-        safe_params = params.copy()
-        sensitive_keys = ['apiKey', 'secret', 'password', 'signature']
-        for key in sensitive_keys:
-            if key in safe_params:
-                safe_params[key] = '***'
-        
-        logger.log_info(f"📋 {function_name} - 限价{order_type}订单参数:")
-        logger.log_info(f"   限价价格: {limit_price:.2f}")
-        logger.log_info(f"   止损价格: {stop_loss_price:.2f}")
-        
-        # 计算止损距离
-        if order_type == "开仓" and 'stopLoss' in safe_params:
-            stop_loss_trigger = safe_params['stopLoss'].get('triggerPrice', stop_loss_price)
-            stop_loss_distance = abs(limit_price - stop_loss_trigger) / limit_price * 100
-            logger.log_info(f"   止损距离: {stop_loss_distance:.2f}%")
-        
-        for key, value in safe_params.items():
-            if key != 'stopLoss':  # 止损参数已经单独显示
-                logger.log_info(f"   {key}: {value}")
-            
-        # 特别显示止损参数
-        if 'stopLoss' in safe_params:
-            sl_params = safe_params['stopLoss']
-            logger.log_info(f"   止损参数:")
-            for sl_key, sl_value in sl_params.items():
-                logger.log_info(f"     {sl_key}: {sl_value}")
-                
-        # 特别标注订单类型
-        logger.log_info(f"   🔍 订单类型确认: 永续合约限价{order_type}")
-            
-    except Exception as e:
-        logger.log_error("log_limit_order_params", f"记录限价单参数失败: {str(e)}")
 
 def validate_stop_loss_for_order(side, stop_loss_price, current_price):
     """验证止损价格是否符合订单规则"""
@@ -1930,7 +1756,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 }
             }
             
-            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
             log_perpetual_order_details('buy', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
             
             # 🆕 合并开仓提交日志
@@ -1976,7 +1801,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 }
             }
             
-            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
             log_perpetual_order_details('sell', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
             
             # 🆕 合并开仓提交日志
@@ -2051,81 +1875,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         import traceback
         traceback.print_exc()
 
-def debug_algo_order_api():
-    """调试算法订单API"""
-    try:
-        # 测试获取算法订单
-        params = {'instType': 'SWAP', 'algoOrdType': 'conditional'}
-        response = exchange.privateGetTradeOrdersAlgoPending(params)
-        logger.log_info(f"🔍 算法订单API测试: {response}")
-        
-        # 测试合约ID
-        inst_id = get_correct_inst_id()
-        logger.log_info(f"🔍 正确合约ID: {inst_id}")
-        
-    except Exception as e:
-        logger.log_error("api_debug", str(e))
-
-def analyze_with_deepseek_with_retry(price_data, max_retries=TradingConfig.max_retries):
-    """DeepSeek analysis with retry"""
-    for attempt in range(max_retries):
-        try:
-            signal_data = analyze_with_deepseek(price_data)
-            if signal_data and not signal_data.get('is_fallback', False):
-                return signal_data
-
-            logger.log_warning(f"Attempt {attempt + 1} failed, retrying...")
-            time.sleep(1)
-
-        except Exception as e:
-            logger.log_error("DeepSeek analysis failed", str(e))
-            if attempt == max_retries - 1:
-                return create_fallback_signal(price_data)
-            time.sleep(1)
-
-    return create_fallback_signal(price_data)
-
-def wait_for_next_period():
-    """Wait until next 15-minute mark"""
-    now = datetime.now()
-    current_minute = now.minute
-    current_second = now.second
-
-    # Calculate next mark time (00, 15, 30, 45 minutes)
-    next_period_minute = ((current_minute // 15) + 1) * 15
-    if next_period_minute == 60:
-        next_period_minute = 0
-
-    # Calculate total seconds to wait
-    if next_period_minute > current_minute:
-        minutes_to_wait = next_period_minute - current_minute
-    else:
-        minutes_to_wait = 60 - current_minute + next_period_minute
-
-    seconds_to_wait = minutes_to_wait * 60 - current_second
-
-    # If the waiting time exceeds 10 minutes, reduce the waiting time to the next 5-minute interval.
-    if seconds_to_wait > 600:  # 10 minutes
-        logger.log_warning(f"🕒 Long wait detected ({seconds_to_wait}s), adjusting to shorter interval...")
-        # Adjust to wait until the next 5-minute mark
-        next_5min = ((current_minute // 5) + 1) * 5
-        if next_5min == 60:
-            next_5min = 0
-        minutes_to_wait = next_5min - current_minute
-        if minutes_to_wait < 0:
-            minutes_to_wait += 60
-        seconds_to_wait = minutes_to_wait * 60 - current_second
-
-    # Display friendly waiting time
-    display_minutes = int(seconds_to_wait // 60)
-    display_seconds = int(seconds_to_wait % 60)
-
-    if display_minutes > 0:
-        logger.log_info(f"🕒 Waiting {display_minutes} minutes {display_seconds} seconds until mark...")
-    else:
-        logger.log_info(f"🕒 Waiting {display_seconds} seconds until mark...")
-
-    return seconds_to_wait
 
 def filter_signal(signal_data, price_data):
     # If the signal is to buy, but the RSI is above 70, then change it to hold.
@@ -2286,26 +2035,7 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
         logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
         return True  # 平仓失败，保持持仓
 
-def check_existing_stop_loss_orders_alternative(symbol: str, position: dict):
-    """备用方法检查止损单 - 通过持仓信息"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        # 获取持仓信息，看是否有止损价格
-        positions = exchange.fetch_positions([config.symbol])
-        
-        for pos in positions:
-            if pos['symbol'] == config.symbol and float(pos.get('contracts', 0)) > 0:
-                # 检查持仓中是否有止损价格信息
-                if pos.get('stopLossPrice') or pos.get('liquidationPrice'):
-                    stop_price = pos.get('stopLossPrice') or pos.get('liquidationPrice')
-                    logger.log_info(f"✅ 通过持仓信息找到止损设置: {stop_price}")
-                    return True
-        
-        return False
-        
-    except Exception as e:
-        logger.log_error("alternative_stop_check", f"备用检查方法失败: {str(e)}")
-        return False
+
 
 def check_existing_positions_on_startup():
     """启动时检查所有交易品种的现有持仓"""
@@ -2533,30 +2263,6 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
         logger.log_error(f"close_position_{symbol}", f"平仓失败: {str(e)}")
         return False
 
-def check_existing_stop_loss_simple(symbol: str, position: dict):
-    """简化检查 - 只检查基本订单状态"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        # 获取最近订单记录
-        logger.log_info("🔄 尝试使用fetch_open_orders检查...")
-        open_orders = exchange.fetch_open_orders(config.symbol)
-
-        logger.log_info(f"📡 fetch_open_orders响应: 找到{len(open_orders)}个订单")
-        
-        for order in open_orders:
-            # 记录订单详情
-            logger.log_info(f"📋 订单详情: {order}")
-            # 检查是否有未完成的止损相关订单
-            if (order['status'] == 'open' and 
-                ('stop' in order['type'] or 'stop' in order.get('id', '') or 
-                 'stop' in str(order.get('info', {})).lower())):
-                logger.log_info(f"✅ 通过订单记录找到止损单: {order['id']}")
-                return True
-        
-        return False
-    except Exception as e:
-        logger.log_error("simple_stop_check", f"简化检查失败: {str(e)}")
-        return True  # 保守处理
 
 def check_existing_stop_loss_orders(symbol: str, position: dict) -> bool:
     """检查是否已有止损订单 - 增强版本"""
@@ -2619,171 +2325,6 @@ def check_existing_stop_loss_alternative(symbol: str, position: dict) -> bool:
         logger.log_error(f"alternative_stop_check_{symbol}", f"备用检查方法失败: {str(e)}")
         return False
 
-def ensure_stop_loss_setting(position, price_data, strict=False):
-    """确保持仓有止损设置 - 简化版本"""
-    try:
-        # 直接检查止损单状态，不重复记录
-        has_stop_loss = check_existing_stop_loss_orders(position)
-        
-        if has_stop_loss:
-            logger.log_info("✅ 止损保护已确认")
-            return True
-        else:
-            logger.log_warning("⚠️ 未检测到止损单")
-            # 这里可以添加设置止损的逻辑
-            return False
-            
-    except Exception as e:
-        logger.log_error("ensure_stop_loss_setting", f"止损设置检查失败: {str(e)}")
-        return True
-
-def is_trend_reversal_strong(position_side, signal_side, price_data, signal_data):
-    """使用增强标准判断趋势是否强烈反转"""
-    try:
-        reversal_info = {
-            'reversed': False,
-            'strength': 'WEAK',
-            'reason': ''
-        }
-        
-        # 基础方向判断
-        if position_side == 'long' and signal_side == 'SELL':
-            direction_reversed = True
-        elif position_side == 'short' and signal_side == 'BUY':
-            direction_reversed = True
-        else:
-            direction_reversed = False
-            
-        if not direction_reversed:
-            return reversal_info
-        
-        # 🆕 增强的技术指标确认
-        tech = price_data['technical_data']
-        confirmation_count = 0
-        reasons = []
-        
-        # 1. RSI 背离确认
-        rsi = tech.get('rsi', 50)
-        if (position_side == 'long' and rsi > 70) or (position_side == 'short' and rsi < 30):
-            confirmation_count += 1
-            reasons.append("RSI in extreme zone")
-        
-        # 2. 移动平均线突破确认
-        price = price_data['price']
-        sma_20 = tech.get('sma_20', price)
-        if (position_side == 'long' and price < sma_20) or (position_side == 'short' and price > sma_20):
-            confirmation_count += 1
-            reasons.append("Price crossed key moving average")
-        
-        # 3. MACD 信号确认
-        macd = tech.get('macd', 0)
-        macd_signal = tech.get('macd_signal', 0)
-        if (position_side == 'long' and macd < macd_signal) or (position_side == 'short' and macd > macd_signal):
-            confirmation_count += 1
-            reasons.append("MACD shows reversal signal")
-        
-        # 4. 布林带位置确认
-        bb_position = tech.get('bb_position', 0.5)
-        if (position_side == 'long' and bb_position > 0.8) or (position_side == 'short' and bb_position < 0.2):
-            confirmation_count += 1
-            reasons.append("Price at Bollinger Band extreme")
-        
-        # 判断反转强度
-        if confirmation_count >= 3:
-            reversal_info.update({
-                'reversed': True,
-                'strength': 'STRONG',
-                'reason': f"Strong reversal confirmed by {confirmation_count} indicators: {', '.join(reasons)}"
-            })
-        elif confirmation_count >= 2:
-            reversal_info.update({
-                'reversed': True,
-                'strength': 'MEDIUM', 
-                'reason': f"Medium reversal confirmed by {confirmation_count} indicators: {', '.join(reasons)}"
-            })
-        elif direction_reversed and signal_data.get('confidence') == 'HIGH':
-            reversal_info.update({
-                'reversed': True,
-                'strength': 'MEDIUM',
-                'reason': "Direction reversed with high confidence signal"
-            })
-            
-        return reversal_info
-        
-    except Exception as e:
-        logger.log_error("trend_reversal_analysis", f"趋势反转分析失败: {str(e)}")
-        return {'reversed': False, 'strength': 'WEAK', 'reason': 'Analysis error'}
-
-def analyze_existing_position_on_startup():
-    """启动时分析现有持仓 - 优化版本"""
-    try:
-        current_position = get_current_position(symbol)
-        if not current_position:
-            logger.log_info("✅ 启动检查: 当前无持仓")
-            return True
-        
-        logger.log_warning(f"🔍 启动检查: 发现现有持仓 - {current_position['side']} {current_position['size']}张")
-        
-        # 只检查一次止损单状态
-        has_stop_loss = check_existing_stop_loss_orders(current_position)
-        
-        if has_stop_loss:
-            logger.log_info("✅ 持仓已有止损保护")
-            # 有止损保护的情况下，只做基本的趋势分析
-            price_data = get_btc_ohlcv_enhanced()
-            if price_data:
-                signal_data = analyze_with_deepseek_with_retry(price_data)
-                if signal_data:
-                    position_side = current_position['side']
-                    signal_side = signal_data['signal']
-                    
-                    # 只在信号强烈反转时考虑平仓
-                    if (position_side == 'long' and signal_side == 'SELL' and signal_data.get('confidence') == 'HIGH') or \
-                       (position_side == 'short' and signal_side == 'BUY' and signal_data.get('confidence') == 'HIGH'):
-                        logger.log_warning("🎯 高置信度强烈反转信号，考虑平仓")
-                        # 这里可以添加平仓逻辑
-                    else:
-                        logger.log_info("✅ 趋势一致或无强烈反转信号，继续持有")
-            return True
-        else:
-            logger.log_warning("⚠️ 未检测到止损单，进行完整分析...")
-            # 原有的完整分析逻辑
-            price_data = get_btc_ohlcv_enhanced()
-            if not price_data:
-                logger.log_warning("⚠️ 无法获取市场数据，暂时保持现有持仓")
-                return True
-            
-            signal_data = analyze_with_deepseek_with_retry(price_data)
-            if not signal_data:
-                logger.log_warning("⚠️ 无法获取分析信号，暂时保持现有持仓")
-                return True
-            
-            # 分析趋势是否反转
-            position_side = current_position['side']
-            signal_side = signal_data['signal']
-            
-            logger.log_info(f"📊 持仓方向: {position_side}, 当前信号: {signal_side}")
-            
-            trend_reversed = is_trend_reversal_strong(position_side, signal_side, price_data, signal_data)
-            
-            if trend_reversed['reversed']:
-                logger.log_warning(f"🔄 检测到趋势反转信号: {trend_reversed['reason']}")
-                
-                if trend_reversed['strength'] == 'STRONG':
-                    logger.log_info("🎯 强烈反转信号，执行平仓")
-                    return close_position_due_to_trend_reversal(current_position, price_data, trend_reversed['reason'])
-                else:
-                    logger.log_info("⚠️ 中等强度反转信号，设置止损继续观察")
-                    # 这里设置止损
-                    return True
-            else:
-                logger.log_info("✅ 趋势未反转，设置止损继续持有")
-                # 这里设置止损
-                return True
-                
-    except Exception as e:
-        logger.log_error("startup_position_analysis", f"启动持仓分析失败: {str(e)}")
-        return True
 
 def log_performance_metrics(symbol: str):
     """Log performance metrics."""
