@@ -2221,12 +2221,18 @@ def check_existing_stop_loss_simple(position):
     """简化检查 - 只检查基本订单状态"""
     try:
         # 获取最近订单记录
-        orders = exchange.fetch_orders(TRADE_CONFIG.symbol, limit=10)
+        logger.log_info("🔄 尝试使用fetch_open_orders检查...")
+        open_orders = exchange.fetch_open_orders(TRADE_CONFIG.symbol)
         
-        for order in orders:
+        logger.log_info(f"📡 fetch_open_orders响应: 找到{len(open_orders)}个订单")
+        
+        for order in open_orders:
+            # 记录订单详情
+            logger.log_info(f"📋 订单详情: {order}")
             # 检查是否有未完成的止损相关订单
             if (order['status'] == 'open' and 
-                ('stop' in order['type'] or 'stop' in order['id'] or 'stop' in order['info'].get('algoOrdType', ''))):
+                ('stop' in order['type'] or 'stop' in order.get('id', '') or 
+                 'stop' in str(order.get('info', {})).lower())):
                 logger.log_info(f"✅ 通过订单记录找到止损单: {order['id']}")
                 return True
         
@@ -2235,9 +2241,8 @@ def check_existing_stop_loss_simple(position):
         logger.log_error("simple_stop_check", f"简化检查失败: {str(e)}")
         return True  # 保守处理
 
-
 def check_existing_stop_loss_orders(position):
-    """检查是否已有止损单 - 最终修复版本"""
+    """检查是否已有止损单 - 添加详细API日志"""
     try:
         # 使用更简单的参数，避免ordType错误
         params = {
@@ -2246,7 +2251,17 @@ def check_existing_stop_loss_orders(position):
         }
         
         logger.log_info("🔍 检查现有算法订单...")
+        
+        # 记录原始请求参数
+        logger.log_info(f"📡 API请求参数: {params}")
+        logger.log_info(f"📡 API端点: /api/v5/trade/orders-algo-pending")
+        logger.log_info(f"📡 请求方法: GET")
+        
+        # 执行API调用
         response = exchange.privateGetTradeOrdersAlgoPending(params)
+        
+        # 记录完整响应
+        logger.log_info(f"📡 API完整响应: {response}")
         
         if response['code'] == '0':
             inst_id = get_correct_inst_id()
@@ -2255,7 +2270,7 @@ def check_existing_stop_loss_orders(position):
             for order in response.get('data', []):
                 if order['instId'] == inst_id:
                     found_orders.append(order)
-                    logger.log_info(f"📋 找到算法订单: {order.get('algoId', 'N/A')} - {order.get('side', 'N/A')}")
+                    logger.log_info(f"📋 找到算法订单: {order}")
             
             # 根据持仓方向筛选
             for order in found_orders:
@@ -2289,7 +2304,7 @@ def check_existing_stop_loss_orders(position):
             # 其他错误时保守处理
             logger.log_warning("⚠️ 检查止损单失败，假设已有止损单")
             return True
-
+        
 def ensure_stop_loss_setting(position, price_data, strict=False):
     """确保持仓有止损设置 - 增强版本"""
     try:
