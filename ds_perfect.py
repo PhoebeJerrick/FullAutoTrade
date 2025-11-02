@@ -612,6 +612,19 @@ def get_correct_inst_id(symbol: str):
         # 通用处理
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
 
+def log_api_response(response, function_name=""):
+    """记录API响应"""
+    try:
+        if 'code' in response:
+            if response['code'] == '0':
+                logger.log_info(f"✅ {function_name} API成功: {response.get('msg', 'Success')}")
+            else:
+                logger.log_error(f"{function_name}_api", f"API错误: {response.get('msg', 'Unknown error')}")
+        else:
+            logger.log_warning(f"⚠️ {function_name} 未知API响应格式: {response}")
+    except Exception as e:
+        logger.log_error("log_api_response", f"记录API响应失败: {str(e)}")
+
 def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str], algo_order_type='conditional'):
     """创建算法订单 - 永续合约条件单（不取消现有订单）"""
     config = SYMBOL_CONFIGS[symbol]
@@ -891,6 +904,62 @@ def fetch_ohlcv_with_retry(symbol: str,max_retries=None):
             time.sleep(1)
     return None
 
+def fetch_ohlcv(symbol: str):
+    """获取指定交易品种的K线数据"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        ohlcv = fetch_ohlcv_with_retry(symbol)
+        
+        if ohlcv is None:
+            logger.log_warning(f"❌ Failed to fetch K-line data for {symbol}")
+            return None, None
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+        # Calculate technical indicators
+        df = calculate_technical_indicators(df)
+
+        current_data = df.iloc[-1]
+        previous_data = df.iloc[-2]
+
+        # Get technical analysis data
+        trend_analysis = get_market_trend(df)
+        levels_analysis = get_support_resistance_levels(df)
+
+        price_data = {
+            'price': current_data['close'],
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'high': current_data['high'],
+            'low': current_data['low'],
+            'volume': current_data['volume'],
+            'timeframe': config.timeframe,
+            'price_change': ((current_data['close'] - previous_data['close']) / previous_data['close']) * 100,
+            'kline_data': df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records'),
+            'technical_data': {
+                'sma_5': current_data.get('sma_5', 0),
+                'sma_20': current_data.get('sma_20', 0),
+                'sma_50': current_data.get('sma_50', 0),
+                'rsi': current_data.get('rsi', 0),
+                'macd': current_data.get('macd', 0),
+                'macd_signal': current_data.get('macd_signal', 0),
+                'macd_histogram': current_data.get('macd_histogram', 0),
+                'bb_upper': current_data.get('bb_upper', 0),
+                'bb_lower': current_data.get('bb_lower', 0),
+                'bb_position': current_data.get('bb_position', 0),
+                'volume_ratio': current_data.get('volume_ratio', 0)
+            },
+            'trend_analysis': trend_analysis,
+            'levels_analysis': levels_analysis,
+            'full_data': df
+        }
+
+        return df, price_data
+        
+    except Exception as e:
+        logger.log_error(f"fetch_ohlcv_{symbol}", str(e))
+        return None, None
+
 # Optimization: Add a unified error handling and retry decorator
 def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
     # """Unified error handling and retry decorator"""
@@ -1105,7 +1174,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
             sentiment_text = "【Market Sentiment】Data temporarily unavailable"
 
         # Add current position information
-        current_pos = get_current_position()
+        current_pos = get_current_position(symbol)
         position_text = "No position" if not current_pos else f"{current_pos['side']} position, Quantity: {current_pos['size']}, P&L: {current_pos['unrealized_pnl']:.2f}USDT"
         pnl_text = f", Position P&L: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
 
@@ -1763,7 +1832,7 @@ def calculate_limit_price(side, current_price, ticker):
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 限价单版本，开单同时设置止损"""
     global position
-    config = SYMBOL_CONFIG[symbol]
+    config = SYMBOL_CONFIGS[symbol]
     # 订单标签
     order_tag = create_order_tag()
 
@@ -1773,7 +1842,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     if not check_trading_frequency():
         return
     
-    current_position = get_current_position()
+    current_position = get_current_position(symbol)
 
     # 计算基于K线结构的止损
     calculated_stop_loss = None
@@ -1930,7 +1999,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         time.sleep(3)
         
         # 检查多级止盈
-        actual_position = get_current_position()
+        actual_position = get_current_position(symbol)
         if actual_position:
             profit_taking_signal = position_manager.check_profit_taking(actual_position, price_data)
             if profit_taking_signal:
@@ -2070,37 +2139,52 @@ def filter_signal(signal_data, price_data):
     return signal_data
 
 
-def trading_bot(symbol: str): # 新增 symbol 参数
+def trading_bot(symbol: str):
     """
     主要交易逻辑循环 - 现在接受 symbol 参数
     """
     global CURRENT_SYMBOL
-    CURRENT_SYMBOL = symbol # 设置当前品种，以便日志记录器使用
+    CURRENT_SYMBOL = symbol  # 设置当前品种，以便日志记录器使用
     
     # 从全局字典中获取该品种的配置
-    config = SYMBOL_CONFIGS[symbol] 
+    config = SYMBOL_CONFIGS[symbol]
 
     logger.log_info(f"\n=====================================")
     logger.log_info(f"🎯 运行交易品种: {symbol}")
-    logger.log_info(f"配置摘要: {config.get_config_summary()}") # 打印品种配置摘要
+    logger.log_info(f"配置摘要: {config.get_config_summary()}")  # 打印品种配置摘要
     logger.log_info(f"=====================================")
 
     try:
         # 1. 获取市场和价格数据 (使用 symbol)
-        # df, price_data, config = fetch_ohlcv() # 原始代码
-        df, price_data = fetch_ohlcv(symbol) # 新代码
+        df, price_data = fetch_ohlcv(symbol)
 
-        if df is None:
+        if df is None or price_data is None:
             logger.log_warning(f"❌ Could not fetch data for {symbol}.")
             return
             
         # 2. 获取当前持仓 (使用 symbol)
-        current_position = get_current_position(symbol) 
+        current_position = get_current_position(symbol)
 
-        # ... (rest of the logic remains the same, but ensures all called functions use symbol) ...
+        # 3. 使用DeepSeek分析市场
+        signal_data = analyze_with_deepseek(symbol, price_data)
         
-        # 3. 执行智能交易 (使用 symbol)
-        execute_intelligent_trade(symbol, signal_data, price_data)
+        if not signal_data:
+            logger.log_warning(f"❌ Could not get signal for {symbol}.")
+            return
+
+        # 4. 过滤信号
+        filtered_signal = filter_signal(signal_data, price_data)
+        
+        # 5. 添加到历史记录
+        add_to_signal_history(filtered_signal)
+        add_to_price_history(price_data)
+
+        # 6. 记录信号
+        logger.log_info(f"📊 {symbol} 交易信号: {filtered_signal['signal']} | 信心: {filtered_signal['confidence']}")
+        logger.log_info(f"📝 原因: {filtered_signal['reason']}")
+
+        # 7. 执行智能交易
+        execute_intelligent_trade(symbol, filtered_signal, price_data)
         
     except Exception as e:
         logger.log_error(f"trading_bot_{symbol}", str(e))
@@ -2385,7 +2469,7 @@ def is_trend_reversal_strong(position_side, signal_side, price_data, signal_data
 def analyze_existing_position_on_startup():
     """启动时分析现有持仓 - 优化版本"""
     try:
-        current_position = get_current_position()
+        current_position = get_current_position(symbol)
         if not current_position:
             logger.log_info("✅ 启动检查: 当前无持仓")
             return True
@@ -2473,7 +2557,6 @@ def log_performance_metrics(symbol: str):
     }
     logger.log_performance(performance_metrics)
 
-
 def main():
     """
     主程序入口 - 支持多交易品种
@@ -2481,50 +2564,51 @@ def main():
     global SYMBOL_CONFIGS
     
     # 1. 动态加载交易品种列表
-    # 优先使用 TRADING_SYMBOLS 环境变量，否则使用配置中的所有品种
-    # 示例: export TRADING_SYMBOLS="ETH/USDT:USDT,SOL/USDT:USDT"
     symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
     if symbols_to_trade_str:
-        # 环境变量格式: BTC/USDT:USDT,ETH/USDT:USDT
         symbols_to_trade = [s.strip() for s in symbols_to_trade_str.split(',') if s.strip()]
     else:
-        # 使用 trade_config.py 中定义的全部品种
         symbols_to_trade = list(MULTI_SYMBOL_CONFIGS.keys())
         
     if not symbols_to_trade:
-        logger.log_error("config_error", "未找到任何交易品种配置，请检查 TRADING_SYMBOLS 环境变量或 trade_config.py。")
+        logger.log_error("config_error", "未找到任何交易品种配置")
         return
 
     # 2. 初始化所有品种的配置
     for symbol in symbols_to_trade:
         try:
-            # 动态实例化 TradingConfig
-            config = TradingConfig(symbol=symbol)
+            if symbol not in MULTI_SYMBOL_CONFIGS:
+                logger.log_warning(f"⚠️ 跳过未配置的品种: {symbol}")
+                continue
+                
+            symbol_config = MULTI_SYMBOL_CONFIGS[symbol]
+            config = TradingConfig(symbol=symbol, config_data=symbol_config)
             
             # 验证配置
-            is_valid, errors, warnings = config.validate_config()
+            is_valid, errors, warnings = config.validate_config(symbol)
             if not is_valid:
-                logger.log_error(f"Config for {symbol} is invalid:", errors)
+                logger.log_error(f"config_validation_{symbol}", f"配置验证失败: {errors}")
                 continue
+                
             SYMBOL_CONFIGS[symbol] = config
-            logger.log_info(f"✅ Loaded config for {symbol}: Leverage {config.leverage}x, Base {config.position_management['base_usdt_amount']} USDT")
+            logger.log_info(f"✅ 加载配置: {symbol} | 杠杆 {config.leverage}x | 基础金额 {config.position_management['base_usdt_amount']} USDT")
+            
         except Exception as e:
-            logger.log_error(f"Config loading failed for {symbol}", str(e))
+            logger.log_error(f"config_loading_{symbol}", str(e))
             
     if not SYMBOL_CONFIGS:
-        logger.log_error("program_exit", "所有交易品种配置加载失败，程序退出。")
+        logger.log_error("program_exit", "所有交易品种配置加载失败")
         return
 
-    # 3. 设置交易所并获取合约信息 (为所有品种设置杠杆和合约大小)
-    for symbol in SYMBOL_CONFIGS.keys():
+    # 3. 设置交易所
+    for symbol in list(SYMBOL_CONFIGS.keys()):
         if not setup_exchange(symbol):
-            logger.log_error("exchange_setup", f"Exchange setup failed for {symbol}")
-            # 移除失败的品种
+            logger.log_error("exchange_setup", f"交易所设置失败: {symbol}")
             del SYMBOL_CONFIGS[symbol]
 
     symbols_to_trade = list(SYMBOL_CONFIGS.keys())
     if not symbols_to_trade:
-        logger.log_error("program_exit", "所有交易品种初始化失败，程序退出。")
+        logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
     logger.log_info(f"🚀 主循环启动，交易品种: {', '.join(symbols_to_trade)}")
