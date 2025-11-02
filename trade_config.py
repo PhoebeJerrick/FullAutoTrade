@@ -1,14 +1,53 @@
 import os
 import time
 
+# --- NEW: Multi-Symbol Configuration Structure ---
+# 定义多交易品种的个性化配置，未指定的参数将使用默认值
+MULTI_SYMBOL_CONFIGS = {
+    # 默认/参考配置 (BTC)
+    'BTC/USDT:USDT': {
+        'leverage': int(os.getenv('BTC_LEVERAGE', 50)),
+        'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
+        'max_position_ratio': 10,
+    },
+    # ETH 配置
+    'ETH/USDT:USDT': {
+        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    # SOL 配置 (示例)
+    'SOL/USDT:USDT': {
+        'leverage': int(os.getenv('SOL_LEVERAGE', 30)),
+        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
+        'max_position_ratio': 5,
+    },
+    # LTC 配置 (示例)
+    'LTC/USDT:USDT': {
+        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
+        'max_position_ratio': 5,
+    },
+    # BCH 配置 (示例)
+    'BCH/USDT:USDT': {
+        'leverage': int(os.getenv('BCH_LEVERAGE', 30)),
+        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+}
+
 class TradingConfig:
     """
     Dynamic configuration management for trading bot
     """
-    def __init__(self):
+    def __init__(self, symbol: str, config_data: dict):
+        # 1. 设置品种信息
+        self.symbol = symbol
+        current_config = self.get_symbol_config(self.symbol)
+        
         # Trading parameters
-        self.symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
-        self.leverage = int(os.getenv('LEVERAGE', 50))  # 修改为50倍杠杆
+        # 使用品种特定的杠杆，如果没有配置则使用环境变量或默认值
+        self.leverage = config_data.get('leverage', int(os.getenv('LEVERAGE', 50)))
         self.timeframe = os.getenv('TIMEFRAME', '15m')
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
@@ -32,11 +71,13 @@ class TradingConfig:
         # Position management
         self.position_management = {
             'enable_intelligent_position': True,
-            'base_usdt_amount': float(os.getenv('BASE_USDT_AMOUNT', 100)),
+            # 使用品种特定的基础投资额
+            'base_usdt_amount': config_data.get('base_usdt_amount', 100.0),
             'high_confidence_multiplier': 1.5,
             'medium_confidence_multiplier': 1.0,
             'low_confidence_multiplier': 0.5,
-            'max_position_ratio': 10,
+            # 使用品种特定的最大仓位比例
+            'max_position_ratio': config_data.get('max_position_ratio', 10),
             'trend_strength_multiplier': 1.2
         }
         
@@ -95,17 +136,21 @@ class TradingConfig:
     
     def reload(self):
         """Reload configuration from environment variables"""
+        # 重新加载当前品种的配置
+        current_config = self.get_symbol_config(self.symbol)
+        
         # Trading parameters
         self.symbol = os.getenv('TRADING_SYMBOL', self.symbol)
-        self.leverage = int(os.getenv('LEVERAGE', self.leverage))
+        self.leverage = int(os.getenv('LEVERAGE', current_config.get('leverage', self.leverage)))
         self.timeframe = os.getenv('TIMEFRAME', self.timeframe)
         self.test_mode = os.getenv('TEST_MODE', str(self.test_mode)).lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', self.data_points))
         
         # Position management
         self.position_management['base_usdt_amount'] = float(
-            os.getenv('BASE_USDT_AMOUNT', self.position_management['base_usdt_amount'])
+            os.getenv('BASE_USDT_AMOUNT', current_config.get('base_usdt_amount', self.position_management['base_usdt_amount']))
         )
+        self.position_management['max_position_ratio'] = current_config.get('max_position_ratio', self.position_management['max_position_ratio'])
 
         # 🆕 新增仓位模式配置
         self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
@@ -117,7 +162,7 @@ class TradingConfig:
         
         self._last_update = time.time()
         print("🔄 Configuration reloaded from environment variables")
-    
+
     def update_contract_info(self, contract_size, min_amount):
         """Update contract information from exchange"""
         self.contract_size = contract_size
@@ -145,7 +190,15 @@ class TradingConfig:
             'contract_size': getattr(self, 'contract_size', 0.01),
             'min_amount': getattr(self, 'min_amount', 0.01)
         }
-    def validate_config(self) -> tuple:
+
+    def get_symbol_config(self, symbol: str) -> dict:
+        """
+        [NEW METHOD] 获取特定交易品种的配置，未找到则返回 BTC 默认配置
+        """
+        # 使用 MULTI_SYMBOL_CONFIGS 字典
+        return MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS.get('BTC/USDT:USDT', {}))
+
+    def validate_config(self, symbol: str = None) -> Tuple[bool, List[str], List[str]]:
         """
         验证配置是否有效
         返回: (is_valid: bool, error_messages: list)

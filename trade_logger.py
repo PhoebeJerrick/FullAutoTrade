@@ -48,13 +48,29 @@ class TradingLogger:
             f"Price: ${price_data['price']:.2f} | "
             f"Reason: {signal_data.get('reason', 'N/A')}"
         )
-    
-    def log_trade(self, action, size, price, success=True, details=""):
-        """Log trade executions"""
-        status = "SUCCESS" if success else "FAILED"
-        message = f"TRADE: {action} {size} contracts @ ${price:.2f} - {status}"
+
+    def _format_message(self, message):
+        """内部方法：获取当前品种并格式化消息"""
+        try:
+            # 尝试从 ds_perfect 模块获取 CURRENT_SYMBOL
+            current_symbol = sys.modules['ds_perfect'].CURRENT_SYMBOL
+            if current_symbol:
+                # 仅保留基础货币（如 BTC, ETH）作为日志前缀
+                base_asset = current_symbol.split('/')[0]
+                return f"[{base_asset}] {message}"
+        except (KeyError, AttributeError):
+            # 模块未加载或变量不存在
+            pass
+        return message
+
+def log_trade(self, order_id, side, amount, price, status, details="", success=True):
+        """Log trade messages"""
+        message = f"TRADE | ID: {order_id} | Side: {side} | Amount: {amount} | Price: {price} | Status: {status}"
         if details:
             message += f" | {details}"
+        
+        # 使用格式化方法
+        message = self._format_message(message) 
         
         if success:
             self.logger.info(message)
@@ -63,31 +79,34 @@ class TradingLogger:
     
     def log_error(self, context, error):
         """Log error messages with context"""
-        self.logger.error(f"{context}: {error}")
+        # 使用格式化方法
+        self.logger.error(self._format_message(f"{context}: {error}")) 
     
     def log_warning(self, message):
         """Log warning messages"""
-        self.logger.warning(f"{message}")
+        # 使用格式化方法
+        self.logger.warning(self._format_message(f"{message}")) 
     
     def log_info(self, message):
         """Log general info messages"""
-        self.logger.info(f"{message}")
+        # 使用格式化方法
+        self.logger.info(self._format_message(f"{message}"))
     
     def log_debug(self, message):
         """Log debug messages"""
-        self.logger.debug(f"{message}")
-    
+        self.logger.debug(self._format_message(f"{message}"))
+
     def log_performance(self, metrics_dict):
         """Log performance metrics"""
         metrics_str = " | ".join([f"{k}: {v}" for k, v in metrics_dict.items()])
-        self.logger.info(f"PERFORMANCE: {metrics_str}")
+        self.logger.info(self._format_message(f"PERFORMANCE: {metrics_str}"))
     
     def log_health_check(self, status, details=""):
         """Log health check results"""
         if status:
-            self.logger.info(f"HEALTH CHECK: PASSED | {details}")
+            self.logger.info(self._format_message(f"HEALTH CHECK: PASSED | {details}"))
         else:
-            self.logger.warning(f"HEALTH CHECK: FAILED | {details}")
+            self.logger.warning(self._format_message(f"HEALTH CHECK: FAILED | {details}"))
 
 # Initialize logger
 logger = TradingLogger()
