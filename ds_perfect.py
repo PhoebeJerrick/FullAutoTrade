@@ -2242,69 +2242,62 @@ def check_existing_stop_loss_simple(position):
         return True  # 保守处理
 
 def check_existing_stop_loss_orders(position):
-    """检查是否已有止损单 - 添加详细API日志"""
+    """检查是否已有止损单 - 尝试不同参数组合"""
     try:
-        # 使用更简单的参数，避免ordType错误
-        params = {
-            'instType': 'SWAP'
-            # 移除algoOrdType参数，让API返回所有类型的算法订单
-        }
+        # 尝试不同的参数组合
+        param_combinations = [
+            {'instType': 'SWAP', 'algoOrdType': 'conditional'},
+            {'instType': 'SWAP', 'ordType': 'conditional'},  # 尝试使用ordType
+            {},  # 空参数
+            {'algoOrdType': 'conditional'},  # 只提供algoOrdType
+        ]
         
-        logger.log_info("🔍 检查现有算法订单...")
-        
-        # 记录原始请求参数
-        logger.log_info(f"📡 API请求参数: {params}")
-        logger.log_info(f"📡 API端点: /api/v5/trade/orders-algo-pending")
-        logger.log_info(f"📡 请求方法: GET")
-        
-        # 执行API调用
-        response = exchange.privateGetTradeOrdersAlgoPending(params)
-        
-        # 记录完整响应
-        logger.log_info(f"📡 API完整响应: {response}")
-        
-        if response['code'] == '0':
-            inst_id = get_correct_inst_id()
-            found_orders = []
+        for i, params in enumerate(param_combinations):
+            logger.log_info(f"🔍 尝试参数组合 {i+1}: {params}")
+            logger.log_info(f"📡 API请求参数: {params}")
+            logger.log_info(f"📡 API端点: /api/v5/trade/orders-algo-pending")
+            logger.log_info(f"📡 请求方法: GET")
             
-            for order in response.get('data', []):
-                if order['instId'] == inst_id:
-                    found_orders.append(order)
-                    logger.log_info(f"📋 找到算法订单: {order}")
-            
-            # 根据持仓方向筛选
-            for order in found_orders:
-                if position['side'] == 'long' and order['side'] == 'sell':
-                    # 多头持仓的止损单应该是卖出
-                    trigger_price = order.get('slTriggerPx') or order.get('triggerPx') or '未知'
-                    logger.log_info(f"✅ 匹配到多头止损单: {trigger_price}")
-                    return True
-                elif position['side'] == 'short' and order['side'] == 'buy':
-                    # 空头持仓的止损单应该是买入
-                    trigger_price = order.get('slTriggerPx') or order.get('triggerPx') or '未知'
-                    logger.log_info(f"✅ 匹配到空头止损单: {trigger_price}")
-                    return True
-            
-            logger.log_info(f"ℹ️ 找到{len(found_orders)}个算法订单，但无匹配的止损单")
-            return False
-        else:
-            logger.log_warning(f"⚠️ 获取算法订单失败: {response.get('msg', '未知错误')}")
-            # API调用失败时，保守返回True
-            return True
+            try:
+                response = exchange.privateGetTradeOrdersAlgoPending(params)
+                logger.log_info(f"📡 API完整响应: {response}")
+                
+                if response['code'] == '0':
+                    inst_id = get_correct_inst_id()
+                    found_orders = []
+                    
+                    for order in response.get('data', []):
+                        if order['instId'] == inst_id:
+                            found_orders.append(order)
+                            logger.log_info(f"📋 找到算法订单: {order}")
+                    
+                    # 根据持仓方向筛选
+                    for order in found_orders:
+                        if position['side'] == 'long' and order['side'] == 'sell':
+                            trigger_price = order.get('slTriggerPx') or order.get('triggerPx') or '未知'
+                            logger.log_info(f"✅ 匹配到多头止损单: {trigger_price}")
+                            return True
+                        elif position['side'] == 'short' and order['side'] == 'buy':
+                            trigger_price = order.get('slTriggerPx') or order.get('triggerPx') or '未知'
+                            logger.log_info(f"✅ 匹配到空头止损单: {trigger_price}")
+                            return True
+                    
+                    logger.log_info(f"ℹ️ 参数组合 {i+1} 找到{len(found_orders)}个算法订单，但无匹配的止损单")
+                else:
+                    logger.log_warning(f"⚠️ 参数组合 {i+1} 失败: {response.get('msg', '未知错误')}")
+                    
+            except Exception as e:
+                logger.log_error(f"参数组合 {i+1} 异常", f"{str(e)}")
+                continue  # 继续尝试下一个参数组合
+        
+        logger.log_warning("❌ 所有参数组合都失败")
+        return False
             
     except Exception as e:
         error_msg = str(e)
-        logger.log_error("check_existing_stop_loss", f"检查现有止损单失败: {error_msg}")
-        
-        # 根据错误类型决定是否保守处理
-        if "Parameter ordType error" in error_msg:
-            logger.log_warning("🔄 遇到参数错误，使用简化检查...")
-            return check_existing_stop_loss_simple(position)
-        else:
-            # 其他错误时保守处理
-            logger.log_warning("⚠️ 检查止损单失败，假设已有止损单")
-            return True
-        
+        logger.log_error("check_existing_stop_loss", f"所有检查方法都失败: {error_msg}")
+        return True  # 保守处理
+
 def ensure_stop_loss_setting(position, price_data, strict=False):
     """确保持仓有止损设置 - 增强版本"""
     try:
