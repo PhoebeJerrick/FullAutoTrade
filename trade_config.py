@@ -1,6 +1,15 @@
 import os
 import time
-from typing import Tuple, List, Dict, Any  # 添加类型导入
+import subprocess
+import re
+from typing import Tuple, List, Dict, Any
+
+# --- 简单版本配置 ---
+VERSION_CONFIG = {
+    'version': '1.0.1',  # 基础版本号
+    'auto_increment': True,  # 是否自动基于Git提交递增
+    'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
+}
 
 # --- NEW: Multi-Symbol Configuration Structure ---
 MULTI_SYMBOL_CONFIGS = {
@@ -35,7 +44,6 @@ MULTI_SYMBOL_CONFIGS = {
         'max_position_ratio': 7,
     },
 }
-
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
     
@@ -124,8 +132,115 @@ class TradingConfig:
         self.health_check_interval = 300
         self.max_signal_history = 100
         
+        # 🆕 简单版本控制
+        self._version_info = self._get_version_info()
+        
         self._last_update = time.time()
     
+    # 🆕 简单版本控制方法
+    def _get_git_commit_count(self) -> int:
+        """获取Git提交次数"""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-list', '--count', 'HEAD'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError):
+            pass
+        return 0
+    
+    def _get_git_short_hash(self) -> str:
+        """获取Git短哈希"""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+        return "unknown"
+    
+    def _get_git_branch(self) -> str:
+        """获取当前Git分支"""
+        try:
+            result = subprocess.run(
+                ['git', 'branch', '--show-current'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+        return "unknown"
+    
+    def _get_version_info(self) -> Dict[str, Any]:
+        """获取版本信息"""
+        base_version = VERSION_CONFIG['version']
+        
+        if VERSION_CONFIG['auto_increment'] and VERSION_CONFIG['git_commit_count_as_build']:
+            commit_count = self._get_git_commit_count()
+            short_hash = self._get_git_short_hash()
+            branch = self._get_git_branch()
+            
+            # 格式: 1.0.1+build.15.gabc1234 (main)
+            full_version = f"{base_version}+build.{commit_count}.g{short_hash} ({branch})"
+        else:
+            full_version = base_version
+            commit_count = 0
+            short_hash = "unknown"
+            branch = "unknown"
+        
+        return {
+            'base_version': base_version,
+            'full_version': full_version,
+            'commit_count': commit_count,
+            'commit_hash': short_hash,
+            'branch': branch,
+            'build_time': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
+    def get_version(self) -> str:
+        """获取完整版本号"""
+        return self._version_info['full_version']
+    
+    def get_version_details(self) -> Dict[str, Any]:
+        """获取详细版本信息"""
+        return self._version_info.copy()
+    
+    def check_for_updates(self) -> Dict[str, Any]:
+        """检查是否有新版本（基于Git）"""
+        try:
+            # 获取远程更新
+            subprocess.run(['git', 'fetch'], capture_output=True, timeout=10)
+            
+            # 比较本地和远程
+            result = subprocess.run(
+                ['git', 'rev-list', '--count', 'HEAD..origin/main'],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            behind_count = 0
+            if result.returncode == 0 and result.stdout.strip():
+                behind_count = int(result.stdout.strip())
+            
+            return {
+                'behind_remote': behind_count,
+                'update_available': behind_count > 0,
+                'current_commit': self._get_git_short_hash(),
+                'message': f"落后远程 {behind_count} 个提交" if behind_count > 0 else "已是最新版本"
+            }
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError):
+            return {
+                'behind_remote': 0,
+                'update_available': False,
+                'current_commit': self._get_git_short_hash(),
+                'message': "检查更新失败"
+            }
+
     def should_reload(self):
         """Check if configuration should be reloaded from environment"""
         return time.time() - self._last_update > self.health_check_interval
@@ -174,7 +289,7 @@ class TradingConfig:
     
     def to_dict(self):
         """Convert configuration to dictionary for backward compatibility"""
-        return {
+        config_dict = {
             'symbol': self.symbol,
             'leverage': self.leverage,
             'timeframe': self.timeframe,
@@ -184,8 +299,11 @@ class TradingConfig:
             'position_management': self.position_management,
             'risk_management': self.risk_management,
             'contract_size': getattr(self, 'contract_size', 0.01),
-            'min_amount': getattr(self, 'min_amount', 0.01)
+            'min_amount': getattr(self, 'min_amount', 0.01),
+            'margin_mode': getattr(self, 'margin_mode', 'isolated'),
+            'version': self.get_version()  # 🆕 包含版本信息
         }
+        return config_dict
 
     def get_symbol_config(self, symbol: str) -> dict:
         """获取特定交易品种的配置，未找到则返回 BTC 默认配置"""
@@ -279,7 +397,8 @@ class TradingConfig:
             'max_stop_loss_ratio': self.risk_management['stop_loss']['max_stop_loss_ratio'],
             'enable_multilevel_take_profit': self.risk_management['profit_taking']['enable_multilevel_take_profit'],
             'contract_size': getattr(self, 'contract_size', 'Not set'),
-            'min_amount': getattr(self, 'min_amount', 'Not set')
+            'min_amount': getattr(self, 'min_amount', 'Not set'),
+            'version': self.get_version()  # 🆕 包含版本信息
         }
 
 def create_trade_config(symbol: str = None) -> TradingConfig:
@@ -292,3 +411,16 @@ def create_trade_config(symbol: str = None) -> TradingConfig:
 
 # Create global instance
 TRADE_CONFIG = create_trade_config()
+
+# 简单的版本工具函数
+def print_version_banner():
+    """打印版本横幅"""
+    version_info = TRADE_CONFIG.get_version_details()
+    print("=" * 50)
+    print(f"🚀 Trading Bot {version_info['full_version']}")
+    print(f"📅 Build Time: {version_info['build_time']}")
+    print(f"🌿 Branch: {version_info['branch']}")
+    print("=" * 50)
+
+# 在模块加载时打印版本信息
+print_version_banner()
