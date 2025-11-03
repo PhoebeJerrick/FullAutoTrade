@@ -26,9 +26,9 @@ load_dotenv(dotenv_path=env_path)
 
 # 简单的日志系统
 class TestLogger:
-    def __init__(self):
-        self.log_file = f"limit_order_sl_tp_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    
+    def __init__(self, log_file='../Output/trading.log'):
+        self.log_file = log_file
+
     def log(self, level: str, message: str):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = f"{timestamp} - {level} - {message}"
