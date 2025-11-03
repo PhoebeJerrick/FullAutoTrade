@@ -1873,6 +1873,7 @@ def calculate_limit_price(side, current_price, ticker):
         # 备用计算：使用当前价格
         return current_price
     
+# 修改ds_perfect.py中的execute_intelligent_trade函数，优化开仓逻辑
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 包含完整止损止盈设置"""
     global position
@@ -1889,31 +1890,37 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     
     current_position = get_current_position(symbol)
 
-    # 计算基于K线结构的止损
+    # 计算基于K线结构的止损和止盈
     calculated_stop_loss = None
+    calculated_take_profit = None
     risk_config = config.get_risk_config()
     stop_loss_config = risk_config['stop_loss']
     
-    if signal_data['signal'] in ['BUY', 'SELL'] and stop_loss_config['kline_based_stop_loss']:
+    if signal_data['signal'] in ['BUY', 'SELL']:
         current_price = price_data['price']
         side = 'long' if signal_data['signal'] == 'BUY' else 'short'
         
-        calculated_stop_loss = calculate_kline_based_stop_loss(
-            side, 
-            current_price, 
-            price_data,
-            stop_loss_config['max_stop_loss_ratio']
+        # 计算止损价格
+        if stop_loss_config['kline_based_stop_loss']:
+            calculated_stop_loss = calculate_kline_based_stop_loss(
+                side, current_price, price_data, stop_loss_config['max_stop_loss_ratio']
+            )
+        else:
+            calculated_stop_loss = current_price * (1 - stop_loss_config['min_stop_loss_ratio']) if side == 'long' \
+                                 else current_price * (1 + stop_loss_config['min_stop_loss_ratio'])
+        
+        # 计算止盈价格
+        calculated_take_profit = calculate_intelligent_take_profit(
+            symbol, side, current_price, price_data, risk_reward_ratio=2.0
         )
         
         signal_data['stop_loss'] = calculated_stop_loss
-        
-        stop_loss_ratio = abs(calculated_stop_loss - current_price) / current_price * 100
-        logger.log_info(f"📊 {symbol}: 基于K线结构计算止损 - {calculated_stop_loss:.2f} (距离{stop_loss_ratio:.2f}%)")
+        signal_data['take_profit'] = calculated_take_profit
 
     # 计算智能仓位
     position_size = calculate_intelligent_position(symbol, signal_data, price_data, current_position)
 
-    logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张 | 信心: {signal_data['confidence']}")
+    logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张 | 止损: {calculated_stop_loss:.2f} | 止盈: {calculated_take_profit:.2f}")
 
     if config.test_mode:
         logger.log_info("测试模式 - 仅模拟交易")
@@ -1928,14 +1935,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         
         logger.log_info(f"📊 {symbol}: 当前市场 - 价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
 
-        # 验证和调整价格参数
-        if signal_data['signal'] in ['BUY', 'SELL'] and calculated_stop_loss:
+        # 验证价格参数
+        if signal_data['signal'] in ['BUY', 'SELL']:
             side = 'buy' if signal_data['signal'] == 'BUY' else 'sell'
-            limit_price, calculated_stop_loss = validate_and_adjust_prices(
-                side, calculated_stop_loss, current_price, bid_price, ask_price
-            )
-            
-            logger.log_info(f"🛡️ {symbol}: 止损设置 - {calculated_stop_loss:.2f} (距离{abs(calculated_stop_loss - current_price)/current_price*100:.2f}%)")
+            # 验证并调整止损价格
+            calculated_stop_loss = validate_stop_loss_for_order(side, calculated_stop_loss, current_price)
 
         # 执行交易逻辑
         if signal_data['signal'] == 'BUY':
@@ -1947,9 +1951,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     'reduceOnly': True,
                     'tag': order_tag
                 }
-                log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
-                log_perpetual_order_details(symbol,'buy', current_position['size'], 'market', reduce_only=True)
-                
                 exchange.create_market_order(
                     config.symbol,
                     'buy',
@@ -1958,36 +1959,27 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 )
                 time.sleep(1)
 
-            # 使用限价单开多仓
+            # 开多仓（同步设置止损止盈）
+            inst_id = get_correct_inst_id(symbol)
             open_params = {
+                'instId': inst_id,
+                'tdMode': getattr(config, 'margin_mode', 'isolated'),
+                'side': 'buy',
+                'ordType': 'limit',  # 可根据需要改为'market'
+                'sz': str(round(position_size, 2)),
+                'px': str(round(ask_price * 0.999, 2)),  # 限价单价格
+                'slTriggerPx': str(round(calculated_stop_loss, 2)),
+                'slOrdPx': '-1',  # 市价止损
+                'tpTriggerPx': str(round(calculated_take_profit, 2)),
+                'tpOrdPx': '-1',  # 市价止盈
+                'slTriggerPxType': 'last',
+                'tpTriggerPxType': 'last',
                 'tag': order_tag
             }
-            
-            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
-            log_perpetual_order_details(symbol,'buy', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
-            
-            logger.log_info(f"✅ {symbol}:限价开多仓提交 - {position_size}张 @ {limit_price:.2f}")
 
-            # 创建限价开仓订单
-            exchange.create_limit_order(
-                config.symbol,
-                'buy',
-                position_size,
-                limit_price,
-                params=open_params
-            )
-            
-            # 🆕 设置初始止损和止盈
-            time.sleep(2)  # 等待开仓完成
-            
-            if calculated_stop_loss:
-                set_initial_stop_loss(symbol, 'BUY', position_size, calculated_stop_loss, current_price)
-            
-            # 计算并设置智能止盈
-            take_profit_price = calculate_intelligent_take_profit(
-                symbol, 'long', current_price, price_data, risk_reward_ratio=2.0
-            )
-            set_initial_take_profit(symbol, 'BUY', position_size, take_profit_price, current_price)
+            logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
+            response = exchange.private_post_trade_order(open_params)
+            log_api_response(response, "execute_intelligent_trade_buy")
 
         elif signal_data['signal'] == 'SELL':
             # 检查是否有现有多头持仓，先平仓
@@ -1998,9 +1990,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     'reduceOnly': True,
                     'tag': order_tag
                 }
-                log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
-                log_perpetual_order_details(symbol,'sell', current_position['size'], 'market', reduce_only=True)
-                
                 exchange.create_market_order(
                     config.symbol,
                     'sell',
@@ -2009,68 +1998,41 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 )
                 time.sleep(1)
 
-            # 使用限价单开空仓
+            # 开空仓（同步设置止损止盈）
+            inst_id = get_correct_inst_id(symbol)
             open_params = {
+                'instId': inst_id,
+                'tdMode': getattr(config, 'margin_mode', 'isolated'),
+                'side': 'sell',
+                'ordType': 'limit',  # 可根据需要改为'market'
+                'sz': str(round(position_size, 2)),
+                'px': str(round(bid_price * 1.001, 2)),  # 限价单价格
+                'slTriggerPx': str(round(calculated_stop_loss, 2)),
+                'slOrdPx': '-1',  # 市价止损
+                'tpTriggerPx': str(round(calculated_take_profit, 2)),
+                'tpOrdPx': '-1',  # 市价止盈
+                'slTriggerPxType': 'last',
+                'tpTriggerPxType': 'last',
                 'tag': order_tag
             }
-            
-            log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
-            log_perpetual_order_details(symbol,'sell', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
-            
-            logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {limit_price:.2f}")
-            
-            exchange.create_limit_order(
-                config.symbol,
-                'sell',
-                position_size,
-                limit_price,
-                params=open_params
-            )
-            
-            # 🆕 设置初始止损和止盈
-            time.sleep(2)  # 等待开仓完成
-            
-            if calculated_stop_loss:
-                set_initial_stop_loss(symbol, 'SELL', position_size, calculated_stop_loss, current_price)
-            
-            # 计算并设置智能止盈
-            take_profit_price = calculate_intelligent_take_profit(
-                symbol, 'short', current_price, price_data, risk_reward_ratio=2.0
-            )
-            set_initial_take_profit(symbol, 'SELL', position_size, take_profit_price, current_price)
 
-        elif signal_data['signal'] == 'HOLD':
-            logger.log_info(f"✅ {symbol}: 建议观望，不执行交易")
-            
-            # 🆕 对现有持仓进行动态管理
-            if current_position:
-                # 检查移动止损
-                setup_trailing_stop(symbol, current_position, price_data)
-                
-                # 检查动态止盈调整
-                adjust_take_profit_dynamically(symbol, current_position, price_data)
-                
-                # 检查多级止盈
-                profit_taking_signal = position_manager.check_profit_taking(symbol, current_position, price_data)
-                if profit_taking_signal:
-                    logger.log_info(f"🎯 {symbol}: 执行多级止盈 - {profit_taking_signal['description']}")
-                    execute_profit_taking(symbol, current_position, profit_taking_signal, price_data)
-                    position_manager.mark_level_executed(current_position, profit_taking_signal['level'])
-            
+            logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
+            response = exchange.private_post_trade_order(open_params)
+            log_api_response(response, "execute_intelligent_trade_sell")
+
+        # 处理订单响应
+        if response.get('code') == '0':
+            order_id = response['data'][0]['ordId']
+            logger.log_info(f"✅ {symbol}: 开仓订单创建成功 (带止损止盈): {order_id}")
+        else:
+            logger.log_error(f"❌ {symbol}: 开仓订单创建失败: {response.get('msg')}")
             return
 
-        logger.log_info(f"✅ {symbol}: 限价开仓订单提交成功")
-        
-        # 等待订单执行
+        # 对新开仓位进行动态管理
         time.sleep(3)
-        
-        # 🆕 对新开仓位进行动态管理
         actual_position = get_current_position(symbol)
         if actual_position:
-            # 检查移动止损
             setup_trailing_stop(symbol, actual_position, price_data)
-            
-            # 检查动态止盈调整
             adjust_take_profit_dynamically(symbol, actual_position, price_data)
             
             # 检查多级止盈
