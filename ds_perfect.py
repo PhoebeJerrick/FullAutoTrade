@@ -147,8 +147,19 @@ def log_order_params(order_type, params, function_name=""):
     except Exception as e:
         logger.log_error("log_order_params", f"记录订单参数失败: {str(e)}")
 
-def log_perpetual_order_details(side, amount, order_type, reduce_only=False, stop_loss=False, take_profit=False, stop_loss_price=None):
+def get_current_price(symbol: str): # 新增 symbol 参数
+    """获取当前价格"""
+    try:
+        # 使用传入的 symbol
+        ticker = exchange.fetch_ticker(symbol)
+        return ticker['last']
+    except Exception as e:
+        logger.log_error("current_price", str(e))
+        return None
+
+def log_perpetual_order_details(symbol: str, side: str, amount: float, order_type: str, reduce_only=False, stop_loss=False, take_profit=False, stop_loss_price=None):
     """简化版订单详情日志"""
+    config = SYMBOL_CONFIGS[symbol]
     try:
         action_types = []
         if reduce_only:
@@ -160,15 +171,15 @@ def log_perpetual_order_details(side, amount, order_type, reduce_only=False, sto
             
         action_str = " | ".join(action_types) if action_types else "普通"
         
-        log_msg = f"🎯 永续合约订单: {side} {amount}张 | {order_type} | {action_str}"
+        log_msg = f"🎯 {symbol} 永续合约订单: {side} {amount}张 | {order_type} | {action_str}"
         if stop_loss_price:
-            stop_loss_ratio = abs(stop_loss_price - get_current_price()) / get_current_price() * 100
+            stop_loss_ratio = abs(stop_loss_price - get_current_price(symbol)) / get_current_price(symbol) * 100  # 添加 symbol 参数
             log_msg += f" | 止损价:{stop_loss_price:.2f}({stop_loss_ratio:.2f}%)"
             
         logger.log_info(log_msg)
             
     except Exception as e:
-        logger.log_error("log_perpetual_order_details", f"记录订单详情失败: {str(e)}")
+        logger.log_error("log_perpetual_order_details", f"记录订单{symbol} 详情失败: {str(e)}")
 
 def check_existing_positions(symbol: str):
     # Check existing positions and return whether there are isolated positions and the information of isolated positions.
@@ -234,45 +245,35 @@ def check_current_margin_mode(symbol: str):
         return getattr(config, 'margin_mode', 'isolated')
 
 
-def setup_exchange(symbol: str): # 新增 symbol 参数
+def setup_exchange(symbol: str):
     """
-    智能交易所设置：设置杠杆和保证金模式，并获取合约规格
+    智能交易所设置：简化版本，专注于必要的设置
     """
-    # 动态加载当前 symbol 的配置
     config = SYMBOL_CONFIGS[symbol]
     
     try:
-        # 1. 设置保证金模式 (全仓/逐仓)
-        logger.log_info(f"⚙️ Setting margin mode for {symbol} to {config.margin_mode}...")
-        try:
-            exchange.set_margin_mode(config.margin_mode, symbol)
-            logger.log_warning(f"✅ Margin mode {config.margin_mode} set for {symbol}")
-        except Exception as e:
-            logger.log_warning(f"⚠️ Margin mode setting failed for {symbol}: {e}")
-            
-        # 2. 设置杠杆
-        leverage = getattr(config, 'leverage', 50)
-        logger.log_info(f"⚙️ Setting leverage for {symbol} to {leverage}x...")
-        try:
-            exchange.set_leverage(leverage, symbol) # 使用 symbol 和 config.leverage
-            logger.log_warning(f"✅ Leverage {leverage}x set for {symbol}")
-        except Exception as e:
-            logger.log_warning(f"⚠️ Leverage setting failed for {symbol}: {e}")
-        
-        # 3. 获取合约规格
+        # 1. 获取合约规格（这是最重要的）
         markets = exchange.load_markets()
         if symbol not in markets:
             logger.log_error("exchange_setup", f"Symbol {symbol} not supported by exchange.")
             return False
             
         market_info = markets[symbol]
-        
-        # 动态更新配置实例的合约信息
         config.contract_size = float(market_info.get('contractSize', 1.0))
         config.min_amount = market_info['limits']['amount']['min']
         
         logger.log_info(f"✅ Contract {symbol}: 1 contract = {config.contract_size} base asset")
         logger.log_info(f"📏 Min trade {symbol}: {config.min_amount} contracts")
+        
+        # 2. 只设置杠杆，跳过保证金模式设置（让交易所使用默认或现有设置）
+        leverage = getattr(config, 'leverage', 50)
+        logger.log_info(f"⚙️ Setting leverage for {symbol} to {leverage}x...")
+        try:
+            # 简化的杠杆设置
+            exchange.set_leverage(leverage, symbol)
+            logger.log_warning(f"✅ Leverage {leverage}x set for {symbol}")
+        except Exception as e:
+            logger.log_warning(f"⚠️ Leverage setting failed for {symbol}: {e}")
         
         return True
 
@@ -448,13 +449,17 @@ def get_support_resistance_levels(df, lookback=20):
         return {}
 
 
-def get_sentiment_indicators(SYMBOL: str):
+def get_sentiment_indicators(symbol: str):
     """Get sentiment indicators - simplified version"""
-    config = SYMBOL_CONFIGS[SYMBOL]
+    config = SYMBOL_CONFIGS[symbol]
     try:
         API_URL = config.sentiment_api_url
         API_KEY = config.sentiment_api_key
 
+        # 从 symbol 中提取币种名称
+        # 格式可能是 "BTC/USDT:USDT" 或 "ETH/USDT:USDT" 等
+        base_currency = symbol.split('/')[0].upper()
+        
         # Get recent 4-hour data
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=4)
@@ -465,7 +470,7 @@ def get_sentiment_indicators(SYMBOL: str):
             "startTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
             "endTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
             "timeType": "15m",
-            "token": ["BTC"]
+            "token": [base_currency]  # 修改这里，使用动态的币种
         }
 
         headers = {"Content-Type": "application/json", "X-API-KEY": API_KEY}
@@ -505,7 +510,7 @@ def get_sentiment_indicators(SYMBOL: str):
                         data_delay = int((datetime.now() - datetime.strptime(
                             period['startTime'], '%Y-%m-%d %H:%M:%S')).total_seconds() // 60)
 
-                        logger.log_warning(f"✅ Using sentiment data time: {period['startTime']} (Delay: {data_delay} minutes)")
+                        logger.log_warning(f"✅ {symbol}: 使用情绪数据时间: {period['startTime']} (延迟: {data_delay} 分钟)")
 
                         return {
                             'positive_ratio': positive,
@@ -515,12 +520,12 @@ def get_sentiment_indicators(SYMBOL: str):
                             'data_delay_minutes': data_delay
                         }
 
-                logger.log_warning("❌ All time period data is empty")
+                logger.log_warning(f"❌ {symbol}: 所有时间段数据为空")
                 return None
 
         return None
     except Exception as e:
-        logger.log_error("sentiment_data", str(e))
+        logger.log_error(f"sentiment_data_{symbol}", str(e))
         return None
 
 
@@ -564,6 +569,12 @@ def get_correct_inst_id(symbol: str):
         return 'BTC-USDT-SWAP'
     elif symbol == 'ETH/USDT:USDT':
         return 'ETH-USDT-SWAP'
+    elif symbol == 'SOLUSDT:USDT':
+        return 'SOL-USDT-SWAP'
+    elif symbol == 'BCH/USDT:USDT':
+        return 'BCH-USDT-SWAP'
+    elif symbol == 'LTC/USDT:USDT':
+        return 'LTC-USDT-SWAP'
     else:
         # 通用处理
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
@@ -596,11 +607,11 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
             
         margin_mode = getattr(config, 'margin_mode', 'isolated')
         
-        # 构建永续合约条件单参数
+        # 构建永续合约条件单参数 - 修正参数名
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
-            'algoOrdType': algo_order_type,
+            'algoOrdType': 'conditional',  # 固定为 conditional
             'side': side.upper(),
             'sz': sz,
             'tpTriggerPx': str(round(trigger_price, 1)),
@@ -611,7 +622,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         
         # 记录完整的订单参数
         log_order_params("永续合约条件单", params, "create_algo_order")
-        log_perpetual_order_details(side, sz, 'conditional_stop', stop_loss=True, stop_loss_price=trigger_price)
+        log_perpetual_order_details(symbol, side, sz, 'conditional_stop', stop_loss=True, stop_loss_price=trigger_price)  # 添加 symbol
         
         logger.log_info(f"📊 创建永续合约条件单: {side} {sz} @ {trigger_price}")
         
@@ -623,7 +634,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         
         if response['code'] == '0':
             algo_id = response['data'][0]['algoId']
-            logger.log_info(f"✅ 永续合约条件单创建成功: {algo_id}")
+            logger.log_info(f"✅ {symbol}: 永续合约条件单创建成功: {algo_id}")
             return True
         else:
             logger.log_error("algo_order_failed", f"永续合约条件单创建失败: {response}")
@@ -1366,7 +1377,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         - Existing position same as current signal → Continue holding, check stop loss
         - Signal is HOLD but position exists → Decide whether to hold based on technical indicators
 
-        【Key Technical Levels for BTC/USDT】
+        【Key Technical Levels for {symbol}】
         - Strong Resistance: When price approaches recent high + Bollinger Band upper
         - Strong Support: When price approaches recent low + Bollinger Band lower
         - Breakout Confirmation: Requires closing price break + volume > 20-period average
@@ -1374,7 +1385,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         """
 
         prompt = f"""
-        You are a professional cryptocurrency trading analyst. Please analyze based on the following BTC/USDT {TRADE_CONFIG.timeframe} period data:
+        You are a professional cryptocurrency trading analyst. Please analyze based on the following {symbol} {config.timeframe} period data:  # 修改这里
 
         {kline_text}
 
@@ -1389,7 +1400,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         - Time: {price_data['timestamp']}
         - Current K-line high: ${price_data['high']:,.2f}
         - Current K-line low: ${price_data['low']:,.2f}
-        - Current K-line volume: {price_data['volume']:.2f} BTC
+        - Current K-line volume: {price_data['volume']:.2f} {symbol}
         - Price change: {price_data['price_change']:+.2f}%
         - Current position: {position_text}{pnl_text}
 
@@ -1600,7 +1611,7 @@ def execute_profit_taking(symbol: str, current_position: dict, profit_taking_sig
                     'original_position_size': position_size
                 }
                 log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
-                log_perpetual_order_details('sell', close_size, 'market', reduce_only=True, take_profit=True)
+                log_perpetual_order_details(symbol, 'sell', close_size, 'market', reduce_only=True, take_profit=True)
                 
                 exchange.create_market_order(
                     config.symbol,
@@ -1620,7 +1631,7 @@ def execute_profit_taking(symbol: str, current_position: dict, profit_taking_sig
                     'original_position_size': position_size
                 }
                 log_order_params("永续合约止盈平仓", profit_params, "execute_profit_taking")
-                log_perpetual_order_details('buy', close_size, 'market', reduce_only=True, take_profit=True)
+                log_perpetual_order_details(symbol,'buy', close_size, 'market', reduce_only=True, take_profit=True)
                 
                 exchange.create_market_order(
                     config.symbol,
@@ -1646,7 +1657,7 @@ def set_initial_stop_loss(symbol: str, signal: str, position_size: float, stop_l
     """设置初始止损订单"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        # 确定止损方向
+        # 确定止损方向 - 修正逻辑
         if signal == 'BUY':
             # 多头持仓，止损是卖出
             side = 'sell'
@@ -1660,8 +1671,8 @@ def set_initial_stop_loss(symbol: str, signal: str, position_size: float, stop_l
         if isinstance(stop_loss_price, str):
             stop_loss_price = float(stop_loss_price)
             
-        # 验证止损价格
-        stop_loss_price = validate_stop_loss_for_order(side.lower(), stop_loss_price, current_price)
+        # 验证止损价格 - 根据实际方向验证
+        stop_loss_price = validate_stop_loss_for_order(side, stop_loss_price, current_price)
         
         logger.log_info(f"🛡️ {symbol}: 设置新止损单 - {side} {position_size}张, 触发价{stop_loss_price:.1f}")
         
@@ -1691,50 +1702,6 @@ def set_initial_stop_loss(symbol: str, signal: str, position_size: float, stop_l
     except Exception as e:
         logger.log_error(f"initial_stop_loss_{symbol}", f"止损设置异常: {str(e)}")
         return False
-    
-def setup_trailing_stop(current_position, activation_ratio=0.50, trailing_ratio=0.20, price_data=None):
-    """设置移动止损"""
-    try:
-        if not current_position:
-            return False
-            
-        entry_price = current_position['entry_price']
-        current_price = price_data['price'] if price_data else get_current_price()
-        position_size = current_position['size']
-        side = current_position['side']
-        
-        if side == 'long':
-            profit_ratio = (current_price - entry_price) / entry_price
-            if profit_ratio >= activation_ratio:
-                # 计算移动止损价格
-                trailing_stop_price = current_price * (1 - trailing_ratio)
-                logger.log_info(f"📈 设置多头移动止损: {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
-                # 这里可以调用设置移动止损的API
-                return set_trailing_stop_order(current_position, trailing_stop_price)
-        else:  # short
-            profit_ratio = (entry_price - current_price) / entry_price
-            if profit_ratio >= activation_ratio:
-                # 计算移动止损价格
-                trailing_stop_price = current_price * (1 + trailing_ratio)
-                logger.log_info(f"📉 设置空头移动止损: {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
-                # 这里可以调用设置移动止损的API
-                return set_trailing_stop_order(current_position, trailing_stop_price)
-                
-        return False
-        
-    except Exception as e:
-        logger.log_error("trailing_stop_setup", str(e))
-        return False
-
-def get_current_price(symbol: str): # 新增 symbol 参数
-    """获取当前价格"""
-    try:
-        # 使用传入的 symbol
-        ticker = exchange.fetch_ticker(symbol)
-        return ticker['last']
-    except Exception as e:
-        logger.log_error("current_price", str(e))
-        return None
     
 def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss_ratio=0.40):
     """
@@ -1845,8 +1812,8 @@ def validate_stop_loss_for_order(side, stop_loss_price, current_price):
                 return adjusted_stop_loss
             else:
                 return stop_loss_price
-        else:  # sell
-            # 空头：止损价格必须高于当前价格
+        else:  # sell - 这是平仓方向，不是开仓方向
+            # 空头持仓的止损是买入平仓，但止损价格应该高于当前价格（对空头不利）
             if stop_loss_price <= current_price:
                 logger.log_error("stop_loss_validation", 
                                f"空头止损价格无效: {stop_loss_price:.2f} <= {current_price:.2f}")
@@ -1885,6 +1852,7 @@ def calculate_limit_price(side, current_price, ticker):
         logger.log_error("limit_price_calculation", str(e))
         # 备用计算：使用当前价格
         return current_price
+    
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 包含完整止损止盈设置"""
     global position
@@ -1960,7 +1928,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     'tag': order_tag
                 }
                 log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
-                log_perpetual_order_details('buy', current_position['size'], 'market', reduce_only=True)
+                log_perpetual_order_details(symbol,'buy', current_position['size'], 'market', reduce_only=True)
                 
                 exchange.create_market_order(
                     config.symbol,
@@ -1976,9 +1944,9 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             }
             
             log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
-            log_perpetual_order_details('buy', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
+            log_perpetual_order_details(symbol,'buy', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
             
-            logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {limit_price:.2f}")
+            logger.log_info(f"✅ {symbol}:限价开多仓提交 - {position_size}张 @ {limit_price:.2f}")
 
             # 创建限价开仓订单
             exchange.create_limit_order(
@@ -2011,7 +1979,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     'tag': order_tag
                 }
                 log_order_params("永续合约平仓", close_params, "execute_intelligent_trade")
-                log_perpetual_order_details('sell', current_position['size'], 'market', reduce_only=True)
+                log_perpetual_order_details(symbol,'sell', current_position['size'], 'market', reduce_only=True)
                 
                 exchange.create_market_order(
                     config.symbol,
@@ -2027,7 +1995,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             }
             
             log_limit_order_params("开仓", open_params, limit_price, calculated_stop_loss, "execute_intelligent_trade")
-            log_perpetual_order_details('sell', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
+            log_perpetual_order_details(symbol,'sell', position_size, 'limit', reduce_only=False, stop_loss_price=calculated_stop_loss)
             
             logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {limit_price:.2f}")
             
@@ -2096,7 +2064,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         logger.log_error(f"trade_execution_{symbol}", str(e))
         
         # 如果限价单失败，尝试使用条件单
-        logger.log_warning("⚠️ 限价单失败，尝试使用条件单...")
+        logger.log_warning(f"⚠️ {symbol}限价单失败，尝试使用条件单...")
         try:
             if signal_data['signal'] == 'BUY':
                 # 🆕 合并条件单日志
@@ -2110,11 +2078,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     algo_order_type='conditional'
                 )
                 if result and calculated_stop_loss:
-                    set_initial_stop_loss('BUY', position_size, calculated_stop_loss, current_price)
+                    set_initial_stop_loss(symbol,'BUY', position_size, calculated_stop_loss, current_price)
                     
             elif signal_data['signal'] == 'SELL':
                 # 🆕 合并条件单日志
-                logger.log_info(f"🔄 条件单开空仓: {position_size}张 @ {bid_price * 1.001:.2f}")
+                logger.log_info(f"🔄 {symbol}条件单开空仓: {position_size}张 @ {bid_price * 1.001:.2f}")
                 
                 result = create_algo_order(
                     inst_id=get_correct_inst_id(symbol),
@@ -2124,9 +2092,9 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                     algo_order_type='conditional'
                 )
                 if result and calculated_stop_loss:
-                    set_initial_stop_loss('SELL', position_size, calculated_stop_loss, current_price)
+                    set_initial_stop_loss(symbol,'SELL', position_size, calculated_stop_loss, current_price)
                     
-            logger.log_info("✅ 条件单开仓成功")
+            logger.log_info(f"✅ {symbol}条件单开仓成功")
         except Exception as e2:
             logger.log_error("fallback_order", f"备用订单也失败: {str(e2)}")
 
@@ -2260,7 +2228,7 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
                 'tag': order_tag
             }
             log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details('sell', position_size, 'market', reduce_only=True)
+            log_perpetual_order_details(symbol,'sell', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
                 exchange.create_market_order(
@@ -2276,7 +2244,7 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
                 'tag': order_tag
             }
             log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details('buy', position_size, 'market', reduce_only=True)
+            log_perpetual_order_details(symbol,'buy', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
                 exchange.create_market_order(
@@ -2548,7 +2516,7 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
                 'tag': order_tag
             }
             log_order_params("启动平仓", close_params, "close_position_with_reason")
-            log_perpetual_order_details('sell', position['size'], 'market', reduce_only=True)
+            log_perpetual_order_details(symbol,'sell', position['size'], 'market', reduce_only=True)
             
             if not config.test_mode:
                 exchange.create_market_order(
@@ -2564,7 +2532,7 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
                 'tag': order_tag
             }
             log_order_params("启动平仓", close_params, "close_position_with_reason")
-            log_perpetual_order_details('buy', position['size'], 'market', reduce_only=True)
+            log_perpetual_order_details(symbol,'buy', position['size'], 'market', reduce_only=True)
             
             if not config.test_mode:
                 exchange.create_market_order(
