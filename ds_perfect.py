@@ -625,7 +625,7 @@ def log_api_response(response, function_name=""):
         logger.log_error("log_api_response", f"记录API响应失败: {str(e)}")
 
 def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str], algo_order_type='conditional'):
-    """创建算法订单 - 永续合约条件单（不取消现有订单）"""
+    """创建算法订单 - 永续合约条件单（修复版本）"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         # 确保使用正确的合约ID
@@ -639,7 +639,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
             
         margin_mode = getattr(config, 'margin_mode', 'isolated')
         
-        # 构建永续合约条件单参数 - 修正参数名
+        # 🆕 修复：使用正确的参数构建
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
@@ -648,13 +648,14 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
             'sz': sz,
             'tpTriggerPx': str(round(trigger_price, 1)),
             'tpOrdPx': '-1',
-            'posSide': 'net',  # 单向持仓
-            'ordType': 'market'  # 触发后使用市价单
+            # 🆕 移除可能导致错误的参数
+            # 'posSide': 'net',  # 单向持仓
+            # 'ordType': 'market'  # 触发后使用市价单
         }
         
         # 记录完整的订单参数
         log_order_params("永续合约条件单", params, "create_algo_order")
-        log_perpetual_order_details(symbol, side, sz, 'conditional_stop', stop_loss=True, stop_loss_price=trigger_price)  # 添加 symbol
+        log_perpetual_order_details(symbol, side, sz, 'conditional_stop', stop_loss=True, stop_loss_price=trigger_price)
         
         logger.log_info(f"📊 创建永续合约条件单: {side} {sz} @ {trigger_price}")
         
@@ -1103,6 +1104,51 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
         logger.log_error("set_trailing_stop_order", str(e))
         return False
 
+def create_take_profit_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str]) -> bool:
+    """创建止盈算法订单 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        inst_id = get_correct_inst_id(symbol)
+        
+        if isinstance(trigger_price, str):
+            trigger_price = float(trigger_price)
+        if isinstance(sz, (int, float)):
+            sz = str(round(sz, 2))
+            
+        margin_mode = getattr(config, 'margin_mode', 'isolated')
+        
+        # 🆕 修复：使用正确的参数构建止盈条件单
+        params = {
+            'instId': inst_id,
+            'tdMode': margin_mode,
+            'algoOrdType': 'conditional',  # 条件单类型
+            'side': side.upper(),
+            'sz': sz,
+            'tpTriggerPx': str(round(trigger_price, 1)),
+            'tpOrdPx': '-1',  # 触发后市价单
+            # 🆕 移除错误的参数
+            # 'posSide': 'net',  # 这个参数可能导致错误
+            # 'ordType': 'market'  # 这个参数在条件单中不需要
+        }
+        
+        log_order_params("永续合约止盈单", params, "create_take_profit_algo_order")
+        
+        logger.log_info(f"📈 {symbol}: 创建止盈条件单 - {side} {sz} @ {trigger_price}")
+        
+        response = exchange.privatePostTradeOrderAlgo(params)
+        log_api_response(response, "create_take_profit_algo_order")
+        
+        if response['code'] == '0':
+            algo_id = response['data'][0]['algoId']
+            logger.log_info(f"✅ {symbol}: 止盈条件单创建成功: {algo_id}")
+            return True
+        else:
+            logger.log_error(f"take_profit_order_failed_{symbol}", f"止盈条件单创建失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.log_error(f"create_take_profit_algo_order_{symbol}", f"创建止盈条件单异常: {str(e)}")
+        return False
 
 def adjust_take_profit_dynamically(symbol: str, current_position: dict, price_data: dict) -> bool:
     """动态调整止盈位置"""
@@ -1282,51 +1328,6 @@ def set_initial_take_profit(symbol: str, signal: str, position_size: float, take
             
     except Exception as e:
         logger.log_error(f"initial_take_profit_{symbol}", f"止盈设置异常: {str(e)}")
-        return False
-
-def create_take_profit_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str]) -> bool:
-    """创建止盈算法订单"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        inst_id = get_correct_inst_id(symbol)
-        
-        if isinstance(trigger_price, str):
-            trigger_price = float(trigger_price)
-        if isinstance(sz, (int, float)):
-            sz = str(round(sz, 2))
-            
-        margin_mode = getattr(config, 'margin_mode', 'isolated')
-        
-        # 构建永续合约止盈条件单参数
-        params = {
-            'instId': inst_id,
-            'tdMode': margin_mode,
-            'algoOrdType': 'conditional',
-            'side': side.upper(),
-            'sz': sz,
-            'tpTriggerPx': str(round(trigger_price, 1)),
-            'tpOrdPx': '-1',  # 触发后市价单
-            'posSide': 'net',
-            'ordType': 'market'
-        }
-        
-        log_order_params("永续合约止盈单", params, "create_take_profit_algo_order")
-        
-        logger.log_info(f"📈 {symbol}: 创建止盈条件单 - {side} {sz} @ {trigger_price}")
-        
-        response = exchange.privatePostTradeOrderAlgo(params)
-        log_api_response(response, "create_take_profit_algo_order")
-        
-        if response['code'] == '0':
-            algo_id = response['data'][0]['algoId']
-            logger.log_info(f"✅ {symbol}: 止盈条件单创建成功: {algo_id}")
-            return True
-        else:
-            logger.log_error(f"take_profit_order_failed_{symbol}", f"止盈条件单创建失败: {response}")
-            return False
-            
-    except Exception as e:
-        logger.log_error(f"create_take_profit_algo_order_{symbol}", f"创建止盈条件单异常: {str(e)}")
         return False
 
 def safe_json_parse(json_str):
