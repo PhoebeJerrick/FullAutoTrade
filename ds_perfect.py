@@ -157,6 +157,124 @@ def get_current_price(symbol: str): # 新增 symbol 参数
         logger.log_error("current_price", str(e))
         return None
 
+def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
+    """基于账户规模计算动态基础金额"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    # 方法1：固定比例
+    base_ratio = 0.02  # 2% of total balance
+    dynamic_base = usdt_balance * base_ratio
+    
+    # 方法2：分级比例（资金越大，单次投资比例越小）
+    if usdt_balance > 10000:
+        base_ratio = 0.015
+    elif usdt_balance > 5000:
+        base_ratio = 0.02
+    else:
+        base_ratio = 0.03
+        
+    dynamic_base = usdt_balance * base_ratio
+    
+    # 设置上下限
+    min_base = 50  # 最小50U
+    max_base = 500 # 最大500U
+    
+    return max(min_base, min(dynamic_base, max_base))
+
+
+def calculate_volatility_adjustment(symbol: str, df: pd.DataFrame) -> float:
+    """基于波动率调整仓位"""
+    # 计算ATR波动率
+    atr = calculate_atr(df)
+    current_price = df['close'].iloc[-1]
+    atr_percentage = (atr / current_price) * 100
+    
+    # 波动率越大，仓位越小
+    if atr_percentage > 3.0:  # 高波动
+        return 0.5
+    elif atr_percentage > 2.0:  # 中波动
+        return 0.8
+    else:  # 低波动
+        return 1.0
+
+def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
+    """增强版仓位计算"""
+    config = SYMBOL_CONFIGS[symbol]
+    posMngmt = config.position_management
+    
+    try:
+        # 获取账户余额
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        
+        # 1. 动态基础金额（基于账户规模）
+        dynamic_base_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
+        
+        # 2. 信心倍数
+        confidence_multiplier = {
+            'HIGH': posMngmt['high_confidence_multiplier'],
+            'MEDIUM': posMngmt['medium_confidence_multiplier'],
+            'LOW': posMngmt['low_confidence_multiplier']
+        }.get(signal_data['confidence'], 1.0)
+        
+        # 3. 趋势倍数
+        trend = price_data['trend_analysis'].get('overall', 'Consolidation')
+        if trend in ['Strong uptrend', 'Strong downtrend']:
+            trend_multiplier = posMngmt['trend_strength_multiplier']
+        else:
+            trend_multiplier = 1.0
+        
+        # 4. RSI调整
+        rsi = price_data['technical_data'].get('rsi', 50)
+        if rsi > 75 or rsi < 25:
+            rsi_multiplier = 0.7
+        else:
+            rsi_multiplier = 1.0
+        
+        # 5. 波动率调整
+        volatility_multiplier = calculate_volatility_adjustment(symbol, price_data['full_data'])
+        
+        # 6. 杠杆调整（如果使用高杠杆，减少仓位）
+        leverage_multiplier = 1.0 / min(config.leverage, 10)  # 杠杆越高，实际仓位越小
+        
+        # 计算建议投资金额
+        suggested_usdt = (dynamic_base_usdt * confidence_multiplier * 
+                         trend_multiplier * rsi_multiplier * 
+                         volatility_multiplier * leverage_multiplier)
+        
+        # 风险上限
+        max_usdt = usdt_balance * posMngmt['max_position_ratio']
+        final_usdt = min(suggested_usdt, max_usdt)
+        
+        # 转换为合约张数
+        contract_size = final_usdt / (price_data['price'] * config.contract_size)
+        contract_size = round(contract_size, 2)  # 精度处理
+        
+        # 确保最小交易量
+        min_contracts = getattr(config, 'min_amount', 0.01)
+        if contract_size < min_contracts:
+            contract_size = min_contracts
+        
+        # 详细日志
+        calculation_details = f"""
+        🎯 增强版仓位计算详情:
+        账户余额: {usdt_balance:.2f} USDT
+        动态基础: {dynamic_base_usdt:.2f} USDT
+        信心倍数: {confidence_multiplier} | 趋势倍数: {trend_multiplier}
+        RSI倍数: {rsi_multiplier} | 波动率倍数: {volatility_multiplier}
+        杠杆倍数: {leverage_multiplier}
+        建议投资: {suggested_usdt:.2f} USDT → 最终投资: {final_usdt:.2f} USDT
+        合约数量: {contract_size:.2f}张
+        """
+        logger.log_info(calculation_details)
+        
+        return contract_size
+        
+    except Exception as e:
+        logger.log_error("enhanced_position_calculation", str(e))
+        # 降级到原版计算
+        return calculate_intelligent_position(symbol, signal_data, price_data, current_position)
+
 def log_perpetual_order_details(symbol: str, side: str, amount: float, order_type: str, reduce_only=False, stop_loss=False, take_profit=False, stop_loss_price=None):
     """简化版订单详情日志"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2246,7 +2364,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         signal_data['take_profit'] = calculated_take_profit
 
     # 计算智能仓位
-    position_size = calculate_intelligent_position(symbol, signal_data, price_data, current_position)
+    position_size = calculate_enhanced_position(symbol, signal_data, price_data, current_position)
 
     # 🆕 修复：安全地记录日志，避免 None 值格式化错误
     try:
