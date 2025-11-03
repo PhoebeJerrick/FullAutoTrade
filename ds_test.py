@@ -244,12 +244,21 @@ def create_market_order_with_sl_tp(side: str, amount: float,
         logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
         logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
         logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
-        
+
+        # 打印原始请求数据
+        logger.info("🚀 市价单原始请求数据:")
+        logger.info(f"   接口: POST /api/v5/trade/order")
+        logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+
         # 使用CCXT的私有API方法调用/trade/order接口
         response = exchange.private_post_trade_order(params)
         
         log_api_response(response, "create_market_order_with_sl_tp")
-        
+
+        # 打印原始响应数据
+        logger.info("📥 市价单原始响应数据:")
+        logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
             logger.info(f"✅ 市价单创建成功: {order_id}")
