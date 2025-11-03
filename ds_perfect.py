@@ -308,16 +308,28 @@ position = None
 
 
 def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
-    """Calculate intelligent position size - fixed version"""
+    """Calculate intelligent position size - with additional safety checks"""
     config = SYMBOL_CONFIGS[symbol]
     posMngmt = config.position_management
 
-    # 🆕 New: If intelligent position is disabled, use fixed position
-    if not posMngmt.get('enable_intelligent_position', True):
-        fixed_contracts = 0.1
-        logger.log_info(f"🔧 智能仓位已禁用，使用固定仓位: {fixed_contracts}张")
-        return fixed_contracts
+    # 🆕 安全检查：确保 price_data 存在且包含价格
+    if not price_data or 'price' not in price_data or not price_data['price']:
+        logger.log_error("position_calculation", "价格数据无效，使用最小仓位")
+        return getattr(config, 'min_amount', 0.01)
 
+    # 🆕 安全检查：确保配置存在
+    if not posMngmt:
+        logger.log_error("position_calculation", "仓位管理配置缺失，使用最小仓位")
+        return getattr(config, 'min_amount', 0.01)
+
+        logger.log_error("position_calculation", "价格数据无效，使用最小仓位")
+        return getattr(config, 'min_amount', 0.01)
+
+    # 🆕 安全检查：确保配置存在
+    if not posMngmt:
+        logger.log_error("position_calculation", "仓位管理配置缺失，使用最小仓位")
+        return getattr(config, 'min_amount', 0.01)
+    
     try:
         # Get account balance
         balance = exchange.fetch_balance()
@@ -1924,10 +1936,25 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     # 计算智能仓位
     position_size = calculate_intelligent_position(symbol, signal_data, price_data, current_position)
 
-    logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张 | 止损: {calculated_stop_loss:.2f} | 止盈: {calculated_take_profit:.2f}")
+    # 🆕 修复：安全地记录日志，避免 None 值格式化错误
+    try:
+        if signal_data['signal'] in ['BUY', 'SELL']:
+            logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张 | 止损: {calculated_stop_loss:.2f} | 止盈: {calculated_take_profit:.2f}")
+        else:
+            # 对于 HOLD 信号，不显示止损止盈
+            logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张")
+    except Exception as log_error:
+        # 如果日志记录失败，使用安全的方式记录
+        logger.log_info(f"🎯 {symbol}: 交易信号 - {signal_data['signal']} | 仓位: {position_size:.2f}张")
+        logger.log_warning(f"⚠️ 日志格式化失败: {str(log_error)}")
 
     if config.test_mode:
         logger.log_info("测试模式 - 仅模拟交易")
+        return
+    
+    # 🆕 修复：对于 HOLD 信号，直接返回，不执行交易
+    if signal_data['signal'] == 'HOLD':
+        logger.log_info(f"⏸️ {symbol}: 保持观望，不执行交易")
         return
     
     try:
