@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-ds_test.py - 限价单止损止盈API测试程序
+ds_test.py - 限价单/市价单-止损止盈API测试程序
+以下代码演示了如何使用CCXT库与OKX交易所交互，
+并且两个接口(市价单设置止盈止损和限价单设置止盈止损)都已经测试通过。
 根据OKX官方API文档使用/trade/order接口同时设置止盈止损
 """
 
