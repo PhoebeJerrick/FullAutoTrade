@@ -24,14 +24,14 @@ load_dotenv(dotenv_path=env_path)
 
 # 简单的日志系统
 class TestLogger:
-    def __init__(self):
-        self.log_file = f"limit_order_sl_tp_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    def __init__(self, log_file='../Output/trading.log', level='INFO'):
+        self.log_file = log_file
     
     def log(self, level: str, message: str):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = f"{timestamp} - {level} - {message}"
         print(log_entry)
-        
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         with open(self.log_file, 'a', encoding='utf-8') as f:
             f.write(log_entry + '\n')
     
