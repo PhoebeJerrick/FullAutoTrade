@@ -17,6 +17,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
+from ccxt.base.exchange import Exchange  # 导入Exchange基类用于拦截请求
 
 # 加载环境变量
 env_path = '../ExApiConfig/ExApiConfig.env'
@@ -49,6 +50,33 @@ class TestLogger:
 
 logger = TestLogger()
 
+# 自定义交易所类，仅拦截create_order相关的请求和响应
+class CustomOKX(ccxt.okx):
+    def __init__(self, config):
+        super().__init__(config)
+    
+    # 重写request方法，只记录create_order相关的请求
+    def request(self, path, method='GET', params=None, headers=None, body=None):
+        # 判断是否为创建订单的请求路径
+        is_create_order = path.endswith('/order') and method == 'POST'
+        
+        if is_create_order:
+            logger.debug("📤 原始请求:")
+            logger.debug(f"   路径: {path}")
+            logger.debug(f"   方法: {method}")
+            logger.debug(f"   参数: {params}")
+            logger.debug(f"   头部: {headers}")
+            logger.debug(f"    body: {body}")
+        
+        # 执行原始请求
+        response = super().request(path, method, params, headers, body)
+        
+        if is_create_order:
+            logger.debug("📥 原始响应:")
+            logger.debug(f"   响应数据: {response}")
+        
+        return response
+
 # 交易配置
 class TestConfig:
     def __init__(self):
@@ -73,9 +101,9 @@ def get_account_config(account_name="default"):
         'password': os.getenv('OKX_PASSWORD_2')
     }
 
-# 初始化交易所
+# 初始化交易所（使用自定义的OKX类）
 account_config = get_account_config()
-exchange = ccxt.okx({
+exchange = CustomOKX({
     'options': {
         'defaultType': 'swap',
     },
@@ -532,60 +560,14 @@ def run_stop_loss_take_profit_test():
     # 7. 检查止损止盈是否设置成功
     sl_tp_success = check_sl_tp_orders(position['position_id'])
     if not sl_tp_success:
-        logger.warning("⚠️ 止损止盈订单设置可能未成功，尝试手动创建...")
-        # 这里可以添加手动创建止损止盈的备选逻辑
-    
-    logger.info("✅ 开始监控持仓和订单...")
+        logger.warning("⚠️ 止损止盈订单设置可能未成功，继续监控")
     
     # 8. 监控持仓和订单状态
-    test_success = monitor_position_and_orders(timeout=120)  # 监控2分钟
+    monitor_position_and_orders()
     
-    if test_success:
-        logger.info("🎉 止损止盈测试完全成功!")
-        return True
-    else:
-        logger.warning("⚠️ 止损止盈测试可能未完全成功")
-        return False
-
-def main():
-    """主函数"""
-    try:
-        logger.info("=" * 60)
-        logger.info("🔧 永续合约止损止盈API测试程序 - 支持限价开仓时同步设置止损止盈")
-        logger.info("=" * 60)
-        
-        # 确认测试参数
-        logger.info("📋 测试配置:")
-        logger.info(f"   交易对: {config.symbol}")
-        logger.info(f"   杠杆: {config.leverage}x")
-        logger.info(f"   保证金模式: {config.margin_mode}")
-        logger.info(f"   测试金额: {config.base_usdt_amount} USDT")
-        logger.info(f"   止损比例: {config.stop_loss_percent}%")
-        logger.info(f"   止盈比例: {config.take_profit_percent}%")
-        logger.info(f"   测试模式: {'是' if config.test_mode else '否'}")
-        
-        # 用户确认
-        if not config.test_mode:
-            logger.warning("⚠️ 注意: 这不是测试模式，将执行真实交易!")
-            confirm = input("确认继续? (yes/no): ")
-            if confirm.lower() != 'yes':
-                logger.info("测试取消")
-                return
-        
-        # 运行测试
-        success = run_stop_loss_take_profit_test()
-        
-        if success:
-            logger.info("🎊 所有测试完成!")
-        else:
-            logger.error("💥 测试失败!")
-            
-    except KeyboardInterrupt:
-        logger.info("🛑 用户中断测试")
-    except Exception as e:
-        logger.error(f"💥 测试程序异常: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    logger.info("=" * 50)
+    logger.info("🏁 止损止盈API测试结束")
+    return True
 
 if __name__ == "__main__":
-    main()
+    run_stop_loss_take_profit_test()
