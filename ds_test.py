@@ -163,24 +163,23 @@ def setup_exchange():
     try:
         logger.info("🔄 设置交易所参数...")
         
-        # 设置杠杆 - 修改这部分代码
+        # 设置杠杆 - 使用ccxt标准方法并传递正确参数
         leverage_params = {
-            'instId': get_correct_inst_id(),  # 使用正确的合约ID
-            'lever': config.leverage,         # OKX使用lever参数而非leverage
-            'mgnMode': config.margin_mode     # 添加保证金模式参数
+            'instId': get_correct_inst_id(),  # OKX需要的合约ID
+            'mgnMode': config.margin_mode     # 保证金模式
         }
         
         log_order_params("设置杠杆", leverage_params, "setup_exchange")
         
-        # 直接调用私有API设置杠杆，避免ccxt封装可能带来的问题
-        response = exchange.private_post_account_setLeverage(leverage_params)
-        log_api_response(response, "setup_exchange")
+        # 使用ccxt标准方法设置杠杆，传递正确的参数
+        response = exchange.set_leverage(
+            config.leverage, 
+            config.symbol,
+            params=leverage_params
+        )
         
-        if response.get('code') == '0':
-            logger.info(f"✅ 杠杆设置成功: {config.leverage}x")
-        else:
-            logger.error(f"❌ 杠杆设置失败: {response.get('msg')}")
-            return False
+        log_api_response(response, "setup_exchange")
+        logger.info(f"✅ 杠杆设置成功: {config.leverage}x")
         
         # 获取账户余额
         balance = exchange.fetch_balance()
