@@ -247,33 +247,53 @@ def check_current_margin_mode(symbol: str):
 
 def setup_exchange(symbol: str):
     """
-    智能交易所设置：简化版本，专注于必要的设置
+    智能交易所设置：设置杠杆和保证金模式，并获取合约规格
     """
+    # 动态加载当前 symbol 的配置
     config = SYMBOL_CONFIGS[symbol]
     
     try:
-        # 1. 获取合约规格（这是最重要的）
+        # 1. 先获取合约规格
         markets = exchange.load_markets()
         if symbol not in markets:
             logger.log_error("exchange_setup", f"Symbol {symbol} not supported by exchange.")
             return False
             
         market_info = markets[symbol]
+        
+        # 动态更新配置实例的合约信息
         config.contract_size = float(market_info.get('contractSize', 1.0))
         config.min_amount = market_info['limits']['amount']['min']
         
         logger.log_info(f"✅ Contract {symbol}: 1 contract = {config.contract_size} base asset")
         logger.log_info(f"📏 Min trade {symbol}: {config.min_amount} contracts")
         
-        # 2. 只设置杠杆，跳过保证金模式设置（让交易所使用默认或现有设置）
+        # 2. 设置杠杆（使用更安全的方式）
         leverage = getattr(config, 'leverage', 50)
         logger.log_info(f"⚙️ Setting leverage for {symbol} to {leverage}x...")
         try:
-            # 简化的杠杆设置
-            exchange.set_leverage(leverage, symbol)
+            # 使用OKX特定的API设置杠杆
+            exchange.private_post_account_set_leverage({
+                'instId': get_correct_inst_id(symbol),
+                'lever': str(leverage),
+                'mgnMode': config.margin_mode
+            })
             logger.log_warning(f"✅ Leverage {leverage}x set for {symbol}")
         except Exception as e:
             logger.log_warning(f"⚠️ Leverage setting failed for {symbol}: {e}")
+            
+        # 3. 设置保证金模式（使用OKX特定的API）
+        logger.log_info(f"⚙️ Setting margin mode for {symbol} to {config.margin_mode}...")
+        try:
+            # 使用OKX特定的API设置仓位模式
+            exchange.private_post_account_set_position_mode({
+                'posMode': 'long_short_mode' if config.margin_mode == 'cross' else 'net_mode'
+            })
+            logger.log_warning(f"✅ Margin mode {config.margin_mode} set for {symbol}")
+        except Exception as e:
+            # 如果设置失败，可能是已经设置过了，记录警告但不中断流程
+            logger.log_warning(f"⚠️ Margin mode setting failed for {symbol}: {e}")
+            logger.log_warning(f"ℹ️ This might be because the mode is already set, continuing...")
         
         return True
 
