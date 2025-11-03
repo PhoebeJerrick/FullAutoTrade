@@ -2810,11 +2810,11 @@ def main():
     global SYMBOL_CONFIGS
     
     # TEST : 列出所有可用的私有API方法
-    exchge = ccxt.okx()
-    print("所有可用的私有API方法:")
-    private_methods = [method for method in dir(exchge) if method.startswith('private')]
-    for method in private_methods:
-        print(method)
+    # exchge = ccxt.okx()
+    # print("所有可用的私有API方法:")
+    # private_methods = [method for method in dir(exchge) if method.startswith('private')]
+    # for method in private_methods:
+    #     print(method)
 
     # 1. 动态加载交易品种列表
     symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
