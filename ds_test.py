@@ -192,10 +192,10 @@ def calculate_limit_price(side: str, current_price: float) -> float:
     """计算限价单价格"""
     if side == 'buy':
         # 买入限价单：价格低于当前价
-        limit_price = current_price * (1 - config.price_offset_percent)
+        limit_price = current_price * (1 + config.price_offset_percent)
     else:
         # 卖出限价单：价格高于当前价
-        limit_price = current_price * (1 + config.price_offset_percent)
+        limit_price = current_price * (1 - config.price_offset_percent)
     
     logger.info(f"🎯 限价单价格计算: {side} @ {limit_price:.2f} (当前价: {current_price:.2f})")
     return limit_price
