@@ -1977,9 +1977,10 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tag': order_tag
             }
 
+            log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
             logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
             response = exchange.private_post_trade_order(open_params)
-            log_api_response(response, "execute_intelligent_trade_buy")
+            log_api_response(response, "execute_intelligent_trade")
 
         elif signal_data['signal'] == 'SELL':
             # 检查是否有现有多头持仓，先平仓
@@ -2015,10 +2016,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpTriggerPxType': 'last',
                 'tag': order_tag
             }
+            log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
 
             logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
             response = exchange.private_post_trade_order(open_params)
-            log_api_response(response, "execute_intelligent_trade_sell")
+            log_api_response(response, "execute_intelligent_trade")
 
         # 处理订单响应
         if response.get('code') == '0':
