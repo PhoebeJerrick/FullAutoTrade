@@ -1515,15 +1515,19 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
             )
 
             # Safely parse JSON
-            result = response.choices[0].message.content
+            result = response.choices[0].message.content.strip()
             logger.log_info(f"DeepSeek original reply: {result}")
 
+            # 关键：清理非法引号（如 20-"period" → 20-period）
+            cleaned_content = re.sub(r'(\d+)-"(\w+)"', r'\1-\2', result)  # 移除数字后的引号
+            cleaned_content = re.sub(r'"(\w+)"-(\d+)', r'\1-\2', cleaned_content)  # 移除数字前的引号（如果有）
+
             # Extract JSON part
-            start_idx = result.find('{')
-            end_idx = result.rfind('}') + 1
+            start_idx = cleaned_content.find('{')
+            end_idx = cleaned_content.rfind('}') + 1
 
             if start_idx != -1 and end_idx != 0:
-                json_str = result[start_idx:end_idx]
+                json_str = cleaned_content[start_idx:end_idx]
                 signal_data = safe_json_parse(json_str)
 
                 if signal_data is None:
@@ -1557,12 +1561,12 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
 
         except Exception as api_error:
                 # 🔴API call or response processing failed
-                logger.log_error("deepseek_api_call", str(api_error))
+                logger.log_error("deepseek_api_call",  f"API调用失败: {str(api_error)}")
                 return create_fallback_signal(price_data)
             
     except Exception as prep_error:
         # 🔴Preparation phase failed
-        logger.log_error("analysis_preparation", str(prep_error))
+        logger.log_error("analysis_preparation", f"API调用失败: {str(prep_error)}")
         return create_fallback_signal(price_data)
 
 def check_market_conditions(symbol: str) -> bool:
@@ -1698,7 +1702,7 @@ def set_initial_stop_loss(symbol: str, signal: str, position_size: float, stop_l
         
         # 先创建新的止损单
         result = create_algo_order(
-            symbol,
+            symbol=symbol,
             side=side,
             sz=position_size,
             trigger_price=stop_loss_price
@@ -1981,15 +1985,15 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
 
             # 打印原始请求数据
-            logger.info("🚀 buy限价单原始请求数据:")
-            logger.info(f"   接口: POST /api/v5/trade/order")
-            logger.info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
+            logger.log_info("🚀 buy限价单原始请求数据:")
+            logger.log_info(f"   接口: POST /api/v5/trade/order")
+            logger.log_info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
             # 打印原始响应数据
-            logger.info("📥 buy限价单原始响应数据:")
-            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+            logger.log_info("📥 buy限价单原始响应数据:")
+            logger.log_info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         elif signal_data['signal'] == 'SELL':
             # 检查是否有现有多头持仓，先平仓
@@ -2030,15 +2034,15 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
 
             # 打印原始请求数据
-            logger.info("🚀 sell限价单原始请求数据:")
-            logger.info(f"   接口: POST /api/v5/trade/order")
-            logger.info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
+            logger.log_info("🚀 sell限价单原始请求数据:")
+            logger.log_info(f"   接口: POST /api/v5/trade/order")
+            logger.log_info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
             # 打印原始响应数据
-            logger.info("📥 sell限价单原始响应数据:")
-            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+            logger.log_info("📥 sell限价单原始响应数据:")
+            logger.log_info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         # 处理订单响应
         if response.get('code') == '0':
@@ -2073,7 +2077,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 logger.log_info(f"🔄 条件单开多仓: {position_size}张 @ {ask_price * 0.999:.2f}")
                 
                 result = create_algo_order(
-                    inst_id=get_correct_inst_id(symbol),
+                    symbol=symbol,
                     side='buy',
                     sz=position_size,
                     trigger_price=ask_price * 0.999,
@@ -2087,7 +2091,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 logger.log_info(f"🔄 {symbol}条件单开空仓: {position_size}张 @ {bid_price * 1.001:.2f}")
                 
                 result = create_algo_order(
-                    inst_id=get_correct_inst_id(symbol),
+                    symbol=symbol,
                     side='sell',
                     sz=position_size,
                     trigger_price=bid_price * 1.001,
