@@ -64,18 +64,11 @@ class TestConfig:
 # 账号配置
 def get_account_config(account_name="default"):
     """根据账号名称获取对应的配置"""
-    if account_name == "okxMain":
-        return {
-            'api_key': os.getenv('OKX_API_KEY_1') or os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET_1') or os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD_1') or os.getenv('OKX_PASSWORD')
-        }
-    else:  # default
-        return {
-            'api_key': os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD')
-        }
+    return {
+        'api_key': os.getenv('OKX_API_KEY_2'),
+        'secret': os.getenv('OKX_SECRET_2'),
+        'password': os.getenv('OKX_PASSWORD_2')
+    }
 
 # 初始化交易所
 account_config = get_account_config()
