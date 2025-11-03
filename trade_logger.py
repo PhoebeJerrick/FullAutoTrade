@@ -2,11 +2,20 @@ import logging
 import os
 import sys
 from datetime import datetime
-from ds_perfect import account
 
 class TradingLogger:
-    def __init__(self, log_file=f'../Output/{account}/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log', log_level=logging.INFO):
-        self.log_file = log_file
+    def __init__(self,log_level=logging.INFO):
+        try:
+            # 局部导入全局变量，避免循环依赖
+            from ds_perfect import CURRENT_ACCOUNT
+            self.current_account = CURRENT_ACCOUNT
+        except (ImportError, AttributeError):
+            #  fallback：如果导入失败，使用默认账号
+            self.current_account = "default"
+            print("Warning: CURRENT_ACCOUNT not found, using 'default' instead")
+        
+        # 生成日志文件路径
+        self.log_file = f'../Output/{self.current_account}/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         self.setup_logging(log_level)
     
     def setup_logging(self, log_level):
