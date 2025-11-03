@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ds_test.py - 限价单止损止盈API测试程序
-添加原始请求和响应数据打印功能
+根据OKX官方API文档使用/trade/order接口同时设置止盈止损
 """
 
 import os
@@ -71,71 +71,7 @@ def get_account_config(account_name="default"):
         'password': os.getenv('OKX_PASSWORD_2')
     }
 
-# 自定义请求日志记录类
-class RequestLogger:
-    def __init__(self):
-        self.request_count = 0
-    
-    def log_request(self, method, url, headers, body):
-        """记录原始请求数据"""
-        self.request_count += 1
-        logger.info("=" * 80)
-        logger.info(f"🔧 原始请求数据 #{self.request_count}")
-        logger.info("=" * 80)
-        logger.info(f"📤 请求方法: {method}")
-        logger.info(f"🌐 请求URL: {url}")
-        logger.info("📋 请求头:")
-        for key, value in headers.items():
-            if key.lower() in ['ok-access-key', 'ok-access-passphrase', 'ok-access-sign']:
-                logger.info(f"   {key}: {value[:20]}...")  # 只显示部分敏感信息
-            else:
-                logger.info(f"   {key}: {value}")
-        
-        logger.info("📦 请求体:")
-        if body:
-            try:
-                # 尝试解析JSON格式的请求体
-                if isinstance(body, str):
-                    body_dict = json.loads(body)
-                else:
-                    body_dict = json.loads(body.decode('utf-8'))
-                
-                # 美化打印JSON
-                formatted_body = json.dumps(body_dict, indent=2, ensure_ascii=False)
-                for line in formatted_body.split('\n'):
-                    logger.info(f"   {line}")
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # 如果不是JSON，直接打印
-                logger.info(f"   {body}")
-        else:
-            logger.info("   [空请求体]")
-        logger.info("-" * 80)
-    
-    def log_response(self, response):
-        """记录原始响应数据"""
-        logger.info("📥 原始响应数据:")
-        logger.info(f"🔄 状态码: {response.status_code if hasattr(response, 'status_code') else 'N/A'}")
-        logger.info("📋 响应头:")
-        if hasattr(response, 'headers'):
-            for key, value in response.headers.items():
-                logger.info(f"   {key}: {value}")
-        
-        logger.info("📦 响应体:")
-        try:
-            # 尝试解析JSON格式的响应体
-            response_data = response.json()
-            formatted_response = json.dumps(response_data, indent=2, ensure_ascii=False)
-            for line in formatted_response.split('\n'):
-                logger.info(f"   {line}")
-        except (ValueError, AttributeError):
-            # 如果不是JSON，直接打印文本
-            logger.info(f"   {response.text}")
-        logger.info("=" * 80)
-
-# 创建请求日志记录器
-request_logger = RequestLogger()
-
-# 初始化交易所 - 启用详细日志
+# 初始化交易所
 account_config = get_account_config()
 exchange = ccxt.okx({
     'options': {
@@ -144,27 +80,7 @@ exchange = ccxt.okx({
     'apiKey': account_config['api_key'],
     'secret': account_config['secret'],
     'password': account_config['password'],
-    'verbose': True,  # 启用CCXT的详细日志
 })
-
-# 重写fetch方法以捕获原始请求和响应
-original_fetch = exchange.fetch
-
-def custom_fetch(url, method='GET', headers=None, body=None, timeout=30):
-    """自定义fetch方法，记录原始请求和响应"""
-    # 记录请求数据
-    request_logger.log_request(method, url, headers or {}, body)
-    
-    # 调用原始fetch方法
-    response = original_fetch(url, method, headers, body, timeout)
-    
-    # 记录响应数据
-    request_logger.log_response(response)
-    
-    return response
-
-# 替换fetch方法
-exchange.fetch = custom_fetch
 
 config = TestConfig()
 
@@ -296,9 +212,11 @@ def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tup
     logger.info(f"🎯 价格计算 - 入场: {entry_price:.2f}, 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
     return stop_loss_price, take_profit_price
 
-def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float, 
-                                 stop_loss_price: float, take_profit_price: float):
-    """创建限价单并同时设置止损止盈 - 使用OKX官方API"""
+
+
+def create_market_order_with_sl_tp(side: str, amount: float, 
+                                  stop_loss_price: float, take_profit_price: float):
+    """创建市价单并同时设置止损止盈 - 使用OKX官方API"""
     try:
         inst_id = get_correct_inst_id()
         
@@ -307,9 +225,8 @@ def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float,
             'instId': inst_id,
             'tdMode': config.margin_mode,
             'side': side,
-            'ordType': 'limit',
+            'ordType': 'market',
             'sz': str(amount),
-            'px': str(limit_price),
             # 止损参数
             'slTriggerPx': str(stop_loss_price),
             'slOrdPx': '-1',  # 市价止损
@@ -321,28 +238,36 @@ def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float,
             'tpTriggerPxType': 'last',  # 触发价格类型：last-最新价格
         }
         
-        log_order_params("限价单带止损止盈", params, "create_limit_order_with_sl_tp")
+        log_order_params("市价单带止损止盈", params, "create_market_order_with_sl_tp")
         
-        logger.info(f"🎯 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f}")
+        logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
         logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
         logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
         
+        # 打印原始请求数据
+        logger.info("🚀 原始请求数据:")
+        logger.info(f"   接口: POST /api/v5/trade/order")
+        logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+        
         # 使用CCXT的私有API方法调用/trade/order接口
-        logger.info("🚀 开始发送API请求...")
         response = exchange.private_post_trade_order(params)
         
-        log_api_response(response, "create_limit_order_with_sl_tp")
+        # 打印原始响应数据
+        logger.info("📥 原始响应数据:")
+        logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+        
+        log_api_response(response, "create_market_order_with_sl_tp")
         
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ 限价单创建成功: {order_id}")
+            logger.info(f"✅ 市价单创建成功: {order_id}")
             return response
         else:
-            logger.error(f"❌ 限价单创建失败: {response}")
+            logger.error(f"❌ 市价单创建失败: {response}")
             return response
             
     except Exception as e:
-        logger.error(f"限价单开仓失败: {str(e)}")
+        logger.error(f"市价单开仓失败: {str(e)}")
         import traceback
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
@@ -378,7 +303,6 @@ def create_market_order_with_sl_tp(side: str, amount: float,
         logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
         
         # 使用CCXT的私有API方法调用/trade/order接口
-        logger.info("🚀 开始发送API请求...")
         response = exchange.private_post_trade_order(params)
         
         log_api_response(response, "create_market_order_with_sl_tp")
@@ -397,7 +321,6 @@ def create_market_order_with_sl_tp(side: str, amount: float,
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
-# 其他函数保持不变...
 def cancel_existing_orders():
     """取消现有的订单"""
     try:
