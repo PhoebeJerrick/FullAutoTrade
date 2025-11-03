@@ -1,24 +1,72 @@
 import os
 import time
+import subprocess
+import re
+from typing import Tuple, List, Dict, Any
 
+# --- 简单版本配置 ---
+VERSION_CONFIG = {
+    'version': '1.0.1',  # 基础版本号
+    'auto_increment': True,  # 是否自动基于Git提交递增
+    'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
+}
+
+# --- NEW: Multi-Symbol Configuration Structure ---
+MULTI_SYMBOL_CONFIGS = {
+    # 默认/参考配置 (BTC)
+    'BTC/USDT:USDT': {
+        'leverage': int(os.getenv('BTC_LEVERAGE', 50)),
+        'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
+        'max_position_ratio': 10,
+    },
+    # ETH 配置
+    'ETH/USDT:USDT': {
+        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    # SOL 配置 (示例)
+    'SOL/USDT:USDT': {
+        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
+        'max_position_ratio': 5,
+    },
+    # LTC 配置 (示例)
+    'LTC/USDT:USDT': {
+        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
+        'max_position_ratio': 5,
+    },
+    # BCH 配置 (示例)
+    'BCH/USDT:USDT': {
+        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+}
 class TradingConfig:
-    """
-    Dynamic configuration management for trading bot
-    """
-    def __init__(self):
+    """Dynamic configuration management for trading bot"""
+    
+    def __init__(self, symbol: str, config_data: dict):
+        # 1. 设置品种信息
+        self.symbol = symbol
+        
+        # 使用传入的配置数据
+        current_config = config_data  # 直接使用传入的配置
+
         # Trading parameters
-        self.symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
-        self.leverage = int(os.getenv('LEVERAGE', 50))  # 修改为50倍杠杆
+        self.leverage = current_config.get('leverage', int(os.getenv('LEVERAGE', 50)))
+        self.base_usdt_amount = current_config.get('base_usdt_amount', float(os.getenv('BASE_USDT_AMOUNT', 100)))
         self.timeframe = os.getenv('TIMEFRAME', '15m')
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
-        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
         
         # Exchange settings
         self.exchange_name = 'okx'
         self.default_type = 'swap'
         
-        # 🆕 添加缺失的配置属性
+        # 添加缺失的配置属性
         self.config_check_interval = 300  # 5 minutes
         self.perf_log_interval = 600      # 10 minutes
         
@@ -32,44 +80,41 @@ class TradingConfig:
         # Position management
         self.position_management = {
             'enable_intelligent_position': True,
-            'base_usdt_amount': float(os.getenv('BASE_USDT_AMOUNT', 100)),
+            'base_usdt_amount': current_config.get('base_usdt_amount', 100.0),
             'high_confidence_multiplier': 1.5,
             'medium_confidence_multiplier': 1.0,
             'low_confidence_multiplier': 0.5,
-            'max_position_ratio': 10,
+            'max_position_ratio': current_config.get('max_position_ratio', 10),
             'trend_strength_multiplier': 1.2
         }
         
-        # 🆕 新增风险管理和止盈止损配置
+        # 风险管理和止盈止损配置
         self.risk_management = {
-            # 止损配置
             'stop_loss': {
-                'max_stop_loss_ratio': 0.40,  # 最大止损比例40%
-                'kline_based_stop_loss': True,  # 基于K线结构设置止损
-                'min_stop_loss_ratio': 0.02,   # 最小止损比例2%
+                'max_stop_loss_ratio': 0.40,
+                'kline_based_stop_loss': True,
+                'min_stop_loss_ratio': 0.02,
             },
-            # 多级止盈配置
             'profit_taking': {
                 'enable_multilevel_take_profit': True,
                 'levels': [
                     {
-                        'profit_multiplier': 1.0,  # 盈利翻倍
-                        'take_profit_ratio': 0.40,  # 止盈40%
+                        'profit_multiplier': 1.0,
+                        'take_profit_ratio': 0.40,
                         'description': '第一目标：盈利100%时止盈40%'
                     },
                     {
-                        'profit_multiplier': 2.0,  # 再翻一倍（总盈利200%）
-                        'take_profit_ratio': 0.30,  # 止盈30%
-                        'set_breakeven_stop': True,  # 剩余部分止损设置为开仓价
+                        'profit_multiplier': 2.0,
+                        'take_profit_ratio': 0.30,
+                        'set_breakeven_stop': True,
                         'description': '第二目标：总盈利200%时再止盈30%，剩余部分保本'
                     }
                 ]
             },
-            # 动态止损调整
             'dynamic_stop_loss': {
                 'enable_trailing_stop': True,
-                'trailing_activation_ratio': 0.50,  # 盈利50%后启动移动止损
-                'trailing_distance_ratio': 0.20,    # 移动止损距离20%
+                'trailing_activation_ratio': 0.50,
+                'trailing_distance_ratio': 0.20,
             }
         }
         
@@ -84,40 +129,151 @@ class TradingConfig:
         self.max_consecutive_errors = 5
         
         # Monitoring
-        self.health_check_interval = 300  # 5 minutes
+        self.health_check_interval = 300
         self.max_signal_history = 100
+        
+        # 🆕 简单版本控制
+        self._version_info = self._get_version_info()
         
         self._last_update = time.time()
     
+    # 🆕 简单版本控制方法
+    def _get_git_commit_count(self) -> int:
+        """获取Git提交次数"""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-list', '--count', 'HEAD'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError):
+            pass
+        return 0
+    
+    def _get_git_short_hash(self) -> str:
+        """获取Git短哈希"""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+        return "unknown"
+    
+    def _get_git_branch(self) -> str:
+        """获取当前Git分支"""
+        try:
+            result = subprocess.run(
+                ['git', 'branch', '--show-current'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
+        return "unknown"
+    
+    def _get_version_info(self) -> Dict[str, Any]:
+        """获取版本信息"""
+        base_version = VERSION_CONFIG['version']
+        
+        if VERSION_CONFIG['auto_increment'] and VERSION_CONFIG['git_commit_count_as_build']:
+            commit_count = self._get_git_commit_count()
+            short_hash = self._get_git_short_hash()
+            branch = self._get_git_branch()
+            
+            # 格式: 1.0.1+build.15.gabc1234 (main)
+            full_version = f"{base_version}+build.{commit_count}.g{short_hash} ({branch})"
+        else:
+            full_version = base_version
+            commit_count = 0
+            short_hash = "unknown"
+            branch = "unknown"
+        
+        return {
+            'base_version': base_version,
+            'full_version': full_version,
+            'commit_count': commit_count,
+            'commit_hash': short_hash,
+            'branch': branch,
+            'build_time': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
+    def get_version(self) -> str:
+        """获取完整版本号"""
+        return self._version_info['full_version']
+    
+    def get_version_details(self) -> Dict[str, Any]:
+        """获取详细版本信息"""
+        return self._version_info.copy()
+    
+    def check_for_updates(self) -> Dict[str, Any]:
+        """检查是否有新版本（基于Git）"""
+        try:
+            # 获取远程更新
+            subprocess.run(['git', 'fetch'], capture_output=True, timeout=10)
+            
+            # 比较本地和远程
+            result = subprocess.run(
+                ['git', 'rev-list', '--count', 'HEAD..origin/main'],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            behind_count = 0
+            if result.returncode == 0 and result.stdout.strip():
+                behind_count = int(result.stdout.strip())
+            
+            return {
+                'behind_remote': behind_count,
+                'update_available': behind_count > 0,
+                'current_commit': self._get_git_short_hash(),
+                'message': f"落后远程 {behind_count} 个提交" if behind_count > 0 else "已是最新版本"
+            }
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError):
+            return {
+                'behind_remote': 0,
+                'update_available': False,
+                'current_commit': self._get_git_short_hash(),
+                'message': "检查更新失败"
+            }
+
     def should_reload(self):
         """Check if configuration should be reloaded from environment"""
         return time.time() - self._last_update > self.health_check_interval
     
     def reload(self):
         """Reload configuration from environment variables"""
+        # 重新获取当前品种配置
+        current_config = self.get_symbol_config(self.symbol)
+        
         # Trading parameters
         self.symbol = os.getenv('TRADING_SYMBOL', self.symbol)
-        self.leverage = int(os.getenv('LEVERAGE', self.leverage))
+        self.leverage = int(os.getenv('LEVERAGE', current_config.get('leverage', self.leverage)))
         self.timeframe = os.getenv('TIMEFRAME', self.timeframe)
         self.test_mode = os.getenv('TEST_MODE', str(self.test_mode)).lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', self.data_points))
         
         # Position management
         self.position_management['base_usdt_amount'] = float(
-            os.getenv('BASE_USDT_AMOUNT', self.position_management['base_usdt_amount'])
+            os.getenv('BASE_USDT_AMOUNT', current_config.get('base_usdt_amount', self.position_management['base_usdt_amount']))
+        )
+        self.position_management['max_position_ratio'] = current_config.get(
+            'max_position_ratio', self.position_management['max_position_ratio']
         )
 
-        # 🆕 新增仓位模式配置
-        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')  # 默认为逐仓
+        self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
         
-        # 🆕 重新加载风险管理配置
         self.risk_management['stop_loss']['max_stop_loss_ratio'] = float(
             os.getenv('MAX_STOP_LOSS_RATIO', self.risk_management['stop_loss']['max_stop_loss_ratio'])
         )
         
         self._last_update = time.time()
         print("🔄 Configuration reloaded from environment variables")
-    
+
     def update_contract_info(self, contract_size, min_amount):
         """Update contract information from exchange"""
         self.contract_size = contract_size
@@ -133,7 +289,7 @@ class TradingConfig:
     
     def to_dict(self):
         """Convert configuration to dictionary for backward compatibility"""
-        return {
+        config_dict = {
             'symbol': self.symbol,
             'leverage': self.leverage,
             'timeframe': self.timeframe,
@@ -141,15 +297,20 @@ class TradingConfig:
             'data_points': self.data_points,
             'analysis_periods': self.analysis_periods,
             'position_management': self.position_management,
-            'risk_management': self.risk_management,  # 🆕 添加风险管理配置
+            'risk_management': self.risk_management,
             'contract_size': getattr(self, 'contract_size', 0.01),
-            'min_amount': getattr(self, 'min_amount', 0.01)
+            'min_amount': getattr(self, 'min_amount', 0.01),
+            'margin_mode': getattr(self, 'margin_mode', 'isolated'),
+            'version': self.get_version()  # 🆕 包含版本信息
         }
-    def validate_config(self) -> tuple:
-        """
-        验证配置是否有效
-        返回: (is_valid: bool, error_messages: list)
-        """
+        return config_dict
+
+    def get_symbol_config(self, symbol: str) -> dict:
+        """获取特定交易品种的配置，未找到则返回 BTC 默认配置"""
+        return MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS.get('BTC/USDT:USDT', {}))
+
+    def validate_config(self, symbol: str = None) -> Tuple[bool, List[str], List[str]]:
+        """验证配置是否有效"""
         errors = []
         warnings = []
 
@@ -226,9 +387,7 @@ class TradingConfig:
         return len(errors) == 0, errors, warnings
 
     def get_config_summary(self) -> dict:
-        """
-        获取配置摘要（用于日志记录）
-        """
+        """获取配置摘要（用于日志记录）"""
         return {
             'symbol': self.symbol,
             'leverage': self.leverage,
@@ -238,10 +397,30 @@ class TradingConfig:
             'max_stop_loss_ratio': self.risk_management['stop_loss']['max_stop_loss_ratio'],
             'enable_multilevel_take_profit': self.risk_management['profit_taking']['enable_multilevel_take_profit'],
             'contract_size': getattr(self, 'contract_size', 'Not set'),
-            'min_amount': getattr(self, 'min_amount', 'Not set')
+            'min_amount': getattr(self, 'min_amount', 'Not set'),
+            'version': self.get_version()  # 🆕 包含版本信息
         }
 
-# Create global instance
-TRADE_CONFIG = TradingConfig()
+def create_trade_config(symbol: str = None) -> TradingConfig:
+    """创建交易配置实例"""
+    if symbol is None:
+        symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
+    
+    symbol_config = MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS['BTC/USDT:USDT'])
+    return TradingConfig(symbol=symbol, config_data=symbol_config)
 
-# For example, TRADE_CONFIG['symbol'] becomes TRADE_CONFIG.symbol.
+# Create global instance
+TRADE_CONFIG = create_trade_config()
+
+# 简单的版本工具函数
+def print_version_banner():
+    """打印版本横幅"""
+    version_info = TRADE_CONFIG.get_version_details()
+    print("=" * 50)
+    print(f"🚀 Trading Bot {version_info['full_version']}")
+    print(f"📅 Build Time: {version_info['build_time']}")
+    print(f"🌿 Branch: {version_info['branch']}")
+    print("=" * 50)
+
+# 在模块加载时打印版本信息
+print_version_banner()

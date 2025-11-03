@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-ds_perfect2.py - 止损API测试专用程序
-修复side参数问题
+ds_test.py - 限价单/市价单-止损止盈API测试程序
+以下代码演示了如何使用CCXT库与OKX交易所交互，
+并且两个接口(市价单设置止盈止损和限价单设置止盈止损)都已经测试通过。
+根据OKX官方API文档使用/trade/order接口同时设置止盈止损
 """
 
 import os
@@ -12,7 +14,7 @@ import hmac
 import hashlib
 import base64
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import ccxt
 import pandas as pd
 import numpy as np
@@ -25,7 +27,7 @@ load_dotenv(dotenv_path=env_path)
 # 简单的日志系统
 class TestLogger:
     def __init__(self):
-        self.log_file = f"stop_loss_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.log_file = f"limit_order_sl_tp_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     
     def log(self, level: str, message: str):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -58,22 +60,18 @@ class TestConfig:
         self.margin_mode = 'isolated'
         self.base_usdt_amount = 10  # 小金额测试
         self.min_amount = 0.01  # 最小交易量
+        self.stop_loss_percent = 0.005  # 0.5% 止损
+        self.take_profit_percent = 0.01  # 1% 止盈
+        self.price_offset_percent = 0.001  # 限价单价格偏移
 
 # 账号配置
 def get_account_config(account_name="default"):
     """根据账号名称获取对应的配置"""
-    if account_name == "okxMain":
-        return {
-            'api_key': os.getenv('OKX_API_KEY_1') or os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET_1') or os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD_1') or os.getenv('OKX_PASSWORD')
-        }
-    else:  # default
-        return {
-            'api_key': os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD')
-        }
+    return {
+        'api_key': os.getenv('OKX_API_KEY_2'),
+        'secret': os.getenv('OKX_SECRET_2'),
+        'password': os.getenv('OKX_PASSWORD_2')
+    }
 
 # 初始化交易所
 account_config = get_account_config()
@@ -192,162 +190,132 @@ def calculate_position_size():
         logger.error(f"计算仓位大小失败: {str(e)}")
         return config.min_amount
 
-def create_market_order(side: str, amount: float):
-    """创建市价订单"""
-    try:
-        # 构建基本参数
-        params = {
-            'tdMode': config.margin_mode,
-        }
-        
-        order_params = {
-            'symbol': config.symbol,
-            'side': side,
-            'amount': amount,
-            'type': 'market',
-            'params': params
-        }
-        
-        log_order_params("市价开仓", order_params, "create_market_order")
-        
-        logger.info(f"🎯 执行市价{side}开仓: {amount} 张合约")
-        
-        order = exchange.create_order(
-            config.symbol,
-            'market',
-            side,
-            amount,
-            None,
-            params
-        )
-        
-        log_api_response(order, "create_market_order")
-        return order
-            
-    except Exception as e:
-        logger.error(f"市价开仓失败: {str(e)}")
-        return None
+def calculate_limit_price(side: str, current_price: float) -> float:
+    """计算限价单价格"""
+    if side == 'buy':
+        # 买入限价单：价格低于当前价
+        limit_price = current_price * (1 + config.price_offset_percent)
+    else:
+        # 卖出限价单：价格高于当前价
+        limit_price = current_price * (1 - config.price_offset_percent)
+    
+    logger.info(f"🎯 限价单价格计算: {side} @ {limit_price:.2f} (当前价: {current_price:.2f})")
+    return limit_price
 
-def cancel_existing_algo_orders():
-    """取消现有的算法订单"""
-    try:
-        logger.info("🔄 取消现有算法订单...")
-        
-        params = {
-            'instType': 'SWAP',
-            'ordType': 'conditional'
-        }
-        
-        log_order_params("查询算法订单", params, "cancel_existing_algo_orders")
-        
-        # 使用ccxt的方法查询待处理订单
-        pending_orders = exchange.fetch_open_orders(config.symbol)
-        conditional_orders = [o for o in pending_orders if o.get('type') == 'conditional']
-        
-        if conditional_orders:
-            for order in conditional_orders:
-                logger.info(f"📋 发现条件单: {order['id']} - {order['side']} {order['amount']}")
-                
-                # 取消订单
-                cancel_result = exchange.cancel_order(order['id'], config.symbol)
-                if cancel_result:
-                    logger.info(f"✅ 取消条件单成功: {order['id']}")
-                else:
-                    logger.warning(f"⚠️ 取消条件单失败: {order['id']}")
-        else:
-            logger.info("✅ 没有找到待取消的条件单")
-                    
-    except Exception as e:
-        logger.error(f"取消算法订单失败: {str(e)}")
+def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tuple[float, float]:
+    """计算止损和止盈价格"""
+    if side == 'buy':  # 多头
+        stop_loss_price = entry_price * (1 - config.stop_loss_percent)
+        take_profit_price = entry_price * (1 + config.take_profit_percent)
+    else:  # 空头
+        stop_loss_price = entry_price * (1 + config.stop_loss_percent)
+        take_profit_price = entry_price * (1 - config.take_profit_percent)
+    
+    logger.info(f"🎯 价格计算 - 入场: {entry_price:.2f}, 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
+    return stop_loss_price, take_profit_price
 
-def create_stop_loss_order_corrected(side: str, amount: float, trigger_price: float, entry_price: float):
-    """创建止损订单 - 完全修正版本"""
+
+def create_market_order_with_sl_tp(side: str, amount: float, 
+                                  stop_loss_price: float, take_profit_price: float):
+    """创建市价单并同时设置止损止盈 - 使用OKX官方API"""
     try:
-        # 确定止损方向（与开仓方向相反）
-        stop_side = 'buy' if side == 'sell' else 'sell'
-        
         inst_id = get_correct_inst_id()
         
-        # 根据OKX API文档，对于止损订单，我们尝试不使用posSide参数
-        # 或者使用系统默认的net模式
+        # 根据OKX API文档构建参数
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
-            'side': stop_side,
-            # 注释掉posSide，让系统自动处理
-            # 'posSide': 'net',  # 或者尝试使用net
-            'ordType': 'conditional',
+            'side': side,
+            'ordType': 'market',
             'sz': str(amount),
-            'slTriggerPx': str(round(trigger_price, 1)),
-            'slOrdPx': '-1'
+            # 止损参数
+            'slTriggerPx': str(stop_loss_price),
+            'slOrdPx': '-1',  # 市价止损
+            # 止盈参数
+            'tpTriggerPx': str(take_profit_price),
+            'tpOrdPx': '-1',  # 市价止盈
+            # 设置止损止盈触发类型
+            'slTriggerPxType': 'last',  # 触发价格类型：last-最新价格
+            'tpTriggerPxType': 'last',  # 触发价格类型：last-最新价格
         }
         
-        # 计算止损距离
-        stop_distance = abs(trigger_price - entry_price)
-        stop_percentage = (stop_distance / entry_price) * 100
+        log_order_params("市价单带止损止盈", params, "create_market_order_with_sl_tp")
         
-        log_order_params("止损订单", params, "create_stop_loss_order_corrected")
-        logger.info(f"🛡️ 设置止损: {stop_side} {amount}张 @ {trigger_price:.1f}")
-        logger.info(f"📏 止损距离: {stop_distance:.1f} ({stop_percentage:.3f}%)")
+        logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
+        logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
+        logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
         
-        # 使用CCXT的私有API方法
-        response = exchange.private_post_trade_order_algo(params)
+        # 使用CCXT的私有API方法调用/trade/order接口
+        response = exchange.private_post_trade_order(params)
         
-        log_api_response(response, "create_stop_loss_order_corrected")
+        log_api_response(response, "create_market_order_with_sl_tp")
         
         if response and response.get('code') == '0':
-            algo_id = response['data'][0]['algoId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ 止损订单创建成功: {algo_id}")
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ 市价单创建成功: {order_id}")
             return response
         else:
-            logger.error(f"❌ 止损订单创建失败: {response}")
+            logger.error(f"❌ 市价单创建失败: {response}")
             return response
-                
+            
     except Exception as e:
-        logger.error(f"创建止损订单异常: {str(e)}")
+        logger.error(f"市价单开仓失败: {str(e)}")
         import traceback
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
-def create_conditional_order_alternative(side: str, amount: float, trigger_price: float, entry_price: float):
-    """创建条件订单 - 备选方案"""
+def cancel_existing_orders():
+    """取消现有的订单"""
     try:
-        # 确定止损方向（与开仓方向相反）
-        stop_side = 'buy' if side == 'sell' else 'sell'
+        logger.info("🔄 取消现有订单...")
         
-        inst_id = get_correct_inst_id()
+        # 获取待处理订单
+        pending_orders = exchange.fetch_open_orders(config.symbol)
         
-        # 尝试使用不同的参数组合
-        params = {
-            'instId': inst_id,
-            'tdMode': config.margin_mode,
-            'side': stop_side,
-            'ordType': 'conditional',
-            'sz': str(amount),
-            # 尝试使用slTriggerPx和slOrdPx而不是tpTriggerPx和tpOrdPx
-            'slTriggerPx': str(round(trigger_price, 1)),
-            'slOrdPx': '-1',  # 市价止损
-            'tag': 'stop_loss_alternative'
-        }
-        
-        logger.info("🔄 尝试备选止损订单参数...")
-        log_order_params("备选止损订单", params, "create_conditional_order_alternative")
-        
-        response = exchange.private_post_trade_order_algo(params)
-        
-        log_api_response(response, "create_conditional_order_alternative")
-        
-        if response and response.get('code') == '0':
-            algo_id = response['data'][0]['algoId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ 备选止损订单创建成功: {algo_id}")
-            return response
+        if pending_orders:
+            for order in pending_orders:
+                order_id = order.get('id')
+                logger.info(f"📋 发现待处理订单: {order_id} - {order.get('side')} {order.get('amount')}")
+                
+                # 取消订单
+                cancel_result = exchange.cancel_order(order_id, config.symbol)
+                if cancel_result:
+                    logger.info(f"✅ 取消订单成功: {order_id}")
+                else:
+                    logger.warning(f"⚠️ 取消订单失败: {order_id}")
         else:
-            logger.error(f"❌ 备选止损订单创建失败: {response}")
-            return response
-            
+            logger.info("✅ 没有找到待取消的订单")
+                    
     except Exception as e:
-        logger.error(f"创建备选止损订单异常: {str(e)}")
-        return None
+        logger.error(f"取消订单失败: {str(e)}")
+
+def wait_for_order_fill(order_id: str, timeout: int = 60) -> bool:
+    """等待订单成交"""
+    logger.info(f"⏳ 等待订单 {order_id} 成交...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            order = exchange.fetch_order(order_id, config.symbol)
+            status = order['status']
+            
+            if status == 'closed':
+                logger.info(f"✅ 订单已成交: {order_id}")
+                return True
+            elif status == 'canceled':
+                logger.warning(f"❌ 订单已取消: {order_id}")
+                return False
+            else:
+                logger.info(f"📊 订单状态: {status}, 等待中...")
+                
+            time.sleep(3)  # 每3秒检查一次
+            
+        except Exception as e:
+            logger.error(f"检查订单状态失败: {str(e)}")
+            time.sleep(3)
+    
+    logger.warning(f"⏰ 订单等待超时: {order_id}")
+    return False
 
 def get_current_position():
     """获取当前持仓"""
@@ -373,56 +341,142 @@ def get_current_position():
         logger.error(f"获取持仓失败: {str(e)}")
         return None
 
-def monitor_position_and_orders(timeout=60):
+def check_sl_tp_orders():
+    """检查止损止盈订单状态"""
+    try:
+        # 获取待处理订单
+        pending_orders = exchange.fetch_open_orders(config.symbol)
+        sl_tp_orders = [o for o in pending_orders if o.get('type') in ['stop', 'stop_limit', 'take_profit', 'take_profit_limit']]
+        
+        if sl_tp_orders:
+            logger.info(f"📋 发现止损止盈订单: {len(sl_tp_orders)}个")
+            for order in sl_tp_orders:
+                logger.info(f"   - {order['id']}: {order['side']} {order['amount']} @ {order.get('price', '市价')}")
+            return True
+        else:
+            logger.info("📋 未发现止损止盈订单")
+            return False
+            
+    except Exception as e:
+        logger.error(f"检查止损止盈订单失败: {str(e)}")
+        return False
+
+def monitor_position_and_orders(timeout=300):
     """监控持仓和订单状态"""
     logger.info("🔍 开始监控持仓和订单状态...")
     
     start_time = time.time()
+    position_created = False
     position_closed = False
-    stop_triggered = False
     
     while time.time() - start_time < timeout:
         try:
             # 检查持仓
             position = get_current_position()
+            if position and not position_created:
+                logger.info(f"✅ 持仓建立: {position['side']} {position['size']}张, 入场价: {position['entry_price']:.1f}")
+                position_created = True
+            elif not position and position_created:
+                logger.info("✅ 持仓已平仓 - 止损或止盈已触发!")
+                position_closed = True
+                break
+            
+            # 检查止损止盈订单状态
+            sl_tp_exists = check_sl_tp_orders()
+            
+            # 检查价格触发情况
             if position:
-                logger.info(f"📊 当前持仓: {position['side']} {position['size']}张, 入场价: {position['entry_price']:.1f}, 浮动盈亏: {position['unrealized_pnl']:.4f}")
-            else:
-                if not position_closed:
-                    logger.info("✅ 持仓已平仓 - 止损可能已触发!")
-                    position_closed = True
-                    stop_triggered = True
-            
-            # 检查待处理订单
-            pending_orders = exchange.fetch_open_orders(config.symbol)
-            conditional_orders = [o for o in pending_orders if o.get('type') in ['conditional', 'oco']]
-            
-            if conditional_orders:
-                logger.info(f"📋 有待处理条件单: {len(conditional_orders)}个")
-                for order in conditional_orders:
-                    logger.info(f"   - {order['id']}: {order['side']} {order['amount']}")
-            else:
-                if not stop_triggered and position_closed:
-                    logger.info("✅ 条件单已全部处理完成")
-                    stop_triggered = True
-            
-            # 如果持仓已平且条件单已处理，结束监控
-            if position_closed and stop_triggered:
-                logger.info("🎉 测试完成: 止损成功触发并平仓!")
-                return True
+                current_price = get_current_price()
+                stop_loss_price, take_profit_price = calculate_stop_loss_take_profit_prices(
+                    position['side'], position['entry_price']
+                )
                 
+                if position['side'] == 'buy':  # 多头
+                    if current_price <= stop_loss_price:
+                        logger.info("🛑 价格触及止损线!")
+                    elif current_price >= take_profit_price:
+                        logger.info("🎉 价格触及止盈线!")
+                else:  # 空头
+                    if current_price >= stop_loss_price:
+                        logger.info("🛑 价格触及止损线!")
+                    elif current_price <= take_profit_price:
+                        logger.info("🎉 价格触及止盈线!")
+            
             time.sleep(5)  # 每5秒检查一次
             
         except Exception as e:
             logger.error(f"监控过程中出错: {str(e)}")
             time.sleep(5)
     
-    logger.warning("⏰ 监控超时，测试可能未完成")
-    return False
-
-def run_stop_loss_test():
-    """运行止损测试"""
-    logger.info("🚀 开始止损API测试")
+    if position_closed:
+        logger.info("🎉 测试完成: 止损或止盈触发!")
+        return True
+    else:
+        logger.warning("⏰ 监控超时，测试可能未完成")
+        return False
+    
+def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float, 
+                                 stop_loss_price: float, take_profit_price: float):
+    """创建限价单并同时设置止损止盈 - 使用OKX官方API"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 根据OKX API文档构建参数
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': side,
+            'ordType': 'limit',
+            'sz': str(amount),
+            'px': str(limit_price),
+            # 止损参数
+            'slTriggerPx': str(stop_loss_price),
+            'slOrdPx': '-1',  # 市价止损
+            # 止盈参数
+            'tpTriggerPx': str(take_profit_price),
+            'tpOrdPx': '-1',  # 市价止盈
+            # 设置止损止盈触发类型
+            'slTriggerPxType': 'last',  # 触发价格类型：last-最新价格
+            'tpTriggerPxType': 'last',  # 触发价格类型：last-最新价格
+        }
+        
+        log_order_params("限价单带止损止盈", params, "create_limit_order_with_sl_tp")
+        
+        logger.info(f"🎯 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f}")
+        logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
+        logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
+        
+        # 打印原始请求数据
+        logger.info("🚀 原始请求数据:")
+        logger.info(f"   接口: POST /api/v5/trade/order")
+        logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+        
+        # 使用CCXT的私有API方法调用/trade/order接口
+        response = exchange.private_post_trade_order(params)
+        
+        # 打印原始响应数据
+        logger.info("📥 原始响应数据:")
+        logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+        
+        log_api_response(response, "create_limit_order_with_sl_tp")
+        
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ 限价单创建成功: {order_id}")
+            return response
+        else:
+            logger.error(f"❌ 限价单创建失败: {response}")
+            return response
+            
+    except Exception as e:
+        logger.error(f"限价单开仓失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return None
+    
+def run_limit_order_sl_tp_test():
+    """运行限价单止损止盈测试"""
+    logger.info("🚀 开始限价单止损止盈API测试")
     logger.info("=" * 50)
     
     # 1. 设置交易所
@@ -430,7 +484,7 @@ def run_stop_loss_test():
         logger.error("❌ 交易所设置失败，测试中止")
         return False
     
-    # 2. 获取当前价格并计算止损价格
+    # 2. 获取当前价格
     current_price = get_current_price()
     if current_price == 0:
         logger.error("❌ 无法获取当前价格，测试中止")
@@ -438,92 +492,66 @@ def run_stop_loss_test():
     
     # 设置开仓方向为卖出（空头）
     side = 'sell'  # 开空仓
-    stop_loss_price = current_price * 1.001  # 当前价格上方0.1%
     
     logger.info(f"🎯 测试参数:")
     logger.info(f"   开仓方向: {side}")
     logger.info(f"   当前价格: {current_price:.2f}")
-    logger.info(f"   止损价格: {stop_loss_price:.2f}")
+    logger.info(f"   止损比例: {config.stop_loss_percent*100}%")
+    logger.info(f"   止盈比例: {config.take_profit_percent*100}%")
     
     # 3. 计算仓位大小
     position_size = calculate_position_size()
     
-    # 4. 取消现有条件单
-    cancel_existing_algo_orders()
+    # 4. 计算限价单价格
+    limit_price = calculate_limit_price(side, current_price)
     
-    # 5. 执行市价开仓
-    logger.info("📝 执行市价开仓...")
-    order_result = create_market_order(side, position_size)
+    # 5. 计算止损止盈价格
+    stop_loss_price, take_profit_price = calculate_stop_loss_take_profit_prices(side, limit_price)
     
-    if not order_result:
-        logger.error("❌ 开仓失败，测试中止")
-        return False
+    # 6. 取消现有订单
+    cancel_existing_orders()
     
-    # 等待订单执行
-    time.sleep(3)
-    
-    # 6. 检查开仓结果
-    position = get_current_position()
-    if not position:
-        logger.error("❌ 开仓后未检测到持仓，测试中止")
-        return False
-    
-    logger.info(f"✅ 开仓成功:")
-    logger.info(f"   方向: {position['side']}")
-    logger.info(f"   数量: {position['size']} 张")
-    logger.info(f"   入场价: {position['entry_price']:.2f}")
-    
-    # 7. 设置止损订单 - 主要方法
-    logger.info("🛡️ 设置止损订单...")
-    stop_loss_result = create_stop_loss_order_corrected(
+    # 7. 使用OKX官方API创建限价单并同时设置止损止盈
+    logger.info("📝 使用OKX官方API创建限价单并同时设置止损止盈...")
+    order_result = create_limit_order_with_sl_tp(
         side=side,
         amount=position_size,
-        trigger_price=stop_loss_price,
-        entry_price=position['entry_price']
+        limit_price=limit_price,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price
     )
     
-    # 如果主要方法失败，尝试备选方法
-    if not stop_loss_result or stop_loss_result.get('code') != '0':
-        logger.warning("⚠️ 主要止损方法失败，尝试备选方法...")
-        stop_loss_result = create_conditional_order_alternative(
+    if order_result and order_result.get('code') == '0':
+        logger.error("❌ 限价单创建成功，尝试市价单...")
+        # 备选方案：使用市价单
+        order_result = create_market_order_with_sl_tp(
             side=side,
             amount=position_size,
-            trigger_price=stop_loss_price,
-            entry_price=position['entry_price']
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price
         )
     
-    if not stop_loss_result or stop_loss_result.get('code') != '0':
-        logger.error("❌ 所有止损订单设置方法都失败")
-        
-        # 尝试平仓
-        logger.info("🔄 尝试平仓...")
-        close_side = 'buy' if side == 'sell' else 'sell'
-        close_order = create_market_order(close_side, position_size)
-        
-        if close_order:
-            logger.info("✅ 手动平仓成功")
-        else:
-            logger.error("❌ 手动平仓失败")
-            
+    if not order_result or order_result.get('code') != '0':
+        logger.error("❌ 市价开仓方法失败")
         return False
     
-    logger.info("✅ 止损订单设置成功，开始监控...")
+    logger.info("✅ 订单创建成功，开始监控...")
     
     # 8. 监控持仓和订单状态
-    test_success = monitor_position_and_orders(timeout=120)  # 监控2分钟
+    test_success = monitor_position_and_orders(timeout=300)  # 监控5分钟
     
     if test_success:
-        logger.info("🎉 止损测试完全成功!")
+        logger.info("🎉 限价单止损止盈测试完全成功!")
         return True
     else:
-        logger.warning("⚠️ 止损测试可能未完全成功")
+        logger.warning("⚠️ 限价单止损止盈测试可能未完全成功")
         return False
 
 def main():
     """主函数"""
     try:
         logger.info("=" * 60)
-        logger.info("🔧 永续合约止损API测试程序 - 修复side参数")
+        logger.info("🔧 永续合约限价单止损止盈API测试程序")
         logger.info("=" * 60)
         
         # 确认测试参数
@@ -532,6 +560,9 @@ def main():
         logger.info(f"   杠杆: {config.leverage}x")
         logger.info(f"   保证金模式: {config.margin_mode}")
         logger.info(f"   测试金额: {config.base_usdt_amount} USDT")
+        logger.info(f"   止损比例: {config.stop_loss_percent*100}%")
+        logger.info(f"   止盈比例: {config.take_profit_percent*100}%")
+        logger.info(f"   价格偏移: {config.price_offset_percent*100}%")
         logger.info(f"   测试模式: {'是' if config.test_mode else '否'}")
         
         # 用户确认
@@ -543,7 +574,7 @@ def main():
                 return
         
         # 运行测试
-        success = run_stop_loss_test()
+        success = run_limit_order_sl_tp_test()
         
         if success:
             logger.info("🎊 所有测试完成!")
