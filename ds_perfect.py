@@ -2307,7 +2307,7 @@ def check_existing_positions_on_startup():
             # 获取当前持仓
             current_position = get_current_position(symbol)
             
-            if not current_position:
+            if current_position is None:
                 logger.log_info(f"✅ {symbol}: 无持仓")
                 continue
                 
@@ -2315,7 +2315,9 @@ def check_existing_positions_on_startup():
             
             # 获取市场数据进行分析
             df, price_data = fetch_ohlcv(symbol)
-            if not df or not price_data:
+            
+            # 🆕 修复：使用明确的 None 检查而不是真值判断
+            if df is None or price_data is None:
                 logger.log_warning(f"❌ {symbol}: 无法获取市场数据，跳过分析")
                 continue
             
@@ -2334,6 +2336,7 @@ def check_existing_positions_on_startup():
     
     logger.log_info("✅ 启动时持仓检查完成")
 
+
 def analyze_should_hold_position(symbol: str, position: dict, price_data: dict) -> bool:
     """分析是否应该继续持有现有持仓"""
     try:
@@ -2341,7 +2344,9 @@ def analyze_should_hold_position(symbol: str, position: dict, price_data: dict) 
         
         # 获取技术信号
         signal_data = analyze_with_deepseek(symbol, price_data)
-        if not signal_data:
+        
+        # 🆕 修复：使用明确的 None 检查而不是真值判断
+        if signal_data is None:
             logger.log_warning(f"⚠️ {symbol}: 无法获取分析信号，保守处理：继续持有")
             return True
         
