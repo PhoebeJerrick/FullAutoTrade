@@ -4,7 +4,8 @@ import sys
 from datetime import datetime
 from ds_perfect import account
 
-def __init__(self, log_file=f'../Output/{account}/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log', log_level=logging.INFO):
+class TradingLogger:
+    def __init__(self, log_file=f'../Output/{account}/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log', log_level=logging.INFO):
         self.log_file = log_file
         self.setup_logging(log_level)
     
