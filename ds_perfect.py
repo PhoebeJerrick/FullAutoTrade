@@ -1979,8 +1979,17 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
             log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
             logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
+
+            # 打印原始请求数据
+            logger.info("🚀 buy限价单原始请求数据:")
+            logger.info(f"   接口: POST /api/v5/trade/order")
+            logger.info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
+
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
+            # 打印原始响应数据
+            logger.info("📥 buy限价单原始响应数据:")
+            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         elif signal_data['signal'] == 'SELL':
             # 检查是否有现有多头持仓，先平仓
@@ -2019,8 +2028,17 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
 
             logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']} (带止损止盈)")
+
+            # 打印原始请求数据
+            logger.info("🚀 sell限价单原始请求数据:")
+            logger.info(f"   接口: POST /api/v5/trade/order")
+            logger.info(f"   完整参数: {json.dumps(open_params, indent=2, ensure_ascii=False)}")
+
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
+            # 打印原始响应数据
+            logger.info("📥 sell限价单原始响应数据:")
+            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         # 处理订单响应
         if response.get('code') == '0':
