@@ -521,6 +521,8 @@ def run_limit_order_sl_tp_test():
         take_profit_price=take_profit_price
     )
     
+    time.sleep(2)
+
     if order_result and order_result.get('code') == '0':
         logger.error("❌ 限价单创建成功，尝试市价单...")
         # 备选方案：使用市价单
