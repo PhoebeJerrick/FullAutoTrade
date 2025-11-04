@@ -1913,7 +1913,7 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
 
 
 def get_current_position(symbol: str) -> Optional[dict]:
-    """Get current position status - OKX version - 修复版本"""
+    """Get current position status - 增强版持仓检测"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         positions = exchange.fetch_positions([config.symbol])
@@ -1923,33 +1923,33 @@ def get_current_position(symbol: str) -> Optional[dict]:
         for pos in positions:
             if pos['symbol'] == config.symbol:
                 contracts = float(pos['contracts']) if pos['contracts'] else 0
-                # 🆕 重要修复：检查持仓方向是否正确
                 side = pos.get('side')
                 
-                # 🆕 验证持仓数据的有效性
-                if contracts > 0 and side in ['long', 'short']:
-                    # 🆕 额外验证：确保entryPrice存在且有效
-                    entry_price = 0
-                    if pos['entryPrice']:
-                        try:
-                            entry_price = float(pos['entryPrice'])
-                        except (ValueError, TypeError):
-                            entry_price = 0
+                # 🆕 增强验证：确保持仓真实存在
+                if (contracts > 0 and 
+                    side in ['long', 'short'] and 
+                    pos.get('marginMode') in ['isolated', 'cross'] and
+                    pos.get('entryPrice') and 
+                    float(pos['entryPrice']) > 0):
                     
-                    # 🆕 验证持仓是否真实存在（通过检查保证金模式等）
-                    margin_mode = pos.get('marginMode', '')
-                    if margin_mode not in ['isolated', 'cross']:
-                        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数据异常，跳过")
-                        continue
-                        
+                    # 🆕 额外验证：通过余额检查
+                    try:
+                        balance = exchange.fetch_balance()
+                        total_balance = balance['total'].get('USDT', 0)
+                        if total_balance <= 0:
+                            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常，跳过持仓")
+                            continue
+                    except:
+                        pass
+                    
                     return {
-                        'side': side,  # 'long' or 'short'
+                        'side': side,
                         'size': contracts,
-                        'entry_price': entry_price,
+                        'entry_price': float(pos['entryPrice']),
                         'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
                         'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
                         'symbol': pos['symbol'],
-                        'margin_mode': margin_mode,
+                        'margin_mode': pos.get('marginMode', ''),
                         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
 
@@ -1958,7 +1958,7 @@ def get_current_position(symbol: str) -> Optional[dict]:
     except Exception as e:
         logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
         return None
-
+    
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
     """设置移动止损"""
     config = SYMBOL_CONFIGS[symbol]
@@ -3112,16 +3112,30 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
     """安全平仓函数，返回是否成功"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        position_size = position['size']
-        order_tag = create_order_tag()
+        # 🆕 双重验证：重新获取持仓信息
+        current_position = get_current_position(symbol)
+        if not current_position:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，实际无持仓")
+            return True  # 返回True表示"成功"，因为无需平仓
+            
+        # 🆕 验证持仓方向是否匹配
+        if current_position['side'] != position['side']:
+            logger.log_error(f"close_position_{get_base_currency(symbol)}", 
+                           f"持仓方向不匹配: 预期{position['side']}, 实际{current_position['side']}")
+            return False
+            
+        # 🆕 验证持仓数量
+        if current_position['size'] <= 0:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
+            return True
         
+        position_size = position['size']
         logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
         
         if position['side'] == 'long':
             # 平多仓
             close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
+                'reduceOnly': True
             }
             
             # 记录订单参数
@@ -3153,8 +3167,7 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
         else:  # short
             # 平空仓
             close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
+                'reduceOnly': True
             }
             
             log_order_params("平空仓", close_params, "close_position_safely")
@@ -3420,9 +3433,9 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 # 使用安全的平仓函数
                 close_success = close_position_safely(symbol, current_position, "反向开仓平空仓")
                 if not close_success:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
+                    logger.log_error("trade_execution", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
                     return
-                time.sleep(1)  # 平仓后等待
+                time.sleep(2)  # 平仓后等待
 
             # 开多仓（同步设置止损止盈）
             order_result = create_order_with_sl_tp(
@@ -3449,7 +3462,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 
                 close_success = close_position_safely(symbol, current_position, "反向开仓平多仓")
                 if not close_success:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
+                    logger.log_error("trade_execution", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
                     return
                 time.sleep(1)
 
