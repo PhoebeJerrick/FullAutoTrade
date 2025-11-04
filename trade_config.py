@@ -80,6 +80,7 @@ class TradingConfig:
         # Position management
         self.position_management = {
             'enable_intelligent_position': True,
+            'first_position_min_ratio': current_config.get('first_position_min_ratio', 0.05),  # 头仓最小比例，默认5%
             'base_usdt_amount': current_config.get('base_usdt_amount', 100.0),
             'high_confidence_multiplier': 1.5,
             'medium_confidence_multiplier': 1.0,

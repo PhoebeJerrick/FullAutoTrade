@@ -160,6 +160,7 @@ def get_current_price(symbol: str): # 新增 symbol 参数
 def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
     """基于账户规模计算动态基础金额"""
     config = SYMBOL_CONFIGS[symbol]
+    posMngmt = config.position_management
     
     # 方法1：固定比例
     base_ratio = 0.02  # 2% of total balance
@@ -175,7 +176,7 @@ def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
         
     dynamic_base = usdt_balance * base_ratio
     
-    # 设置上下限
+    # 设置上下限（保持不变）
     min_base = 50  # 最小50U
     max_base = 500 # 最大500U
     
@@ -210,31 +211,40 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         # 1. 动态基础金额（基于账户规模）
         dynamic_base_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
         
-        # 2. 信心倍数
+        # 2. 头仓最小比例限制（如果是首次开仓）
+        is_first_position = not current_position or current_position['size'] == 0
+        if is_first_position:
+            # 计算头仓最小金额（总余额 * 最小比例）
+            first_position_min = usdt_balance * posMngmt['first_position_min_ratio']
+            # 取较大值作为基础金额
+            dynamic_base_usdt = max(dynamic_base_usdt, first_position_min)
+        
+        # 后续计算逻辑保持不变...
+        # 3. 信心倍数
         confidence_multiplier = {
             'HIGH': posMngmt['high_confidence_multiplier'],
             'MEDIUM': posMngmt['medium_confidence_multiplier'],
             'LOW': posMngmt['low_confidence_multiplier']
         }.get(signal_data['confidence'], 1.0)
         
-        # 3. 趋势倍数
+        # 4. 趋势倍数
         trend = price_data['trend_analysis'].get('overall', 'Consolidation')
         if trend in ['Strong uptrend', 'Strong downtrend']:
             trend_multiplier = posMngmt['trend_strength_multiplier']
         else:
             trend_multiplier = 1.0
         
-        # 4. RSI调整
+        # 5. RSI调整
         rsi = price_data['technical_data'].get('rsi', 50)
         if rsi > 75 or rsi < 25:
             rsi_multiplier = 0.7
         else:
             rsi_multiplier = 1.0
         
-        # 5. 波动率调整
+        # 6. 波动率调整
         volatility_multiplier = calculate_volatility_adjustment(symbol, price_data['full_data'])
         
-        # 6. 杠杆调整（如果使用高杠杆，减少仓位）
+        # 7. 杠杆调整（如果使用高杠杆，减少仓位）
         leverage_multiplier = 1.0 / min(config.leverage, 10)  # 杠杆越高，实际仓位越小
         
         # 计算建议投资金额
@@ -259,6 +269,8 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         calculation_details = f"""
         🎯 增强版仓位计算详情:
         账户余额: {usdt_balance:.2f} USDT
+        {'头仓最小金额: ' + str(first_position_min) + ' USDT' if is_first_position else ''}
+        动态基础: {dynamic_base_usdt:.2f} USDT
         动态基础: {dynamic_base_usdt:.2f} USDT
         信心倍数: {confidence_multiplier} | 趋势倍数: {trend_multiplier}
         RSI倍数: {rsi_multiplier} | 波动率倍数: {volatility_multiplier}
