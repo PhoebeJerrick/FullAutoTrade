@@ -520,16 +520,23 @@ def run_limit_order_sl_tp_test():
     # 6. 取消现有订单
     cancel_existing_orders()
 
+    # # 7. 使用OKX官方API创建限价单并同时设置止损止盈
+    # logger.info("📝 使用OKX官方API创建限价单并同时设置止损止盈...")
+    # order_result = create_limit_order_with_sl_tp(
+    #     side=side,
+    #     amount=position_size,
+    #     limit_price=limit_price,
+    #     stop_loss_price=stop_loss_price,
+    #     take_profit_price=take_profit_price
+    # )
     # 7. 使用OKX官方API创建市价单并同时设置止损止盈
     logger.info("📝 使用OKX官方API创建市价单并同时设置止损止盈...")
     order_result = create_market_order_with_sl_tp(
         side=side,
         amount=position_size,
-        limit_price=limit_price,
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price
-    )
-    
+    )    
     time.sleep(2)
 
     # if order_result and order_result.get('code') == '0':
