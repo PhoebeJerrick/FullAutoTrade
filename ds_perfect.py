@@ -17,7 +17,6 @@ import json
 import requests
 from datetime import datetime, timedelta
 
-
 # Trading parameter configuration - combining advantages of both versions
 from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS # 新代码: 导入类和多品种配置
 # Global logger
@@ -28,6 +27,12 @@ from trade_logger import logger
 SYMBOL_CONFIGS: Dict[str, TradingConfig] = {}
 # 当前活跃的交易品种（在 trading_bot 中设置，用于日志和调试）
 CURRENT_SYMBOL: Optional[str] = None
+
+
+# Global variables to store historical data
+price_history = []
+signal_history = []
+position = None
 
 # Use relative path
 env_path = '../ExApiConfig/ExApiConfig.env'  # .env file in config folder of parent directory
@@ -425,11 +430,6 @@ def setup_exchange(symbol: str):
     except Exception as e:
         logger.log_error(f"exchange_setup_{symbol}", str(e))
         return False
-
-# Global variables to store historical data
-price_history = []
-signal_history = []
-position = None
 
 
 def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
@@ -1497,28 +1497,34 @@ def fetch_ohlcv(symbol: str):
         return None, None
 
 
-def add_to_signal_history(signal_data):
+def add_to_signal_history(symbol: str, signal_data):
     global signal_history
     
-    signal_history.append(signal_data)  # 改为追加信号数据
+    # 初始化该品种的历史记录
+    if symbol not in signal_history:
+        signal_history[symbol] = []
+    
+    signal_history[symbol].append(signal_data)
     
     # Limit the history to 100 records
     max_history = 100
-    if len(signal_history) > max_history:
-        # Keep the latest 80% and remove the oldest 20%
+    if len(signal_history[symbol]) > max_history:
         keep_count = int(max_history * 0.8)
-        signal_history = signal_history[-keep_count:]
+        signal_history[symbol] = signal_history[symbol][-keep_count:]
 
-def add_to_price_history(price_data):
+def add_to_price_history(symbol: str, price_data):
     global price_history
     
-    price_history.append(price_data)
+    if symbol not in price_history:
+        price_history[symbol] = []
+    
+    price_history[symbol].append(price_data)
     
     # Limit the history to 200 records
     max_history = 200
-    if len(price_history) > max_history:
+    if len(price_history[symbol]) > max_history:
         keep_count = int(max_history * 0.8)
-        price_history = price_history[-keep_count:]
+        price_history[symbol] = price_history[symbol][-keep_count:]
 
 def generate_technical_analysis_text(price_data):
     """Generate technical analysis text"""
@@ -1840,10 +1846,9 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
 
         # Add previous trading signal
         signal_text = ""
-        if signal_history:
-            last_signal = signal_history[-1]
+        if symbol in signal_history and signal_history[symbol]:
+            last_signal = signal_history[symbol][-1]
             signal_text = f"\n【Previous Trading Signal】\nSignal: {last_signal.get('signal', 'N/A')}\nConfidence: {last_signal.get('confidence', 'N/A')}"
-
         # Get sentiment data
         sentiment_data = get_sentiment_indicators(symbol)
         # Simplified sentiment text - too much is useless
@@ -2016,18 +2021,20 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
 
             # Save signal to history record
             signal_data['timestamp'] = price_data['timestamp']
-            add_to_signal_history(signal_data)
-            if len(signal_history) > 30:
-                signal_history.pop(0)
+            add_to_signal_history(symbol, signal_data)
 
             # Signal statistics
-            signal_count = len([s for s in signal_history if s.get('signal') == signal_data['signal']])
-            total_signals = len(signal_history)
+            if symbol in signal_history:
+                signal_count = len([s for s in signal_history[symbol] if s.get('signal') == signal_data['signal']])
+                total_signals = len(signal_history[symbol])
+            else:
+                signal_count = 0
+                total_signals = 0
             logger.log_info(f"Signal statistics: {signal_data['signal']} (Appeared {signal_count} times in recent {total_signals} signals)")
 
             # Signal continuity check
-            if len(signal_history) >= 3:
-                last_three = [s['signal'] for s in signal_history[-3:]]
+            if symbol in signal_history and len(signal_history[symbol]) >= 3:
+                last_three = [s['signal'] for s in signal_history[symbol][-3:]]
                 if len(set(last_three)) == 1:
                     logger.log_warning(f"⚠️ Note: Consecutive 3 {signal_data['signal']} signals")
 
@@ -2966,8 +2973,8 @@ def trading_bot(symbol: str):
         filtered_signal = filter_signal(signal_data, price_data)
         
         # 5. 添加到历史记录
-        add_to_signal_history(filtered_signal)
-        add_to_price_history(price_data)
+        add_to_signal_history(symbol, filtered_signal)
+        add_to_price_history(symbol, price_data)
 
         # 6. 记录信号
         logger.log_info(f"📊 {symbol} 交易信号: {filtered_signal['signal']} | 信心: {filtered_signal['confidence']}")
@@ -2979,8 +2986,10 @@ def trading_bot(symbol: str):
     except Exception as e:
         logger.log_error(f"trading_bot_{symbol}", str(e))
 
-def health_check(symbol: str, price_history: list):
-    """Check the health of the system."""
+def health_check(symbol: str):
+    """Check the health of the system for specific symbol."""
+    global price_history  # 添加全局变量引用
+    
     config = SYMBOL_CONFIGS[symbol]
     checks = []
     
@@ -3001,9 +3010,10 @@ def health_check(symbol: str, price_history: list):
         checks.append(("网络", "❌"))
         logger.log_error("health_check_network", str(e))
     
-    # Check data freshness
-    if price_history:
-        latest_data = price_history[-1]
+    # Check data freshness - 使用该品种的价格历史
+    symbol_price_history = price_history.get(symbol, [])
+    if symbol_price_history:
+        latest_data = symbol_price_history[-1]
         try:
             data_age = (datetime.now() - datetime.strptime(latest_data['timestamp'], '%Y-%m-%d %H:%M:%S')).total_seconds()
             status = "✅" if data_age < 300 else "⚠️"
@@ -3252,11 +3262,14 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
         return False
 
 def log_performance_metrics(symbol: str):
-    """Log performance metrics."""
-    if not signal_history:
-        return
+    """Log performance metrics for specific symbol."""
+    global signal_history
     
-    signals = [s['signal'] for s in signal_history]
+    if symbol not in signal_history or not signal_history[symbol]:
+        return
+
+    signals = [s['signal'] for s in signal_history[symbol]]
+
     buy_count = signals.count('BUY')
     sell_count = signals.count('SELL')
     hold_count = signals.count('HOLD')
@@ -3357,7 +3370,7 @@ def main():
             # Health check
             if current_time - last_health_check >= health_check_interval:
                 logger.log_info("🔍 Running scheduled health check...")
-                if not health_check(symbols_to_trade[0], []): # 仅检查第一个品种
+                if not health_check(symbols_to_trade[0]): # 仅检查第一个品种
                     consecutive_errors += 1
                     # 使用任一配置的错误限制
                     if consecutive_errors >= first_config.max_consecutive_errors:
