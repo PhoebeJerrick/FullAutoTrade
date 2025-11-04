@@ -2784,7 +2784,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         ask_price = ticker['ask']
         
         logger.log_info(f"📊 {symbol}: 执行开仓 - 价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
-
+        
+        current_position = get_current_position(symbol)
         # 执行交易逻辑（保持原有的交易执行代码）
         if signal_data['signal'] == 'BUY':
             # 检查是否有现有空头持仓，先平仓
@@ -2793,7 +2794,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 
                 close_params = {
                     'reduceOnly': True,
-                    'tag': order_tag
                 }
                 exchange.create_market_order(
                     config.symbol,
@@ -2818,7 +2818,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpOrdPx': '-1',
                 'slTriggerPxType': 'last',
                 'tpTriggerPxType': 'last',
-                'tag': order_tag
             }
 
             log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
@@ -2834,7 +2833,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 
                 close_params = {
                     'reduceOnly': True,
-                    'tag': order_tag
                 }
                 exchange.create_market_order(
                     config.symbol,
@@ -2859,7 +2857,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpOrdPx': '-1',
                 'slTriggerPxType': 'last',
                 'tpTriggerPxType': 'last',
-                'tag': order_tag
             }
             log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
             logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']}")
@@ -2873,7 +2870,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             logger.log_info(f"✅ {symbol}: 开仓订单创建成功 (带止损止盈): {order_id}")
             
             # 🆕 记录成功的交易
-            logger.log_info(f"💰 {symbol}: 交易执行成功! 盈亏比: {final_rr:.2f}:1")
+            logger.log_info(f"💰 {symbol}: 交易执行成功! 盈亏比: {actual_rr:.2f}:1")
         else:
             logger.log_error(f"❌ {symbol}: 开仓订单创建失败: {response.get('msg')}")
             return
