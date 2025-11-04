@@ -3334,6 +3334,28 @@ def main():
         logger.log_error("program_exit", "所有交易品种配置加载失败")
         return
 
+    # 类型安全检查
+    if not SYMBOL_CONFIGS or not isinstance(SYMBOL_CONFIGS, dict):
+        logger.log_error("program_exit", "交易品种配置加载失败或类型错误")
+        return
+        
+    # 确保 first_config 是 TradingConfig 对象
+    first_config = None
+    for config in SYMBOL_CONFIGS.values():
+        if hasattr(config, 'max_consecutive_errors'):
+            first_config = config
+            break
+    
+    if first_config is None:
+        logger.log_warning("⚠️ 无法获取有效配置，使用默认值")
+        # 创建一个默认配置对象或使用硬编码值
+        class DefaultConfig:
+            max_consecutive_errors = 5
+            config_check_interval = 300
+            perf_log_interval = 3600
+        
+        first_config = DefaultConfig()
+
     # 3. 设置交易所
     for symbol in list(SYMBOL_CONFIGS.keys()):
         if not setup_exchange(symbol):
@@ -3367,65 +3389,66 @@ def main():
         try:
             current_time = time.time()
             
-            # Health check
+            # Health check - 修复这里
             if current_time - last_health_check >= health_check_interval:
                 logger.log_info("🔍 Running scheduled health check...")
                 
-                # 对第一个交易品种执行健康检查
-                if symbols_to_trade:  # 确保列表不为空
-                    health_ok = True
-                    for symbol in symbols_to_trade[:1]:  # 只检查第一个品种
-                        if not health_check(symbol):
-                            health_ok = False
-                            break
-                    
-                    if not health_ok:
-                        consecutive_errors += 1
-                        if consecutive_errors >= first_config.max_consecutive_errors:
-                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                            break
-                    else:
-                        consecutive_errors = 0
-                else:
-                    logger.log_warning("⚠️ No trading symbols available for health check")
+                # 对每个交易品种执行健康检查
+                health_ok = True
+                for symbol in SYMBOL_CONFIGS.keys():
+                    if not health_check(symbol):
+                        health_ok = False
+                        break
                 
-                last_health_check = current_time
+                if not health_ok:
+                    consecutive_errors += 1
+                    # 安全地获取配置限制
+                    try:
+                        max_errors = first_config.max_consecutive_errors
+                    except (AttributeError, TypeError):
+                        max_errors = 5  # 默认值
                     
-            # Configuration reload check - every 5 minutes
-            if current_time - last_config_check >= config_check_interval:
-                # 注意: 我们不能热重载所有配置，只能检查文件变动并重新初始化。
-                # 由于采用了多配置模式，简化为跳过热重载逻辑，让用户重启以加载新配置。
-                # 如果要实现热重载，需要复杂的文件监控和配置替换逻辑。
-                # 原始代码: if TRADE_CONFIG.should_reload(): TRADE_CONFIG.reload()  
-                # 新代码: 保持原样，但 TRADE_CONFIG 已被替换。为简单起见，我们跳过这部分
-                # 或者可以检查第一个配置是否需要重载：
-                # if first_config.should_reload(): 
-                #    logger.log_warning("⚠️ Configuration reload requested, please restart the bot to load new multi-symbol configs.")
-                last_config_check = current_time
+                    if consecutive_errors >= max_errors:
+                        logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                        break
+                else:
+                    consecutive_errors = 0
+                last_health_check = current_time
+        
+        # Configuration reload check - every 5 minutes
+        if current_time - last_config_check >= config_check_interval:
+            last_config_check = current_time
 
-            # Run trading bot for all symbols
-            for symbol in symbols_to_trade: # 遍历所有品种
-                trading_bot(symbol)
-            
-            # Log performance (可选: 可以修改 log_performance_metrics 来汇总所有品种)
-            # log_performance_metrics() # 原始代码: 移除或修改
-            for symbol in symbols_to_trade:
-                log_performance_metrics(symbol) # 新代码
+        # Run trading bot for all symbols
+        for symbol in symbols_to_trade:
+            trading_bot(symbol)
+        
+        # Log performance for each symbol
+        for symbol in symbols_to_trade:
+            log_performance_metrics(symbol)
 
-            # Wait for next cycle
-            time.sleep(60)
+        # Wait for next cycle
+        time.sleep(60)
+        
+    except KeyboardInterrupt:
+        logger.log_warning("\n🛑 User interrupted the program.")
+        break
+
+    except Exception as e:
+        logger.log_error("main_loop", f"Error: {str(e)}")
+        consecutive_errors += 1
+    
+        # 安全地获取配置限制
+        try:
+            max_errors = first_config.max_consecutive_errors
+        except (AttributeError, TypeError):
+            max_errors = 5  # 默认值
             
-        except KeyboardInterrupt:
-            logger.log_warning("\n🛑 User interrupted the program.")
-            break
-        except Exception as e:
-            logger.log_error("main_loop", str(e))
-            consecutive_errors += 1
-            # 使用任一配置的错误限制
-            if consecutive_errors >= first_config.max_consecutive_errors:
-                logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                break
-            time.sleep(60)
+        if consecutive_errors >= max_errors:
+            logger.log_warning("🚨 Too many consecutive errors, exiting.")
+        break
+
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
