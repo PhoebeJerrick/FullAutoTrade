@@ -1051,6 +1051,8 @@ def get_correct_inst_id(symbol: str):
         return 'BCH-USDT-SWAP'
     elif symbol == 'LTC/USDT:USDT':
         return 'LTC-USDT-SWAP'
+    elif symbol == 'DASH/USDT:USDT':
+        return 'DASH-USDT-SWAP'
     else:
         # 通用处理
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
@@ -1194,6 +1196,7 @@ def cancel_existing_algo_orders(symbol: str):
 
 def calculate_dynamic_risk_reward_threshold(symbol: str, price_data: dict) -> float:
     """基于市场波动性计算动态盈亏比阈值"""
+    config = SYMBOL_CONFIGS[symbol]
     try:
         # 计算ATR波动率
         df = price_data['full_data']
@@ -1213,14 +1216,15 @@ def calculate_dynamic_risk_reward_threshold(symbol: str, price_data: dict) -> fl
         
         # 考虑品种特性
         symbol_factors = {
-            'BTC/USDT:USDT': 1.0,
+            'BTC/USDT:USDT': 1,
             'ETH/USDT:USDT': 0.9,
             'SOL/USDT:USDT': 0.8,
             'LTC/USDT:USDT': 0.7,
-            'BCH/USDT:USDT': 0.7
+            'BCH/USDT:USDT': 0.7,
+            'DASH/USDT:USDT': 0.6,
         }
         
-        symbol_factor = symbol_factors.get(symbol, 1.0)
+        symbol_factor = config.leverage_factor
         adjusted_min_rr = min_rr * symbol_factor
         
         logger.log_info(f"📊 {get_base_currency(symbol)}: 波动率{atr_percentage:.2f}%, 动态盈亏比阈值: {adjusted_min_rr:.2f}")
