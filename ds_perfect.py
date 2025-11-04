@@ -985,14 +985,28 @@ def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, p
 
 def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
                                   price_data: dict, min_risk_reward: float) -> dict:
-    """计算现实的止盈位置"""
+    """计算现实的止盈位置 - 修复版本"""
     try:
         levels = price_data['levels_analysis']
         current_price = price_data['price']
         
+        # 🆕 首先验证止损价格的合理性
+        if side == 'long':
+            if stop_loss >= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 多头止损价格{stop_loss}高于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 0.98
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        else:  # short
+            if stop_loss <= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 空头止损价格{stop_loss}低于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 1.02
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        
         if side == 'long':
             # 理论止盈（基于最小盈亏比）
-            risk = entry_price - stop_loss
+            risk = abs(entry_price - stop_loss)  # 使用绝对值
             theoretical_tp = entry_price + (risk * min_risk_reward)
             
             # 现实止盈（基于阻力位）
@@ -1009,7 +1023,7 @@ def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, 
             
         else:  # short
             # 理论止盈（基于最小盈亏比）
-            risk = stop_loss - entry_price
+            risk = abs(stop_loss - entry_price)  # 使用绝对值
             theoretical_tp = entry_price - (risk * min_risk_reward)
             
             # 现实止盈（基于支撑位）
@@ -1046,26 +1060,97 @@ def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, 
                 'is_acceptable': True
             }
 
+def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> float:
+    """计算风险回报比 - 修复版本"""
+    try:
+        if side == 'long':
+            # 多头：风险是入场价到止损价的距离，回报是入场价到止盈价的距离
+            risk = abs(entry_price - stop_loss_price)
+            reward = abs(take_profit_price - entry_price)
+        else:  # short
+            # 空头：风险是止损价到入场价的距离，回报是入场价到止盈价的距离
+            risk = abs(stop_loss_price - entry_price)
+            reward = abs(entry_price - take_profit_price)
+        
+        # 避免除零错误
+        if risk == 0:
+            return 0
+            
+        risk_reward_ratio = reward / risk
+        
+        # 安全检查：盈亏比应该在合理范围内
+        if risk_reward_ratio > 100:  # 异常高的盈亏比
+            logger.log_warning(f"⚠️ 异常盈亏比: {risk_reward_ratio:.2f}, 可能价格计算有误")
+            return 0
+            
+        return risk_reward_ratio
+        
+    except Exception as e:
+        logger.log_error("risk_reward_calculation", f"盈亏比计算失败: {str(e)}")
+        return 0
+
+def validate_price_relationship(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> bool:
+    """验证价格关系的合理性"""
+    try:
+        if side == 'long':
+            # 多头：止损价 < 入场价 < 止盈价
+            if not (stop_loss_price < entry_price < take_profit_price):
+                logger.log_error("price_validation", f"多头价格关系错误: 止损{stop_loss_price} < 入场{entry_price} < 止盈{take_profit_price}")
+                return False
+        else:  # short
+            # 空头：止盈价 < 入场价 < 止损价
+            if not (take_profit_price < entry_price < stop_loss_price):
+                logger.log_error("price_validation", f"空头价格关系错误: 止盈{take_profit_price} < 入场{entry_price} < 止损{stop_loss_price}")
+                return False
+        
+        # 检查价格是否过于接近
+        if abs(entry_price - stop_loss_price) / entry_price < 0.001:  # 小于0.1%
+            logger.log_warning("⚠️ 止损价格过于接近入场价格")
+            return False
+            
+        if abs(take_profit_price - entry_price) / entry_price < 0.001:  # 小于0.1%
+            logger.log_warning("⚠️ 止盈价格过于接近入场价格")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.log_error("price_relationship_validation", str(e))
+        return False
+
 
 def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss_price: float, 
                                     take_profit_price: float, side: str, min_risk_reward: float = 1.5) -> dict:
-    """在交易前验证盈亏比，决定是否开仓"""
+    """在交易前验证盈亏比，决定是否开仓 - 修复版本"""
     try:
+        # 首先验证价格合理性
+        if not validate_price_relationship(entry_price, stop_loss_price, take_profit_price, side):
+            return {
+                'is_valid': False,
+                'risk_reward_ratio': 0,
+                'risk_percent': 0,
+                'reward_percent': 0,
+                'risk_amount': 0,
+                'reward_amount': 0,
+                'message': "价格关系不合理，请检查止损止盈设置"
+            }
+        
         risk_reward_ratio = calculate_risk_reward_ratio(entry_price, stop_loss_price, take_profit_price, side)
         
+        # 计算风险和回报金额（使用绝对值确保正数）
         if side == 'long':
-            risk_amount = entry_price - stop_loss_price
-            reward_amount = take_profit_price - entry_price
+            risk_amount = abs(entry_price - stop_loss_price)
+            reward_amount = abs(take_profit_price - entry_price)
             risk_percent = (risk_amount / entry_price) * 100
             reward_percent = (reward_amount / entry_price) * 100
         else:  # short
-            risk_amount = stop_loss_price - entry_price
-            reward_amount = entry_price - take_profit_price
+            risk_amount = abs(stop_loss_price - entry_price)
+            reward_amount = abs(entry_price - take_profit_price)
             risk_percent = (risk_amount / entry_price) * 100
             reward_percent = (reward_amount / entry_price) * 100
         
         validation_result = {
-            'is_valid': risk_reward_ratio >= min_risk_reward,
+            'is_valid': risk_reward_ratio >= min_risk_reward and risk_reward_ratio > 0,
             'risk_reward_ratio': risk_reward_ratio,
             'risk_percent': risk_percent,
             'reward_percent': reward_percent,
@@ -1077,7 +1162,10 @@ def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss
         if validation_result['is_valid']:
             validation_result['message'] = f"✅ 盈亏比达标: {risk_reward_ratio:.2f} >= {min_risk_reward}"
         else:
-            validation_result['message'] = f"❌ 盈亏比不足: {risk_reward_ratio:.2f} < {min_risk_reward}，放弃开仓"
+            if risk_reward_ratio <= 0:
+                validation_result['message'] = f"❌ 无效盈亏比: {risk_reward_ratio:.2f}"
+            else:
+                validation_result['message'] = f"❌ 盈亏比不足: {risk_reward_ratio:.2f} < {min_risk_reward}，放弃开仓"
         
         return validation_result
         
@@ -1092,6 +1180,7 @@ def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss
             'reward_amount': 0,
             'message': f"盈亏比验证失败: {str(e)}"
         }
+
 
 def find_optimal_risk_reward_levels(symbol: str, side: str, current_price: float, price_data: dict, 
                                   min_risk_reward: float = 1.5) -> dict:
@@ -3012,6 +3101,16 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     take_profit_price = tp_result['take_profit']
     actual_rr = tp_result['actual_risk_reward']
 
+    # 🆕 修复：添加价格关系验证
+    if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, side):
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
+        return
+
+    # 🆕 修复：添加盈亏比有效性检查
+    if actual_rr <= 0:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 无效盈亏比 {actual_rr:.2f}，放弃开仓")
+        return
+    
     # 🆕 步骤4: 放宽接受条件
     if not tp_result['is_acceptable']:
         # 即使不满足完整阈值，如果盈亏比合理也可以考虑
