@@ -1995,7 +1995,6 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
 
             # Safely parse JSON
             result = response.choices[0].message.content.strip()
-            logger.log_info(f"DeepSeek original reply: {result}")
 
             # 关键：清理非法引号（如 20-"period" → 20-period）
             cleaned_content = re.sub(r'(\d+)-"(\w+)"', r'\1-\2', result)  # 移除数字后的引号
@@ -2018,6 +2017,10 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
             required_fields = ['signal', 'reason', 'stop_loss', 'take_profit', 'confidence']
             if not all(field in signal_data for field in required_fields):
                 signal_data = create_fallback_signal(price_data)
+
+            # 🆕 新增逻辑: 检查信号，如果不是 HOLD，则打印 DeepSeek 原始回复
+            if signal_data and signal_data.get('signal') != 'HOLD':
+                logger.log_info(f"DeepSeek original reply: {result}") # <-- 只有在 BUY/SELL 时才打印原始 JSON
 
             # Save signal to history record
             signal_data['timestamp'] = price_data['timestamp']
@@ -3031,7 +3034,7 @@ def health_check(symbol: str):
     status_emoji = "✅" if overall_status else "❌"
     
     # 使用合并的健康检查日志
-    logger.log_info(f"🔍 系统健康检查: {status_emoji} | {details}")
+    logger.log_info(f"🔍 {symbol}系统健康检查: {status_emoji} | {details}")
     
     return overall_status
 
@@ -3275,8 +3278,15 @@ def log_performance_metrics(symbol: str):
     hold_count = signals.count('HOLD')
     total = len(signals)
     
+    # 提取基础货币 (例如: 从 'BTC/USDT:USDT' 提取 'BTC')
+    try:
+        base_currency = symbol.split('/')[0]
+    except Exception:
+        base_currency = symbol  # 如果分割失败，使用完整名称作为备用
+
     # Use logger.log_performance instead of print
     performance_metrics = {
+        'symbol': base_currency,  # <-- 使用提取出的基础货币
         'buy_signals': f"{buy_count}/{total}",
         'sell_signals': f"{sell_count}/{total}", 
         'hold_signals': f"{hold_count}/{total}",
