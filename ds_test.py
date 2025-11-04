@@ -217,26 +217,30 @@ def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tup
 
 def create_market_order_with_sl_tp(side: str, amount: float, 
                                   stop_loss_price: float, take_profit_price: float):
-    """创建市价单并同时设置止损止盈 - 使用OKX官方API"""
+    """创建市价单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API"""
     try:
         inst_id = get_correct_inst_id()
         
-        # 根据OKX API文档构建参数
+        # 根据OKX新的API文档构建参数
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
             'side': side,
             'ordType': 'market',
             'sz': str(amount),
-            # 止损参数
-            'slTriggerPx': str(stop_loss_price),
-            'slOrdPx': '-1',  # 市价止损
-            # 止盈参数
-            'tpTriggerPx': str(take_profit_price),
-            'tpOrdPx': '-1',  # 市价止盈
-            # 设置止损止盈触发类型
-            'slTriggerPxType': 'last',  # 触发价格类型：last-最新价格
-            'tpTriggerPxType': 'last',  # 触发价格类型：last-最新价格
+            # 使用新的attachAlgoOrds参数来设置止损止盈
+            'attachAlgoOrds': [
+                # 止损订单
+                {
+                    'tpTriggerPx': str(take_profit_price),
+                    'tpOrdPx': '-1',  # 市价止盈
+                    'slTriggerPx': str(stop_loss_price),
+                    'slOrdPx': '-1',  # 市价止损
+                    'algoOrdType': 'conditional',  # 条件单类型
+                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
+                }
+            ]
         }
         
         log_order_params("市价单带止损止盈", params, "create_market_order_with_sl_tp")
@@ -244,21 +248,12 @@ def create_market_order_with_sl_tp(side: str, amount: float,
         logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
         logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
         logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
-
-        # 打印原始请求数据
-        logger.info("🚀 市价单原始请求数据:")
-        logger.info(f"   接口: POST /api/v5/trade/order")
-        logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
-
+        
         # 使用CCXT的私有API方法调用/trade/order接口
         response = exchange.private_post_trade_order(params)
         
         log_api_response(response, "create_market_order_with_sl_tp")
-
-        # 打印原始响应数据
-        logger.info("📥 市价单原始响应数据:")
-        logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
-
+        
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
             logger.info(f"✅ 市价单创建成功: {order_id}")
@@ -272,6 +267,7 @@ def create_market_order_with_sl_tp(side: str, amount: float,
         import traceback
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
+
 
 def cancel_existing_orders():
     """取消现有的订单"""
@@ -426,11 +422,11 @@ def monitor_position_and_orders(timeout=300):
     
 def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float, 
                                  stop_loss_price: float, take_profit_price: float):
-    """创建限价单并同时设置止损止盈 - 使用OKX官方API"""
+    """创建限价单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API"""
     try:
         inst_id = get_correct_inst_id()
         
-        # 根据OKX API文档构建参数
+        # 根据OKX新的API文档构建参数
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -438,15 +434,19 @@ def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float,
             'ordType': 'limit',
             'sz': str(amount),
             'px': str(limit_price),
-            # 止损参数
-            'slTriggerPx': str(stop_loss_price),
-            'slOrdPx': '-1',  # 市价止损
-            # 止盈参数
-            'tpTriggerPx': str(take_profit_price),
-            'tpOrdPx': '-1',  # 市价止盈
-            # 设置止损止盈触发类型
-            'slTriggerPxType': 'last',  # 触发价格类型：last-最新价格
-            'tpTriggerPxType': 'last',  # 触发价格类型：last-最新价格
+            # 使用新的attachAlgoOrds参数来设置止损止盈
+            'attachAlgoOrds': [
+                # 止损订单
+                {
+                    'tpTriggerPx': str(take_profit_price),
+                    'tpOrdPx': '-1',  # 市价止盈
+                    'slTriggerPx': str(stop_loss_price),
+                    'slOrdPx': '-1',  # 市价止损
+                    'algoOrdType': 'conditional',  # 条件单类型
+                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
+                }
+            ]
         }
         
         log_order_params("限价单带止损止盈", params, "create_limit_order_with_sl_tp")
@@ -482,7 +482,8 @@ def create_limit_order_with_sl_tp(side: str, amount: float, limit_price: float,
         import traceback
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
-    
+
+
 def run_limit_order_sl_tp_test():
     """运行限价单止损止盈测试"""
     logger.info("🚀 开始限价单止损止盈API测试")
@@ -520,6 +521,21 @@ def run_limit_order_sl_tp_test():
     # 6. 取消现有订单
     cancel_existing_orders()
 
+    # 7. 使用OKX官方API创建市价单并同时设置止损止盈
+    logger.info("📝 使用OKX官方API创建市价单并同时设置止损止盈...")
+    order_result = create_market_order_with_sl_tp(
+        side=side,
+        amount=position_size,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price
+    )
+
+    if not order_result or order_result.get('code') != '0':
+        logger.error("❌ 市价开仓方法失败")
+        return False
+    
+    time.sleep(2)
+
     # 7. 使用OKX官方API创建限价单并同时设置止损止盈
     logger.info("📝 使用OKX官方API创建限价单并同时设置止损止盈...")
     order_result = create_limit_order_with_sl_tp(
@@ -530,21 +546,23 @@ def run_limit_order_sl_tp_test():
         take_profit_price=take_profit_price
     )
 
-    time.sleep(2)
-
-    if not order_result or not order_result.get('code') == '0':
-        logger.error("❌ 限价单创建成功，尝试市价单...")
-        # 备选方案：使用市价单----实际上是不支持的。只是不知道为什么如果先限价开单，再市价开单就会成功。
-        order_result = create_market_order_with_sl_tp(
-            side=side,
-            amount=position_size,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price
-        )
-    
     if not order_result or order_result.get('code') != '0':
-        logger.error("❌ 市价开仓方法失败")
+        logger.error("❌ 限价开仓方法失败")
         return False
+    
+    # if not order_result or not order_result.get('code') == '0':
+    #     logger.error("❌ 限价单创建成功，尝试市价单...")
+    #     # 备选方案：使用市价单----实际上是不支持的。只是不知道为什么如果先限价开单，再市价开单就会成功。
+    #     order_result = create_market_order_with_sl_tp(
+    #         side=side,
+    #         amount=position_size,
+    #         stop_loss_price=stop_loss_price,
+    #         take_profit_price=take_profit_price
+    #     )
+    
+    # if not order_result or order_result.get('code') != '0':
+    #     logger.error("❌ 市价开仓方法失败")
+    #     return False
     
     logger.info("✅ 订单创建成功，开始监控...")
     
