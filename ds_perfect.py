@@ -848,6 +848,168 @@ def cancel_existing_algo_orders(symbol: str):
     except Exception as e:
         logger.log_error(f"cancel_algo_orders_{symbol}", str(e))
 
+def calculate_dynamic_risk_reward_threshold(symbol: str, price_data: dict) -> float:
+    """基于市场波动性计算动态盈亏比阈值"""
+    try:
+        # 计算ATR波动率
+        df = price_data['full_data']
+        atr = calculate_atr(df)
+        current_price = price_data['price']
+        atr_percentage = (atr / current_price) * 100
+        
+        # 基于波动率设置不同的盈亏比阈值
+        if atr_percentage > 3.0:  # 高波动市场
+            min_rr = 1.5  # 高波动时可以要求更高盈亏比
+        elif atr_percentage > 2.0:  # 中等波动
+            min_rr = 1.2
+        elif atr_percentage > 1.0:  # 低波动
+            min_rr = 1.0
+        else:  # 极低波动
+            min_rr = 0.8  # 窄幅震荡时降低要求
+        
+        # 考虑品种特性
+        symbol_factors = {
+            'BTC/USDT:USDT': 1.0,
+            'ETH/USDT:USDT': 0.9,
+            'SOL/USDT:USDT': 0.8,
+            'LTC/USDT:USDT': 0.7,
+            'BCH/USDT:USDT': 0.7
+        }
+        
+        symbol_factor = symbol_factors.get(symbol, 1.0)
+        adjusted_min_rr = min_rr * symbol_factor
+        
+        logger.log_info(f"📊 {symbol}: 波动率{atr_percentage:.2f}%, 动态盈亏比阈值: {adjusted_min_rr:.2f}")
+        
+        return adjusted_min_rr
+        
+    except Exception as e:
+        logger.log_error("dynamic_rr_threshold", str(e))
+        return 1.0  # 默认阈值
+
+def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
+    """自适应止损计算"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    try:
+        df = price_data['full_data']
+        atr = calculate_atr(df)
+        
+        # 方法1: 基于ATR的止损
+        atr_stop_distance = atr * 1.5  # 1.5倍ATR
+        
+        # 方法2: 基于支撑阻力位的止损
+        levels = price_data['levels_analysis']
+        
+        if side == 'long':
+            support_level = levels.get('static_support', current_price * 0.98)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.98)
+            
+            # 选择较近的支撑位
+            structure_stop = min(support_level, dynamic_support)
+            
+            # 结合ATR和结构止损，选择较近的
+            atr_stop_price = current_price - atr_stop_distance
+            stop_loss = max(structure_stop, atr_stop_price)
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            min_stop_price = current_price - max_stop_distance
+            stop_loss = max(stop_loss, min_stop_price)
+            
+        else:  # short
+            resistance_level = levels.get('static_resistance', current_price * 1.02)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.02)
+            
+            # 选择较近的阻力位
+            structure_stop = max(resistance_level, dynamic_resistance)
+            
+            # 结合ATR和结构止损，选择较近的
+            atr_stop_price = current_price + atr_stop_distance
+            stop_loss = min(structure_stop, atr_stop_price)
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            max_stop_price = current_price + max_stop_distance
+            stop_loss = min(stop_loss, max_stop_price)
+        
+        stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
+        logger.log_info(f"🎯 {symbol}: 自适应止损 - {stop_loss:.2f} (距离: {stop_distance_percent:.2f}%)")
+        
+        return stop_loss
+        
+    except Exception as e:
+        logger.log_error(f"adaptive_stop_loss_{symbol}", str(e))
+        # 备用止损
+        if side == 'long':
+            return current_price * 0.98
+        else:
+            return current_price * 1.02
+
+def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
+                                  price_data: dict, min_risk_reward: float) -> dict:
+    """计算现实的止盈位置"""
+    try:
+        levels = price_data['levels_analysis']
+        current_price = price_data['price']
+        
+        if side == 'long':
+            # 理论止盈（基于最小盈亏比）
+            risk = entry_price - stop_loss
+            theoretical_tp = entry_price + (risk * min_risk_reward)
+            
+            # 现实止盈（基于阻力位）
+            resistance_level = levels.get('static_resistance', current_price * 1.03)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.03)
+            realistic_tp = min(resistance_level, dynamic_resistance)
+            
+            # 选择较近的止盈
+            take_profit = min(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = take_profit - entry_price
+            actual_rr = actual_reward / risk if risk > 0 else 0
+            
+        else:  # short
+            # 理论止盈（基于最小盈亏比）
+            risk = stop_loss - entry_price
+            theoretical_tp = entry_price - (risk * min_risk_reward)
+            
+            # 现实止盈（基于支撑位）
+            support_level = levels.get('static_support', current_price * 0.97)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.97)
+            realistic_tp = max(support_level, dynamic_support)
+            
+            # 选择较近的止盈
+            take_profit = max(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = entry_price - take_profit
+            actual_rr = actual_reward / risk if risk > 0 else 0
+        
+        return {
+            'take_profit': take_profit,
+            'actual_risk_reward': actual_rr,
+            'is_acceptable': actual_rr >= min_risk_reward * 0.8  # 允许80%的阈值
+        }
+        
+    except Exception as e:
+        logger.log_error(f"realistic_take_profit_{symbol}", str(e))
+        # 备用止盈
+        if side == 'long':
+            return {
+                'take_profit': entry_price * 1.02,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+        else:
+            return {
+                'take_profit': entry_price * 0.98,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+
+
 def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss_price: float, 
                                     take_profit_price: float, side: str, min_risk_reward: float = 1.5) -> dict:
     """在交易前验证盈亏比，决定是否开仓"""
@@ -2546,79 +2708,55 @@ def optimize_existing_orders(symbol: str, position: dict, price_data: dict):
 
 
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
-    """执行智能交易 - 基于市场结构且要求盈亏比达标"""
+    """执行智能交易 - 改进版，使用动态盈亏比"""
     global position
     config = SYMBOL_CONFIGS[symbol]
     
-    # 订单标签
-    order_tag = create_order_tag()
-
-    # 市场条件检查
-    if not check_market_conditions(symbol):
-        return
-    if not check_trading_frequency():
-        return
-    
-    current_position = get_current_position(symbol)
-
     # 对于HOLD信号，直接返回
     if signal_data['signal'] == 'HOLD':
         logger.log_info(f"⏸️ {symbol}: 保持观望，不执行交易")
         return
 
-    # 计算仓位大小
-    position_size = calculate_enhanced_position(symbol, signal_data, price_data, current_position)
-    
+    # 🆕 步骤1: 计算动态盈亏比阈值
+    dynamic_min_rr = calculate_dynamic_risk_reward_threshold(symbol, price_data)
+    logger.log_info(f"🎯 {symbol}: 使用动态盈亏比阈值: {dynamic_min_rr:.2f}")
+
     current_price = price_data['price']
     side = 'long' if signal_data['signal'] == 'BUY' else 'short'
 
-    # 🆕 步骤1: 基于市场结构计算止损止盈位置
-    logger.log_info(f"🔍 {symbol}: 基于市场结构寻找止损止盈位置...")
-    structure_levels = calculate_market_structure_levels(symbol, side, current_price, price_data)
-    stop_loss_price = structure_levels['stop_loss']
-    take_profit_price = structure_levels['take_profit']
-    
-    logger.log_info(f"📊 {symbol}: 市场结构位置 - 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
+    # 🆕 步骤2: 计算自适应止损
+    stop_loss_price = calculate_adaptive_stop_loss(symbol, side, current_price, price_data)
 
-    # 🆕 步骤2: 寻找满足最小盈亏比1.5的最优位置
-    logger.log_info(f"🎯 {symbol}: 寻找满足盈亏比≥1.5的最优位置...")
-    optimal_levels = find_optimal_risk_reward_levels(symbol, side, current_price, price_data, min_risk_reward=1.5)
+    # 🆕 步骤3: 计算现实止盈
+    tp_result = calculate_realistic_take_profit(symbol, side, current_price, stop_loss_price, 
+                                              price_data, dynamic_min_rr)
     
-    if not optimal_levels['is_viable']:
-        # 无法满足最小盈亏比，放弃开仓
-        logger.log_warning(f"🚫 {symbol}: {optimal_levels['message']}")
-        logger.log_info(f"💡 {symbol}: 放弃本次开仓，等待更好的机会")
-        return
-    
-    # 使用找到的最优位置
-    stop_loss_price = optimal_levels['stop_loss']
-    take_profit_price = optimal_levels['take_profit']
-    final_rr = optimal_levels['risk_reward_ratio']
-    
-    logger.log_info(f"✅ {symbol}: {optimal_levels['message']}")
+    take_profit_price = tp_result['take_profit']
+    actual_rr = tp_result['actual_risk_reward']
 
-    # 🆕 步骤3: 最终验证盈亏比
-    final_validation = validate_risk_reward_before_trade(
-        symbol, current_price, stop_loss_price, take_profit_price, side, min_risk_reward=1.5
-    )
-    
-    if not final_validation['is_valid']:
-        logger.log_warning(f"🚫 {symbol}: 最终验证失败 - {final_validation['message']}")
-        logger.log_info(f"💡 {symbol}: 放弃开仓，等待下次机会")
-        return
+    # 🆕 步骤4: 放宽接受条件
+    if not tp_result['is_acceptable']:
+        # 即使不满足完整阈值，如果盈亏比合理也可以考虑
+        if actual_rr >= 0.8:  # 最低可接受盈亏比
+            logger.log_warning(f"⚠️ {symbol}: 盈亏比{actual_rr:.2f}略低于阈值{dynamic_min_rr:.2f}，但仍可接受")
+        else:
+            logger.log_warning(f"🚫 {symbol}: 盈亏比{actual_rr:.2f}过低，放弃开仓")
+            return
 
-    # 🆕 记录详细的交易分析
+    # 计算仓位
+    position_size = calculate_enhanced_position(symbol, signal_data, price_data, get_current_position(symbol))
+
+    # 记录交易分析
     trade_analysis = f"""
-    🎯 {symbol} 交易分析 (基于市场结构):
+    🎯 {symbol} 改进版交易分析:
     ├── 信号: {signal_data['signal']}
     ├── 入场价格: {current_price:.2f}
-    ├── 止损位置: {stop_loss_price:.2f} (-{final_validation['risk_percent']:.2f}%)
-    ├── 止盈位置: {take_profit_price:.2f} (+{final_validation['reward_percent']:.2f}%)
-    ├── 风险金额: {final_validation['risk_amount']:.2f}
-    ├── 预期收益: {final_validation['reward_amount']:.2f}
-    ├── 盈亏比例: {final_validation['risk_reward_ratio']:.2f}:1
+    ├── 止损位置: {stop_loss_price:.2f}
+    ├── 止盈位置: {take_profit_price:.2f}
+    ├── 实际盈亏比: {actual_rr:.2f}:1
+    ├── 目标阈值: {dynamic_min_rr:.2f}:1
     ├── 仓位大小: {position_size:.2f}张
-    └── 状态: ✅ 满足开仓条件
+    └── 状态: {'✅ 满足开仓条件' if tp_result['is_acceptable'] else '⚠️ 条件放宽'}
     """
     logger.log_info(trade_analysis)
 
