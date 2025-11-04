@@ -2784,6 +2784,206 @@ def optimize_existing_orders(symbol: str, position: dict, price_data: dict):
         logger.log_error(f"optimize_existing_orders_{get_base_currency(symbol)}", f"优化现有订单失败: {str(e)}")
         return False
 
+def close_position_safely(symbol: str, position: dict, reason: str = "反向开仓平仓") -> bool:
+    """安全平仓函数，返回是否成功"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        position_size = position['size']
+        order_tag = create_order_tag()
+        
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
+        
+        if position['side'] == 'long':
+            # 平多仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            
+            # 记录订单参数
+            log_order_params("平多仓", close_params, "close_position_safely")
+            log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
+            
+            if not config.test_mode:
+                # 执行平仓
+                order = exchange.create_market_order(
+                    config.symbol,
+                    'sell',
+                    position_size,
+                    params=close_params
+                )
+                
+                # 验证订单是否创建成功
+                if order and order.get('id'):
+                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功，ID: {order['id']}")
+                    
+                    # 等待并验证平仓结果
+                    return verify_position_closed(symbol, position_size, 'long')
+                else:
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平多仓订单提交失败")
+                    return False
+            else:
+                logger.log_info("测试模式 - 模拟平多仓成功")
+                return True
+                
+        else:  # short
+            # 平空仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            
+            log_order_params("平空仓", close_params, "close_position_safely")
+            log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
+            
+            if not config.test_mode:
+                order = exchange.create_market_order(
+                    config.symbol,
+                    'buy',
+                    position_size,
+                    params=close_params
+                )
+                
+                if order and order.get('id'):
+                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功，ID: {order['id']}")
+                    return verify_position_closed(symbol, position_size, 'short')
+                else:
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平空仓订单提交失败")
+                    return False
+            else:
+                logger.log_info("测试模式 - 模拟平空仓成功")
+                return True
+                
+    except Exception as e:
+        logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
+        return False
+
+def verify_position_closed(symbol: str, expected_size: float, side: str) -> bool:
+    """验证持仓是否已平"""
+    max_retries = 3
+    retry_delay = 2
+    
+    for i in range(max_retries):
+        try:
+            time.sleep(retry_delay)
+            current_position = get_current_position(symbol)
+            
+            if current_position is None:
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 持仓验证通过 - 已完全平仓")
+                return True
+                
+            # 检查持仓量是否减少
+            remaining_size = current_position['size']
+            if remaining_size < expected_size * 0.1:  # 允许10%的误差
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 持仓验证通过 - 剩余{remaining_size}张")
+                return True
+            else:
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 第{i+1}次验证 - 仍有{remaining_size}张未平")
+                
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 第{i+1}次验证失败: {str(e)}")
+    
+    logger.log_error(f"❌ {get_base_currency(symbol)}: 持仓验证失败 - 可能未完全平仓")
+    return False
+
+
+def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: str = 'market', 
+                           limit_price: float = None, stop_loss_price: float = None, 
+                           take_profit_price: float = None):
+    """
+    创建订单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API
+    支持市价单和限价单
+    
+    Args:
+        side: 交易方向 'buy' 或 'sell'
+        amount: 订单数量
+        order_type: 订单类型 'market' 或 'limit'
+        limit_price: 限价单价格（仅限价单需要）
+        stop_loss_price: 止损价格
+        take_profit_price: 止盈价格
+        
+    Returns:
+        API响应结果
+    """
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 基础参数
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': side,
+            'ordType': order_type,
+            'sz': str(amount),
+        }
+        
+        # 限价单需要价格参数
+        if order_type == 'limit':
+            if limit_price is None:
+                logger.error("❌ 限价单必须提供limit_price参数")
+                return None
+            params['px'] = str(limit_price)
+        
+        # 添加止损止盈参数（如果提供了止损止盈价格）
+        if stop_loss_price is not None and take_profit_price is not None:
+            params['attachAlgoOrds'] = [
+                {
+                    'tpTriggerPx': str(take_profit_price),
+                    'tpOrdPx': '-1',  # 市价止盈
+                    'slTriggerPx': str(stop_loss_price),
+                    'slOrdPx': '-1',  # 市价止损
+                    'algoOrdType': 'conditional',  # 条件单类型
+                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
+                }
+            ]
+        
+        # 记录订单参数
+        order_type_name = "市价单" if order_type == 'market' else "限价单"
+        log_order_params(f"{order_type_name}带止损止盈", params, "create_order_with_sl_tp")
+        
+        # 记录订单详情
+        if order_type == 'market':
+            logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
+        else:
+            logger.info(f"🎯 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f}")
+        
+        if stop_loss_price is not None:
+            logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
+        if take_profit_price is not None:
+            logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
+        
+        # 打印原始请求数据（仅限价单详细打印）
+        if order_type == 'limit':
+            logger.info("🚀 原始请求数据:")
+            logger.info(f"   接口: POST /api/v5/trade/order")
+            logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+        
+        # 使用CCXT的私有API方法调用/trade/order接口
+        response = exchange.private_post_trade_order(params)
+        
+        # 打印原始响应数据（仅限价单详细打印）
+        if order_type == 'limit':
+            logger.info("📥 原始响应数据:")
+            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+        
+        log_api_response(response, "create_order_with_sl_tp")
+        
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ {order_type_name}创建成功: {order_id}")
+            return response
+        else:
+            logger.error(f"❌ {order_type_name}创建失败: {response}")
+            return response
+            
+    except Exception as e:
+        logger.error(f"{order_type_name}开仓失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return None
+
 
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 改进版，使用动态盈亏比"""
@@ -2880,89 +3080,59 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             if current_position and current_position['side'] == 'short':
                 logger.log_info(f"🔄 {get_base_currency(symbol)}: 平空仓开多仓 - 平{current_position['size']}张，开{position_size}张")
                 
-                close_params = {
-                    'reduceOnly': True,
-                }
-                exchange.create_market_order(
-                    config.symbol,
-                    'buy',
-                    current_position['size'],
-                    params=close_params
-                )
-                time.sleep(1)
+                # 使用安全的平仓函数
+                close_success = close_position_safely(symbol, current_position, "反向开仓平空仓")
+                if not close_success:
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
+                    return
+                time.sleep(1)  # 平仓后等待
 
             # 开多仓（同步设置止损止盈）
-            inst_id = get_correct_inst_id(symbol)
-            open_params = {
-                'instId': inst_id,
-                'tdMode': getattr(config, 'margin_mode', 'isolated'),
-                'side': 'buy',
-                'ordType': 'limit',
-                'sz': str(round(position_size, 2)),
-                'px': str(round(ask_price, 2)),
-                'slTriggerPx': str(round(stop_loss_price, 2)),
-                'slOrdPx': '-1',
-                'tpTriggerPx': str(round(take_profit_price, 2)),
-                'tpOrdPx': '-1',
-                'slTriggerPxType': 'last',
-                'tpTriggerPxType': 'last',
-            }
+            order_result = create_order_with_sl_tp(
+                symbol = symbol,
+                side= 'buy',
+                amount= str(round(position_size, 2)),
+                order_type='limit',
+                limit_price= str(round(ask_price, 2)),
+                stop_loss_price= str(round(stop_loss_price, 2)),
+                take_profit_price= str(round(take_profit_price, 2))
+            )
 
-            log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交 - {position_size}张")
-
-            response = exchange.private_post_trade_order(open_params)
-            log_api_response(response, "execute_intelligent_trade")
+            if order_result and order_result.get('code') == '0':
+                order_id = order_result['data'][0]['ordId']
+                logger.log_info(f"✅ {get_base_currency(symbol)}:限价开多仓提交-{position_size}张, 订单ID: {order_id}")  
+            else:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
+                return
 
         elif signal_data['signal'] == 'SELL':
             # 检查是否有现有多头持仓，先平仓
             if current_position and current_position['side'] == 'long':
                 logger.log_info(f"🔄 {get_base_currency(symbol)}: 平多仓开空仓 - 平{current_position['size']}张，开{position_size}张")
                 
-                close_params = {
-                    'reduceOnly': True,
-                }
-                exchange.create_market_order(
-                    config.symbol,
-                    'sell',
-                    current_position['size'],
-                    params=close_params
-                )
+                close_success = close_position_safely(symbol, current_position, "反向开仓平多仓")
+                if not close_success:
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
+                    return
                 time.sleep(1)
 
             # 开空仓（同步设置止损止盈）
-            inst_id = get_correct_inst_id(symbol)
-            open_params = {
-                'instId': inst_id,
-                'tdMode': getattr(config, 'margin_mode', 'isolated'),
-                'side': 'sell',
-                'ordType': 'limit',
-                'sz': str(round(position_size, 2)),
-                'px': str(round(bid_price, 2)),
-                'slTriggerPx': str(round(stop_loss_price, 2)),
-                'slOrdPx': '-1',
-                'tpTriggerPx': str(round(take_profit_price, 2)),
-                'tpOrdPx': '-1',
-                'slTriggerPxType': 'last',
-                'tpTriggerPxType': 'last',
-            }
-            log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开空仓提交 - {position_size}张")
+            order_result = create_order_with_sl_tp(
+                symbol = symbol,
+                side= 'sell',
+                amount= str(round(position_size, 2)),
+                order_type='limit',
+                limit_price= str(round(bid_price, 2)),
+                stop_loss_price= str(round(stop_loss_price, 2)),
+                take_profit_price= str(round(take_profit_price, 2))
+            )
 
-            response = exchange.private_post_trade_order(open_params)
-            log_api_response(response, "execute_intelligent_trade")
-
-        # 处理订单响应
-        if response.get('code') == '0':
-            order_id = response['data'][0]['ordId']
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 开仓订单创建成功 (带止损止盈): {order_id}")
-            
-            # 🆕 记录成功的交易
-            logger.log_info(f"💰 {get_base_currency(symbol)}: 交易执行成功! 盈亏比: {actual_rr:.2f}:1")
-        else:
-            logger.log_error(f"❌ {get_base_currency(symbol)}: 开仓订单创建失败: {response.get('msg')}")
-            return
-
+            if order_result and order_result.get('code') == '0':
+                order_id = order_result['data'][0]['ordId']
+                logger.log_info(f"✅ {get_base_currency(symbol)}:限价开空仓提交-{position_size}张, 订单ID: {order_id}")  
+            else:
+                logger.log_error(f"❌ {get_base_currency(symbol)}:限价开空仓提交失败")
+                return
     except Exception as e:
         logger.log_error(f"trade_execution_{get_base_currency(symbol)}", str(e))
         logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 交易执行失败，但盈亏比分析仍然有效")
