@@ -218,8 +218,22 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             first_position_min = usdt_balance * posMngmt['first_position_min_ratio']
             # 取较大值作为基础金额
             dynamic_base_usdt = max(dynamic_base_usdt, first_position_min)
+        else:
+            # 非首次开仓（加仓），应用加仓比例限制
+            first_position_size = current_position['size']  # 假设current_position包含头仓大小
+            
+            # 计算基于头仓的最大和最小加仓金额
+            max_addition = first_position_size * posMngmt['add_position_max_ratio']
+            min_addition = first_position_size * posMngmt['add_position_min_ratio']
+            
+            # 计算建议加仓金额
+            suggested_addition = (dynamic_base_usdt * confidence_multiplier * 
+                                trend_multiplier * rsi_multiplier * 
+                                volatility_multiplier * leverage_multiplier)
+            
+            # 应用加仓限制
+            dynamic_base_usdt = max(min_addition, min(suggested_addition, max_addition))
         
-        # 后续计算逻辑保持不变...
         # 3. 信心倍数
         confidence_multiplier = {
             'HIGH': posMngmt['high_confidence_multiplier'],
@@ -270,7 +284,6 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         🎯 增强版仓位计算详情:
         账户余额: {usdt_balance:.2f} USDT
         {'头仓最小金额: ' + str(first_position_min) + ' USDT' if is_first_position else ''}
-        动态基础: {dynamic_base_usdt:.2f} USDT
         动态基础: {dynamic_base_usdt:.2f} USDT
         信心倍数: {confidence_multiplier} | 趋势倍数: {trend_multiplier}
         RSI倍数: {rsi_multiplier} | 波动率倍数: {volatility_multiplier}
