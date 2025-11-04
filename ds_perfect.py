@@ -2855,13 +2855,23 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
     # 🆕 只有通过所有验证才执行实际交易
     try:
-        # 获取当前市场数据
-        ticker = exchange.fetch_ticker(config.symbol)
-        current_price = ticker['last']
-        bid_price = ticker['bid']
-        ask_price = ticker['ask']
+        # 获取订单簿数据（默认深度通常包含至少5档，可通过参数调整）
+        order_book = exchange.fetch_order_book(config.symbol)
+
+        # 提取买二价（若买单数量 >=2 则取第2档，否则为None）
+        bid_price = order_book['bids'][1][0] if len(order_book['bids']) >= 2 else order_book['bids'][0][0]
+
+        # 提取卖二价（若卖单数量 >=2 则取第2档，否则为None）
+        ask_price = order_book['asks'][1][0] if len(order_book['asks']) >= 2 else order_book['asks'][0][0]
+        logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 执行价格{current_price:.2f}, 买二{bid_price:.2f}, 卖二{ask_price:.2f}")
+
+        # # 获取当前市场数据
+        # ticker = exchange.fetch_ticker(config.symbol)
+        # current_price = ticker['last']
+        # bid_price = ticker['bid']
+        # ask_price = ticker['ask']
         
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
+        # logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 执行价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
         
         current_position = get_current_position(symbol)
         # 执行交易逻辑（保持原有的交易执行代码）
@@ -2887,8 +2897,9 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'instId': inst_id,
                 'tdMode': getattr(config, 'margin_mode', 'isolated'),
                 'side': 'buy',
-                'ordType': 'market',
+                'ordType': 'limit',
                 'sz': str(round(position_size, 2)),
+                'px': str(round(ask_price, 2)),
                 'slTriggerPx': str(round(stop_loss_price, 2)),
                 'slOrdPx': '-1',
                 'tpTriggerPx': str(round(take_profit_price, 2)),
@@ -2897,8 +2908,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpTriggerPxType': 'last',
             }
 
-            log_order_params("市价Buy单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 市价开多仓提交 - {position_size}张")
+            log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交 - {position_size}张")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
@@ -2925,8 +2936,9 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'instId': inst_id,
                 'tdMode': getattr(config, 'margin_mode', 'isolated'),
                 'side': 'sell',
-                'ordType': 'market',
+                'ordType': 'limit',
                 'sz': str(round(position_size, 2)),
+                'px': str(round(bid_price, 2)),
                 'slTriggerPx': str(round(stop_loss_price, 2)),
                 'slOrdPx': '-1',
                 'tpTriggerPx': str(round(take_profit_price, 2)),
@@ -2934,8 +2946,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'slTriggerPxType': 'last',
                 'tpTriggerPxType': 'last',
             }
-            log_order_params("市价Sell单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 市价开空仓提交 - {position_size}张")
+            log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开空仓提交 - {position_size}张")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")

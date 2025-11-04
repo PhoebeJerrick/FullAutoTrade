@@ -520,38 +520,31 @@ def run_limit_order_sl_tp_test():
     # 6. 取消现有订单
     cancel_existing_orders()
 
-    # # 7. 使用OKX官方API创建限价单并同时设置止损止盈
-    # logger.info("📝 使用OKX官方API创建限价单并同时设置止损止盈...")
-    # order_result = create_limit_order_with_sl_tp(
-    #     side=side,
-    #     amount=position_size,
-    #     limit_price=limit_price,
-    #     stop_loss_price=stop_loss_price,
-    #     take_profit_price=take_profit_price
-    # )
-    # 7. 使用OKX官方API创建市价单并同时设置止损止盈
-    logger.info("📝 使用OKX官方API创建市价单并同时设置止损止盈...")
-    order_result = create_market_order_with_sl_tp(
+    # 7. 使用OKX官方API创建限价单并同时设置止损止盈
+    logger.info("📝 使用OKX官方API创建限价单并同时设置止损止盈...")
+    order_result = create_limit_order_with_sl_tp(
         side=side,
         amount=position_size,
+        limit_price=limit_price,
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price
-    )    
+    )
+
     time.sleep(2)
 
-    # if order_result and order_result.get('code') == '0':
-    #     logger.error("❌ 限价单创建成功，尝试市价单...")
-    #     # 备选方案：使用市价单
-    #     order_result = create_market_order_with_sl_tp(
-    #         side=side,
-    #         amount=position_size,
-    #         stop_loss_price=stop_loss_price,
-    #         take_profit_price=take_profit_price
-    #     )
+    if not order_result or not order_result.get('code') == '0':
+        logger.error("❌ 限价单创建成功，尝试市价单...")
+        # 备选方案：使用市价单----实际上是不支持的。只是不知道为什么如果先限价开单，再市价开单就会成功。
+        order_result = create_market_order_with_sl_tp(
+            side=side,
+            amount=position_size,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price
+        )
     
-    # if not order_result or order_result.get('code') != '0':
-    #     logger.error("❌ 市价开仓方法失败")
-    #     return False
+    if not order_result or order_result.get('code') != '0':
+        logger.error("❌ 市价开仓方法失败")
+        return False
     
     logger.info("✅ 订单创建成功，开始监控...")
     
