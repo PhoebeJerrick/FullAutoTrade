@@ -30,8 +30,8 @@ CURRENT_SYMBOL: Optional[str] = None
 
 
 # Global variables to store historical data
-price_history = []
-signal_history = []
+price_history = {}
+signal_history = {}
 position = None
 
 # Use relative path
