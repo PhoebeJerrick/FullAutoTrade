@@ -3232,6 +3232,7 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     支持市价单和限价单
     
     Args:
+        symbol: 交易品种
         side: 交易方向 'buy' 或 'sell'
         amount: 订单数量
         order_type: 订单类型 'market' 或 'limit'
@@ -3244,7 +3245,8 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     """
     config = SYMBOL_CONFIGS[symbol]
     try:
-        inst_id = get_correct_inst_id()
+        # 🆕 修复：添加 symbol 参数
+        inst_id = get_correct_inst_id(symbol)
         
         # 基础参数
         params = {
@@ -3258,7 +3260,8 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         # 限价单需要价格参数
         if order_type == 'limit':
             if limit_price is None:
-                logger.error("❌ 限价单必须提供limit_price参数")
+                # 🆕 修复：使用 logger.log_error
+                logger.log_error("limit_order_missing_price", f"❌ {get_base_currency(symbol)}: 限价单必须提供limit_price参数")
                 return None
             params['px'] = str(limit_price)
         
@@ -3280,47 +3283,48 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         order_type_name = "市价单" if order_type == 'market' else "限价单"
         log_order_params(f"{order_type_name}带止损止盈", params, "create_order_with_sl_tp")
         
-        # 记录订单详情
+        # 🆕 修复：使用 logger.log_info
         if order_type == 'market':
-            logger.info(f"🎯 执行市价{side}开仓: {amount} 张")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行市价{side}开仓: {amount} 张")
         else:
-            logger.info(f"🎯 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f}")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f}")
         
         if stop_loss_price is not None:
-            logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
+            logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {stop_loss_price:.2f}")
         if take_profit_price is not None:
-            logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {take_profit_price:.2f}")
         
         # 打印原始请求数据（仅限价单详细打印）
         if order_type == 'limit':
-            logger.info("🚀 原始请求数据:")
-            logger.info(f"   接口: POST /api/v5/trade/order")
-            logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+            logger.log_info(f"🚀 {get_base_currency(symbol)}: 原始请求数据:")
+            logger.log_info(f"   接口: POST /api/v5/trade/order")
+            logger.log_info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
         
         # 使用CCXT的私有API方法调用/trade/order接口
         response = exchange.private_post_trade_order(params)
         
         # 打印原始响应数据（仅限价单详细打印）
         if order_type == 'limit':
-            logger.info("📥 原始响应数据:")
-            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+            logger.log_info(f"📥 {get_base_currency(symbol)}: 原始响应数据:")
+            logger.log_info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
         
         log_api_response(response, "create_order_with_sl_tp")
         
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ {order_type_name}创建成功: {order_id}")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: {order_type_name}创建成功: {order_id}")
             return response
         else:
-            logger.error(f"❌ {order_type_name}创建失败: {response}")
+            # 🆕 修复：使用 logger.log_error
+            logger.log_error(f"order_creation_failed_{get_base_currency(symbol)}", f"❌ {order_type_name}创建失败: {response}")
             return response
             
     except Exception as e:
-        logger.error(f"{order_type_name}开仓失败: {str(e)}")
+        # 🆕 修复：使用 logger.log_error
+        logger.log_error(f"order_creation_exception_{get_base_currency(symbol)}", f"{order_type_name}开仓失败: {str(e)}")
         import traceback
-        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        logger.log_error(f"order_traceback_{get_base_currency(symbol)}", f"详细错误信息: {traceback.format_exc()}")
         return None
-
 
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 改进版，使用动态盈亏比"""
@@ -3354,12 +3358,12 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
     # 🆕 修复：添加价格关系验证
     if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, side):
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
+        logger.log_error(f"price_validation_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
         return
 
     # 🆕 修复：添加盈亏比有效性检查
     if actual_rr <= 0:
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 无效盈亏比 {actual_rr:.2f}，放弃开仓")
+        logger.log_error(f"invalid_rr_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 无效盈亏比 {actual_rr:.2f}，放弃开仓")
         return
     
     # 🆕 步骤4: 放宽接受条件
@@ -3397,10 +3401,10 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         logger.log_info(f"🎯 {get_base_currency(symbol)}: 交易执行 - {signal_data['signal']} | 仓位: {position_size:.2f}张 | 止损: {stop_loss_price:.2f} | 止盈: {take_profit_price:.2f}")
     except Exception as log_error:
         logger.log_info(f"🎯 {get_base_currency(symbol)}: 交易执行 - {signal_data['signal']} | 仓位: {position_size:.2f}张")
-        logger.log_warning(f"⚠️ 日志格式化失败: {str(log_error)}")
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 日志格式化失败: {str(log_error)}")
 
     if config.test_mode:
-        logger.log_info("测试模式 - 仅模拟交易")
+        logger.log_info(f"测试模式 - {get_base_currency(symbol)}: 仅模拟交易")
         return
 
     # 🆕 只有通过所有验证才执行实际交易
@@ -3415,14 +3419,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         ask_price = order_book['asks'][1][0] if len(order_book['asks']) >= 2 else order_book['asks'][0][0]
         logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 执行价格{current_price:.2f}, 买二{bid_price:.2f}, 卖二{ask_price:.2f}")
 
-        # # 获取当前市场数据
-        # ticker = exchange.fetch_ticker(config.symbol)
-        # current_price = ticker['last']
-        # bid_price = ticker['bid']
-        # ask_price = ticker['ask']
-        
-        # logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 执行价格{current_price:.2f}, 买一{bid_price:.2f}, 卖一{ask_price:.2f}")
-        
         current_position = get_current_position(symbol)
         # 执行交易逻辑（保持原有的交易执行代码）
         if signal_data['signal'] == 'BUY':
@@ -3433,7 +3429,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 # 使用安全的平仓函数
                 close_success = close_position_safely(symbol, current_position, "反向开仓平空仓")
                 if not close_success:
-                    logger.log_error("trade_execution", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
+                    logger.log_error(f"close_position_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
                     return
                 time.sleep(2)  # 平仓后等待
 
@@ -3452,7 +3448,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 order_id = order_result['data'][0]['ordId']
                 logger.log_info(f"✅ {get_base_currency(symbol)}:限价开多仓提交-{position_size}张, 订单ID: {order_id}")  
             else:
-                logger.log_error(f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
+                logger.log_error(f"buy_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
                 return
 
         elif signal_data['signal'] == 'SELL':
@@ -3462,7 +3458,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 
                 close_success = close_position_safely(symbol, current_position, "反向开仓平多仓")
                 if not close_success:
-                    logger.log_error("trade_execution", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
+                    logger.log_error(f"close_position_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
                     return
                 time.sleep(1)
 
@@ -3481,10 +3477,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 order_id = order_result['data'][0]['ordId']
                 logger.log_info(f"✅ {get_base_currency(symbol)}:限价开空仓提交-{position_size}张, 订单ID: {order_id}")  
             else:
-                logger.log_error(f"❌ {get_base_currency(symbol)}:限价开空仓提交失败")
+                logger.log_error(f"sell_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}:限价开空仓提交失败")
                 return
     except Exception as e:
-        logger.log_error(f"trade_execution_{get_base_currency(symbol)}", str(e))
+        # 🆕 修复：使用 logger.log_error
+        logger.log_error(f"trade_execution_{get_base_currency(symbol)}", f"交易执行异常: {str(e)}")
         logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 交易执行失败，但盈亏比分析仍然有效")
 
         import traceback
