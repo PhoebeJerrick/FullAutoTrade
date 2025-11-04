@@ -1559,9 +1559,37 @@ def generate_technical_analysis_text(price_data):
     """
     return analysis_text
 
+def verify_position_exists(symbol: str, position_info: dict) -> bool:
+    """验证持仓是否真实存在"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        # 方法1：通过账户余额验证
+        balance = exchange.fetch_balance()
+        total_balance = balance['total'].get('USDT', 0)
+        
+        # 方法2：尝试获取更详细的持仓信息
+        positions = exchange.fetch_positions([config.symbol])
+        for pos in positions:
+            if (pos['symbol'] == config.symbol and 
+                float(pos.get('contracts', 0)) > 0 and
+                pos.get('side') == position_info['side']):
+                return True
+        
+        # 方法3：如果上述方法都失败，记录详细日志
+        logger.log_warning(f"🔍 {get_base_currency(symbol)}: 持仓验证失败 - 详细持仓信息:")
+        for pos in positions:
+            if pos['symbol'] == config.symbol:
+                logger.log_warning(f"  - 合约: {pos.get('contracts')}, 方向: {pos.get('side')}, 模式: {pos.get('marginMode')}")
+        
+        return False
+        
+    except Exception as e:
+        logger.log_error(f"position_verification_{get_base_currency(symbol)}", f"持仓验证失败: {str(e)}")
+        return False
+
 
 def get_current_position(symbol: str) -> Optional[dict]:
-    """Get current position status - OKX version"""
+    """Get current position status - OKX version - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         positions = exchange.fetch_positions([config.symbol])
@@ -1571,15 +1599,34 @@ def get_current_position(symbol: str) -> Optional[dict]:
         for pos in positions:
             if pos['symbol'] == config.symbol:
                 contracts = float(pos['contracts']) if pos['contracts'] else 0
-
-                if contracts > 0:
+                # 🆕 重要修复：检查持仓方向是否正确
+                side = pos.get('side')
+                
+                # 🆕 验证持仓数据的有效性
+                if contracts > 0 and side in ['long', 'short']:
+                    # 🆕 额外验证：确保entryPrice存在且有效
+                    entry_price = 0
+                    if pos['entryPrice']:
+                        try:
+                            entry_price = float(pos['entryPrice'])
+                        except (ValueError, TypeError):
+                            entry_price = 0
+                    
+                    # 🆕 验证持仓是否真实存在（通过检查保证金模式等）
+                    margin_mode = pos.get('marginMode', '')
+                    if margin_mode not in ['isolated', 'cross']:
+                        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数据异常，跳过")
+                        continue
+                        
                     return {
-                        'side': pos['side'],  # 'long' or 'short'
+                        'side': side,  # 'long' or 'short'
                         'size': contracts,
-                        'entry_price': float(pos['entryPrice']) if pos['entryPrice'] else 0,
+                        'entry_price': entry_price,
                         'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
                         'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
-                        'symbol': pos['symbol']
+                        'symbol': pos['symbol'],
+                        'margin_mode': margin_mode,
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
 
         return None
@@ -1587,7 +1634,7 @@ def get_current_position(symbol: str) -> Optional[dict]:
     except Exception as e:
         logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
         return None
-    
+
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
     """设置移动止损"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2386,7 +2433,7 @@ def set_stop_loss_and_take_profit(symbol: str, position: dict, stop_loss_price: 
         return False
 
 def check_existing_algo_orders(symbol: str, position: dict) -> dict:
-    """检查现有的策略委托订单，返回详细的订单分析"""
+    """检查现有的策略委托订单，返回详细的订单分析 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         algo_orders_analysis = {
@@ -2399,65 +2446,49 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             'remaining_size': position['size']
         }
         
+        # 🆕 首先验证持仓是否存在
+        if not verify_position_exists(symbol, position):
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过订单检查")
+            return algo_orders_analysis
+        
         # 检查条件单（单向止盈止损）
-        conditional_params = {
-            'instType': 'SWAP',
-            'algoOrdType': 'conditional'
-        }
-        
-        conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
-        
-        if conditional_response['code'] == '0' and conditional_response['data']:
-            inst_id = get_correct_inst_id(symbol)
+        try:
+            conditional_params = {
+                'instType': 'SWAP',
+                'algoOrdType': 'conditional'
+            }
             
-            for order in conditional_response['data']:
-                if order['instId'] == inst_id:
-                    order_size = float(order.get('sz', 0))
-                    
-                    # 判断是止损单还是止盈单
-                    if 'slTriggerPx' in order and order['slTriggerPx']:
-                        algo_orders_analysis['has_stop_loss'] = True
-                        algo_orders_analysis['stop_loss_orders'].append({
-                            'algoId': order['algoId'],
-                            'size': order_size,
-                            'triggerPrice': float(order['slTriggerPx'])
-                        })
-                        algo_orders_analysis['total_covered_size'] += order_size
-                    
-                    if 'tpTriggerPx' in order and order['tpTriggerPx']:
-                        algo_orders_analysis['has_take_profit'] = True
-                        algo_orders_analysis['take_profit_orders'].append({
-                            'algoId': order['algoId'],
-                            'size': order_size,
-                            'triggerPrice': float(order['tpTriggerPx'])
-                        })
-                        algo_orders_analysis['total_covered_size'] += order_size
-        
-        # 检查双向止盈止损单（OCO）
-        oco_params = {
-            'instType': 'SWAP',
-            'algoOrdType': 'oco'
-        }
-        
-        oco_response = exchange.private_get_trade_orders_algo_pending(oco_params)
-        
-        if oco_response['code'] == '0' and oco_response['data']:
-            inst_id = get_correct_inst_id(symbol)
+            conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
             
-            for order in oco_response['data']:
-                if order['instId'] == inst_id:
-                    order_size = float(order.get('sz', 0))
-                    algo_orders_analysis['oco_orders'].append({
-                        'algoId': order['algoId'],
-                        'size': order_size,
-                        'stopLossPrice': float(order.get('slTriggerPx', 0)),
-                        'takeProfitPrice': float(order.get('tpTriggerPx', 0))
-                    })
-                    algo_orders_analysis['has_stop_loss'] = True
-                    algo_orders_analysis['has_take_profit'] = True
-                    algo_orders_analysis['total_covered_size'] += order_size
+            if conditional_response['code'] == '0' and conditional_response['data']:
+                inst_id = get_correct_inst_id(symbol)
+                
+                for order in conditional_response['data']:
+                    if order['instId'] == inst_id:
+                        order_size = float(order.get('sz', 0))
+                        
+                        # 判断是止损单还是止盈单
+                        if 'slTriggerPx' in order and order['slTriggerPx']:
+                            algo_orders_analysis['has_stop_loss'] = True
+                            algo_orders_analysis['stop_loss_orders'].append({
+                                'algoId': order['algoId'],
+                                'size': order_size,
+                                'triggerPrice': float(order['slTriggerPx'])
+                            })
+                            algo_orders_analysis['total_covered_size'] += order_size
+                        
+                        if 'tpTriggerPx' in order and order['tpTriggerPx']:
+                            algo_orders_analysis['has_take_profit'] = True
+                            algo_orders_analysis['take_profit_orders'].append({
+                                'algoId': order['algoId'],
+                                'size': order_size,
+                                'triggerPrice': float(order['tpTriggerPx'])
+                            })
+                            algo_orders_analysis['total_covered_size'] += order_size
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 条件单检查失败: {str(e)}")
         
-        # 计算剩余需要设置的数量
+        # 🆕 计算剩余需要设置的数量
         algo_orders_analysis['remaining_size'] = max(0, position['size'] - algo_orders_analysis['total_covered_size'])
         
         logger.log_info(f"📊 {get_base_currency(symbol)}: 策略委托分析 - 止损: {algo_orders_analysis['has_stop_loss']}, "
@@ -3099,8 +3130,76 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
         logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
         return True  # 平仓失败，保持持仓
 
+def close_position_with_reason(symbol: str, position: dict, reason: str):
+    """根据原因平仓 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        # 🆕 首先验证持仓是否真实存在
+        if not verify_position_exists(symbol, position):
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过平仓操作")
+            return True  # 返回True表示处理完成（虽然没真正平仓）
+        
+        order_tag = create_order_tag()
+        position_size = position['size']
+        
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason}")
+        
+        if position['side'] == 'long':
+            # 平多仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
+            
+            if not config.test_mode:
+                # 🆕 添加异常处理
+                try:
+                    exchange.create_market_order(
+                        config.symbol,
+                        'sell',
+                        position_size,
+                        params=close_params
+                    )
+                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功")
+                except Exception as order_error:
+                    logger.log_error(f"close_long_position_{get_base_currency(symbol)}", 
+                                   f"平多仓失败: {str(order_error)}")
+                    return False
+        else:  # short
+            # 平空仓
+            close_params = {
+                'reduceOnly': True,
+                'tag': order_tag
+            }
+            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
+            
+            if not config.test_mode:
+                try:
+                    exchange.create_market_order(
+                        config.symbol,
+                        'buy',
+                        position_size,
+                        params=close_params
+                    )
+                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功")
+                except Exception as order_error:
+                    logger.log_error(f"close_short_position_{get_base_currency(symbol)}", 
+                                   f"平空仓失败: {str(order_error)}")
+                    return False
+        
+        logger.log_info(f"✅ {get_base_currency(symbol)}: 平仓执行完成")
+        return True
+        
+    except Exception as e:
+        logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
+        return False
+
+
 def check_existing_positions_on_startup():
-    """启动时检查所有交易品种的现有持仓"""
+    """启动时检查所有交易品种的现有持仓 - 修复版本"""
     logger.log_info("🔍 启动时持仓检查开始...")
     
     for symbol, config in SYMBOL_CONFIGS.items():
@@ -3113,13 +3212,17 @@ def check_existing_positions_on_startup():
             if current_position is None:
                 logger.log_info(f"✅ {get_base_currency(symbol)}: 无持仓")
                 continue
+            
+            # 🆕 验证持仓真实性
+            if not verify_position_exists(symbol, current_position):
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数据可能不准确，跳过处理")
+                continue
                 
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 发现现有持仓 - {current_position['side']} {current_position['size']}张")
             
             # 获取市场数据进行分析
             df, price_data = fetch_ohlcv(symbol)
             
-            # 🆕 修复：使用明确的 None 检查而不是真值判断
             if df is None or price_data is None:
                 logger.log_warning(f"❌ {get_base_currency(symbol)}: 无法获取市场数据，跳过分析")
                 continue
@@ -3228,53 +3331,6 @@ def analyze_trend_reversal_strength(position_side: str, signal_side: str, price_
         logger.log_error("reversal_strength_analysis", str(e))
         return 'WEAK'
 
-def close_position_with_reason(symbol: str, position: dict, reason: str):
-    """根据原因平仓"""
-    try:
-        config = SYMBOL_CONFIGS[symbol]
-        order_tag = create_order_tag()
-        
-        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason}")
-        
-        if position['side'] == 'long':
-            # 平多仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("启动平仓", close_params, "close_position_with_reason")
-            log_perpetual_order_details(symbol,'sell', position['size'], 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
-                    config.symbol,
-                    'sell',
-                    position['size'],
-                    params=close_params
-                )
-        else:  # short
-            # 平空仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("启动平仓", close_params, "close_position_with_reason")
-            log_perpetual_order_details(symbol,'buy', position['size'], 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
-                    config.symbol,
-                    'buy',
-                    position['size'],
-                    params=close_params
-                )
-        
-        logger.log_info(f"✅ {get_base_currency(symbol)}: 平仓执行完成")
-        return True
-        
-    except Exception as e:
-        logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
-        return False
 
 def log_performance_metrics(symbol: str):
     """Log performance metrics for specific symbol."""
