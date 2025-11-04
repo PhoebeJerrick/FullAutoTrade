@@ -2820,7 +2820,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             }
 
             log_order_params("市价Buy单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {symbol}: 市价开多仓提交 - {position_size}张 @ {open_params['px']}")
+            logger.log_info(f"✅ {symbol}: 市价开多仓提交 - {position_size}张}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
@@ -2857,7 +2857,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpTriggerPxType': 'last',
             }
             log_order_params("市价Sell单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {symbol}: 市价开空仓提交 - {position_size}张 @ {open_params['px']}")
+            logger.log_info(f"✅ {symbol}: 市价开空仓提交 - {position_size}张}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
