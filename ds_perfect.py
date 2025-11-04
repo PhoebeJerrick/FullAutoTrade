@@ -2809,9 +2809,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'instId': inst_id,
                 'tdMode': getattr(config, 'margin_mode', 'isolated'),
                 'side': 'buy',
-                'ordType': 'limit',
+                'ordType': 'market',
                 'sz': str(round(position_size, 2)),
-                'px': str(round(ask_price * 0.999, 2)),
                 'slTriggerPx': str(round(stop_loss_price, 2)),
                 'slOrdPx': '-1',
                 'tpTriggerPx': str(round(take_profit_price, 2)),
@@ -2820,8 +2819,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'tpTriggerPxType': 'last',
             }
 
-            log_order_params("限价Buy单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {symbol}: 限价开多仓提交 - {position_size}张 @ {open_params['px']}")
+            log_order_params("市价Buy单带止损止盈", open_params, "execute_intelligent_trade")
+            logger.log_info(f"✅ {symbol}: 市价开多仓提交 - {position_size}张 @ {open_params['px']}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
@@ -2848,9 +2847,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'instId': inst_id,
                 'tdMode': getattr(config, 'margin_mode', 'isolated'),
                 'side': 'sell',
-                'ordType': 'limit',
+                'ordType': 'market',
                 'sz': str(round(position_size, 2)),
-                'px': str(round(bid_price * 1.001, 2)),
                 'slTriggerPx': str(round(stop_loss_price, 2)),
                 'slOrdPx': '-1',
                 'tpTriggerPx': str(round(take_profit_price, 2)),
@@ -2858,8 +2856,8 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 'slTriggerPxType': 'last',
                 'tpTriggerPxType': 'last',
             }
-            log_order_params("限价Sell单带止损止盈", open_params, "execute_intelligent_trade")
-            logger.log_info(f"✅ {symbol}: 限价开空仓提交 - {position_size}张 @ {open_params['px']}")
+            log_order_params("市价Sell单带止损止盈", open_params, "execute_intelligent_trade")
+            logger.log_info(f"✅ {symbol}: 市价开空仓提交 - {position_size}张 @ {open_params['px']}")
 
             response = exchange.private_post_trade_order(open_params)
             log_api_response(response, "execute_intelligent_trade")
