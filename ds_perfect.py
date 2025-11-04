@@ -3370,16 +3370,27 @@ def main():
             # Health check
             if current_time - last_health_check >= health_check_interval:
                 logger.log_info("🔍 Running scheduled health check...")
-                if not health_check(symbols_to_trade[0]): # 仅检查第一个品种
-                    consecutive_errors += 1
-                    # 使用任一配置的错误限制
-                    if consecutive_errors >= first_config.max_consecutive_errors:
-                        logger.log_info("🚨 Too many consecutive errors, exiting.")
-                        break
+                
+                # 对第一个交易品种执行健康检查
+                if symbols_to_trade:  # 确保列表不为空
+                    health_ok = True
+                    for symbol in symbols_to_trade[:1]:  # 只检查第一个品种
+                        if not health_check(symbol):
+                            health_ok = False
+                            break
+                    
+                    if not health_ok:
+                        consecutive_errors += 1
+                        if consecutive_errors >= first_config.max_consecutive_errors:
+                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                            break
+                    else:
+                        consecutive_errors = 0
                 else:
-                    consecutive_errors = 0
+                    logger.log_warning("⚠️ No trading symbols available for health check")
+                
                 last_health_check = current_time
-            
+                    
             # Configuration reload check - every 5 minutes
             if current_time - last_config_check >= config_check_interval:
                 # 注意: 我们不能热重载所有配置，只能检查文件变动并重新初始化。
