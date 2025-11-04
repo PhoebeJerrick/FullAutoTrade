@@ -443,6 +443,313 @@ def setup_exchange(symbol: str):
         logger.log_error(f"exchange_setup_{get_base_currency(symbol)}", str(e))
         return False
 
+def fetch_extended_ohlcv(symbol: str, hours: int = 24):
+    """获取扩展的K线数据以覆盖指定小时数"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        # 根据时间帧计算所需K线数量
+        timeframe_minutes = {
+            '1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240
+        }.get(config.timeframe, 15)
+        
+        # 计算需要的K线数量（24小时 + 缓冲）
+        required_candles = int((hours * 60) / timeframe_minutes) + 50
+        
+        # 确保不超过交易所限制
+        max_limit = 1000
+        actual_limit = min(required_candles, max_limit)
+        
+        logger.log_info(f"📊 {get_base_currency(symbol)}: 获取{hours}小时数据，需要{actual_limit}根{config.timeframe}K线")
+        
+        ohlcv = exchange.fetch_ohlcv(symbol, config.timeframe, limit=actual_limit)
+        
+        if ohlcv is None or len(ohlcv) < 50:  # 至少需要50根K线
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 扩展数据获取不足，使用默认数据")
+            return fetch_ohlcv_with_retry(symbol)
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        # 计算技术指标
+        df = calculate_technical_indicators(df)
+        return df
+        
+    except Exception as e:
+        logger.log_error(f"extended_ohlcv_{get_base_currency(symbol)}", str(e))
+        # 降级到原函数
+        return fetch_ohlcv_with_retry(symbol)
+
+def calculate_multi_timeframe_support_resistance(df, lookback_periods=[20, 50, 100]):
+    """基于多个时间范围计算支撑阻力位"""
+    try:
+        current_price = df['close'].iloc[-1]
+        support_levels = []
+        resistance_levels = []
+        
+        # 计算不同时间范围的支撑阻力
+        for period in lookback_periods:
+            if len(df) >= period:
+                # 支撑位：近期低点
+                support = df['low'].tail(period).min()
+                # 阻力位：近期高点
+                resistance = df['high'].tail(period).max()
+                
+                support_levels.append(support)
+                resistance_levels.append(resistance)
+        
+        # 选择最重要的支撑阻力位
+        if support_levels:
+            # 选择较近的支撑位（但要有一定距离）
+            valid_supports = [s for s in support_levels if s < current_price * 0.98]
+            primary_support = max(valid_supports) if valid_supports else min(support_levels)
+        else:
+            primary_support = current_price * 0.95
+            
+        if resistance_levels:
+            # 选择较近的阻力位（但要有一定距离）
+            valid_resistances = [r for r in resistance_levels if r > current_price * 1.02]
+            primary_resistance = min(valid_resistances) if valid_resistances else max(resistance_levels)
+        else:
+            primary_resistance = current_price * 1.05
+        
+        # 动态支撑阻力（布林带）
+        bb_upper = df['bb_upper'].iloc[-1]
+        bb_lower = df['bb_lower'].iloc[-1]
+        
+        return {
+            'primary_support': primary_support,
+            'primary_resistance': primary_resistance,
+            'dynamic_support': bb_lower,
+            'dynamic_resistance': bb_upper,
+            'support_levels': support_levels,
+            'resistance_levels': resistance_levels,
+            'price_vs_resistance': ((primary_resistance - current_price) / current_price) * 100,
+            'price_vs_support': ((current_price - primary_support) / primary_support) * 100
+        }
+    except Exception as e:
+        logger.log_error("multi_timeframe_levels", str(e))
+        return get_support_resistance_levels(df)  # 降级到原函数
+
+def identify_trend_strength(df):
+    """识别趋势强度和多时间框架趋势"""
+    try:
+        current_price = df['close'].iloc[-1]
+        
+        # 多时间框架移动平均线分析
+        timeframes = {
+            'short_term': 20,
+            'medium_term': 50, 
+            'long_term': 100
+        }
+        
+        trend_scores = {}
+        for tf_name, period in timeframes.items():
+            if len(df) >= period:
+                sma = df['close'].rolling(period).mean().iloc[-1]
+                # 价格在均线上方为正值，下方为负值
+                trend_scores[tf_name] = (current_price - sma) / sma * 100
+        
+        # 计算综合趋势分数
+        total_score = sum(trend_scores.values()) / len(trend_scores) if trend_scores else 0
+        
+        # 判断趋势强度
+        if total_score > 2.0:
+            trend_strength = "STRONG_UPTREND"
+        elif total_score > 0.5:
+            trend_strength = "UPTREND" 
+        elif total_score < -2.0:
+            trend_strength = "STRONG_DOWNTREND"
+        elif total_score < -0.5:
+            trend_strength = "DOWNTREND"
+        else:
+            trend_strength = "CONSOLIDATION"
+        
+        return {
+            'trend_strength': trend_strength,
+            'trend_score': total_score,
+            'timeframe_scores': trend_scores,
+            'description': f"综合趋势分数: {total_score:.2f}% - {trend_strength}"
+        }
+        
+    except Exception as e:
+        logger.log_error("trend_strength_analysis", str(e))
+        return {'trend_strength': 'UNKNOWN', 'trend_score': 0}
+
+def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
+                                  price_data: dict, min_risk_reward: float) -> dict:
+    """计算现实的止盈位置 - 修复版本"""
+    try:
+        levels = price_data['levels_analysis']
+        current_price = price_data['price']
+        
+        # 🆕 首先验证止损价格的合理性
+        if side == 'long':
+            if stop_loss >= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 多头止损价格{stop_loss}高于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 0.98
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        else:  # short
+            if stop_loss <= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 空头止损价格{stop_loss}低于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 1.02
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        
+        if side == 'long':
+            # 理论止盈（基于最小盈亏比）
+            risk = abs(entry_price - stop_loss)  # 使用绝对值
+            theoretical_tp = entry_price + (risk * min_risk_reward)
+            
+            # 现实止盈（基于阻力位）
+            resistance_level = levels.get('static_resistance', current_price * 1.03)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.03)
+            realistic_tp = min(resistance_level, dynamic_resistance)
+            
+            # 选择较近的止盈
+            take_profit = min(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = take_profit - entry_price
+            actual_rr = actual_reward / risk if risk > 0 else 0
+            
+        else:  # short
+            # 理论止盈（基于最小盈亏比）
+            risk = abs(stop_loss - entry_price)  # 使用绝对值
+            theoretical_tp = entry_price - (risk * min_risk_reward)
+            
+            # 现实止盈（基于支撑位）
+            support_level = levels.get('static_support', current_price * 0.97)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.97)
+            realistic_tp = max(support_level, dynamic_support)
+            
+            # 选择较近的止盈
+            take_profit = max(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = entry_price - take_profit
+            actual_rr = actual_reward / risk if risk > 0 else 0
+        
+        return {
+            'take_profit': take_profit,
+            'actual_risk_reward': actual_rr,
+            'is_acceptable': actual_rr >= min_risk_reward * 0.8  # 允许80%的阈值
+        }
+        
+    except Exception as e:
+        logger.log_error(f"realistic_take_profit_{get_base_currency(symbol)}", str(e))
+        # 备用止盈
+        if side == 'long':
+            return {
+                'take_profit': entry_price * 1.02,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+        else:
+            return {
+                'take_profit': entry_price * 0.98,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+
+
+def calculate_aggressive_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
+                                   price_data: dict, min_risk_reward: float, trend_strength: str) -> dict:
+    """基于趋势强度的积极止盈计算"""
+    try:
+        levels = price_data['levels_analysis']
+        current_price = price_data['price']
+        
+        # 根据趋势强度调整盈亏比目标
+        trend_multiplier = {
+            'STRONG_UPTREND': 1.5,
+            'UPTREND': 1.2,
+            'CONSOLIDATION': 1.0,
+            'DOWNTREND': 1.2,
+            'STRONG_DOWNTREND': 1.5
+        }.get(trend_strength, 1.0)
+        
+        adjusted_min_rr = min_risk_reward * trend_multiplier
+        
+        if side == 'long':
+            risk = abs(entry_price - stop_loss)
+            
+            # 方法1: 理论止盈（基于调整后的盈亏比）
+            theoretical_tp = entry_price + (risk * adjusted_min_rr)
+            
+            # 方法2: 基于主要阻力位
+            primary_resistance = levels.get('primary_resistance', current_price * 1.05)
+            
+            # 方法3: 在强势趋势中，看更远的阻力位
+            if trend_strength in ['STRONG_UPTREND', 'UPTREND']:
+                # 查看次要阻力位（如果有）
+                resistance_levels = levels.get('resistance_levels', [])
+                if len(resistance_levels) > 1:
+                    # 取第二远的阻力位
+                    secondary_resistance = sorted(resistance_levels)[-2] if len(resistance_levels) >= 2 else primary_resistance * 1.05
+                else:
+                    secondary_resistance = primary_resistance * 1.08
+                
+                # 在强势趋势中，选择更远的止盈目标
+                realistic_tp = max(primary_resistance, secondary_resistance)
+            else:
+                realistic_tp = primary_resistance
+            
+            # 选择理论止盈和现实阻力位中较远的一个
+            take_profit = max(theoretical_tp, realistic_tp)
+            
+            # 但不要超过合理的最大止盈（入场价的15%）
+            max_reasonable_tp = entry_price * 1.15
+            take_profit = min(take_profit, max_reasonable_tp)
+            
+            actual_reward = take_profit - entry_price
+            actual_rr = actual_reward / risk if risk > 0 else 0
+            
+        else:  # short
+            risk = abs(stop_loss - entry_price)
+            
+            # 方法1: 理论止盈
+            theoretical_tp = entry_price - (risk * adjusted_min_rr)
+            
+            # 方法2: 基于主要支撑位
+            primary_support = levels.get('primary_support', current_price * 0.95)
+            
+            # 方法3: 在强势下跌趋势中，看更远的支撑位
+            if trend_strength in ['STRONG_DOWNTREND', 'DOWNTREND']:
+                support_levels = levels.get('support_levels', [])
+                if len(support_levels) > 1:
+                    # 取第二远的支撑位
+                    secondary_support = sorted(support_levels)[1] if len(support_levels) >= 2 else primary_support * 0.95
+                else:
+                    secondary_support = primary_support * 0.92
+                
+                # 在强势下跌趋势中，选择更远的止盈目标
+                realistic_tp = min(primary_support, secondary_support)
+            else:
+                realistic_tp = primary_support
+            
+            # 选择理论止盈和现实支撑位中较近的一个（对于空头，数值越小越好）
+            take_profit = min(theoretical_tp, realistic_tp)
+            
+            # 但不低于合理的最小止盈（入场价的85%）
+            min_reasonable_tp = entry_price * 0.85
+            take_profit = max(take_profit, min_reasonable_tp)
+            
+            actual_reward = entry_price - take_profit
+            actual_rr = actual_reward / risk if risk > 0 else 0
+        
+        return {
+            'take_profit': take_profit,
+            'actual_risk_reward': actual_rr,
+            'is_acceptable': actual_rr >= min_risk_reward,  # 必须满足最小盈亏比
+            'trend_adjusted_rr': adjusted_min_rr,
+            'trend_strength': trend_strength
+        }
+        
+    except Exception as e:
+        logger.log_error(f"aggressive_take_profit_{get_base_currency(symbol)}", str(e))
+        # 备用计算
+        return calculate_realistic_take_profit(symbol, side, entry_price, stop_loss, price_data, min_risk_reward)
 
 def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
     """Calculate intelligent position size - with additional safety checks"""
@@ -983,82 +1290,6 @@ def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, p
         else:
             return current_price * 1.02
 
-def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
-                                  price_data: dict, min_risk_reward: float) -> dict:
-    """计算现实的止盈位置 - 修复版本"""
-    try:
-        levels = price_data['levels_analysis']
-        current_price = price_data['price']
-        
-        # 🆕 首先验证止损价格的合理性
-        if side == 'long':
-            if stop_loss >= entry_price:
-                logger.log_error(f"❌ {get_base_currency(symbol)}: 多头止损价格{stop_loss}高于入场价{entry_price}")
-                # 自动修正止损
-                stop_loss = entry_price * 0.98
-                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
-        else:  # short
-            if stop_loss <= entry_price:
-                logger.log_error(f"❌ {get_base_currency(symbol)}: 空头止损价格{stop_loss}低于入场价{entry_price}")
-                # 自动修正止损
-                stop_loss = entry_price * 1.02
-                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
-        
-        if side == 'long':
-            # 理论止盈（基于最小盈亏比）
-            risk = abs(entry_price - stop_loss)  # 使用绝对值
-            theoretical_tp = entry_price + (risk * min_risk_reward)
-            
-            # 现实止盈（基于阻力位）
-            resistance_level = levels.get('static_resistance', current_price * 1.03)
-            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.03)
-            realistic_tp = min(resistance_level, dynamic_resistance)
-            
-            # 选择较近的止盈
-            take_profit = min(theoretical_tp, realistic_tp)
-            
-            # 计算实际盈亏比
-            actual_reward = take_profit - entry_price
-            actual_rr = actual_reward / risk if risk > 0 else 0
-            
-        else:  # short
-            # 理论止盈（基于最小盈亏比）
-            risk = abs(stop_loss - entry_price)  # 使用绝对值
-            theoretical_tp = entry_price - (risk * min_risk_reward)
-            
-            # 现实止盈（基于支撑位）
-            support_level = levels.get('static_support', current_price * 0.97)
-            dynamic_support = levels.get('dynamic_support', current_price * 0.97)
-            realistic_tp = max(support_level, dynamic_support)
-            
-            # 选择较近的止盈
-            take_profit = max(theoretical_tp, realistic_tp)
-            
-            # 计算实际盈亏比
-            actual_reward = entry_price - take_profit
-            actual_rr = actual_reward / risk if risk > 0 else 0
-        
-        return {
-            'take_profit': take_profit,
-            'actual_risk_reward': actual_rr,
-            'is_acceptable': actual_rr >= min_risk_reward * 0.8  # 允许80%的阈值
-        }
-        
-    except Exception as e:
-        logger.log_error(f"realistic_take_profit_{get_base_currency(symbol)}", str(e))
-        # 备用止盈
-        if side == 'long':
-            return {
-                'take_profit': entry_price * 1.02,
-                'actual_risk_reward': 1.0,
-                'is_acceptable': True
-            }
-        else:
-            return {
-                'take_profit': entry_price * 0.98,
-                'actual_risk_reward': 1.0,
-                'is_acceptable': True
-            }
 
 def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> float:
     """计算风险回报比 - 修复版本"""
@@ -1542,27 +1773,31 @@ def fetch_ohlcv_with_retry(symbol: str,max_retries=None):
     return None
 
 def fetch_ohlcv(symbol: str):
-    """获取指定交易品种的K线数据"""
+    """获取指定交易品种的K线数据 - 改进版"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        ohlcv = fetch_ohlcv_with_retry(symbol)
+        # 使用扩展的K线数据
+        df = fetch_extended_ohlcv(symbol, hours=24)
         
-        if ohlcv is None:
-            logger.log_warning(f"❌ Failed to fetch K-line data for {get_base_currency(symbol)}")
-            return None, None
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-        # Calculate technical indicators
-        df = calculate_technical_indicators(df)
-
+        if df is None or len(df) < 50:
+            logger.log_warning(f"❌ {get_base_currency(symbol)}: 扩展数据获取失败，使用原方法")
+            ohlcv = fetch_ohlcv_with_retry(symbol)
+            if ohlcv is None:
+                return None, None
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = calculate_technical_indicators(df)
+        
         current_data = df.iloc[-1]
         previous_data = df.iloc[-2]
 
-        # Get technical analysis data
+        # 使用多时间框架支撑阻力计算
+        levels_analysis = calculate_multi_timeframe_support_resistance(df)
         trend_analysis = get_market_trend(df)
-        levels_analysis = get_support_resistance_levels(df)
+        
+        # 添加趋势强度分析
+        trend_strength_analysis = identify_trend_strength(df)
+        trend_analysis['strength'] = trend_strength_analysis
 
         price_data = {
             'price': current_data['close'],
@@ -1588,7 +1823,8 @@ def fetch_ohlcv(symbol: str):
             },
             'trend_analysis': trend_analysis,
             'levels_analysis': levels_analysis,
-            'full_data': df
+            'full_data': df,
+            'trend_strength': trend_strength_analysis['trend_strength']
         }
 
         return df, price_data
@@ -1596,7 +1832,6 @@ def fetch_ohlcv(symbol: str):
     except Exception as e:
         logger.log_error(f"fetch_ohlcv_{get_base_currency(symbol)}", str(e))
         return None, None
-
 
 def add_to_signal_history(symbol: str, signal_data):
     global signal_history
@@ -3095,9 +3330,12 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     stop_loss_price = calculate_adaptive_stop_loss(symbol, side, current_price, price_data)
 
     # 🆕 步骤3: 计算现实止盈
-    tp_result = calculate_realistic_take_profit(symbol, side, current_price, stop_loss_price, 
-                                              price_data, dynamic_min_rr)
-    
+    trend_strength = price_data.get('trend_strength', 'CONSOLIDATION')
+    tp_result = calculate_aggressive_take_profit(
+        symbol, side, current_price, stop_loss_price, 
+        price_data, dynamic_min_rr, trend_strength
+    )
+
     take_profit_price = tp_result['take_profit']
     actual_rr = tp_result['actual_risk_reward']
 
