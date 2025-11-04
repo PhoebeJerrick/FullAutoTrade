@@ -3415,40 +3415,40 @@ def main():
                     consecutive_errors = 0
                 last_health_check = current_time
         
-        # Configuration reload check - every 5 minutes
-        if current_time - last_config_check >= config_check_interval:
-            last_config_check = current_time
+            # Configuration reload check - every 5 minutes
+            if current_time - last_config_check >= config_check_interval:
+                last_config_check = current_time
 
-        # Run trading bot for all symbols
-        for symbol in symbols_to_trade:
-            trading_bot(symbol)
-        
-        # Log performance for each symbol
-        for symbol in symbols_to_trade:
-            log_performance_metrics(symbol)
-
-        # Wait for next cycle
-        time.sleep(60)
-        
-    except KeyboardInterrupt:
-        logger.log_warning("\n🛑 User interrupted the program.")
-        break
-
-    except Exception as e:
-        logger.log_error("main_loop", f"Error: {str(e)}")
-        consecutive_errors += 1
-    
-        # 安全地获取配置限制
-        try:
-            max_errors = first_config.max_consecutive_errors
-        except (AttributeError, TypeError):
-            max_errors = 5  # 默认值
+            # Run trading bot for all symbols
+            for symbol in symbols_to_trade:
+                trading_bot(symbol)
             
-        if consecutive_errors >= max_errors:
-            logger.log_warning("🚨 Too many consecutive errors, exiting.")
-        break
+            # Log performance for each symbol
+            for symbol in symbols_to_trade:
+                log_performance_metrics(symbol)
 
-        time.sleep(60)
+            # Wait for next cycle
+            time.sleep(60)
+        
+        except KeyboardInterrupt:
+            logger.log_warning("\n🛑 User interrupted the program.")
+            break
+
+        except Exception as e:
+            logger.log_error("main_loop", f"Error: {str(e)}")
+            consecutive_errors += 1
+    
+            # 安全地获取配置限制
+            try:
+                max_errors = first_config.max_consecutive_errors
+            except (AttributeError, TypeError):
+                max_errors = 5  # 默认值
+                
+            if consecutive_errors >= max_errors:
+                logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                break
+            time.sleep(60)
+
 
 if __name__ == "__main__":
     main()
