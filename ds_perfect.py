@@ -286,8 +286,16 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
         
+        # ------------------- 核心修改开始 -------------------
+        
         # 转换为合约张数
-        contract_size = final_usdt / (price_data['price'] * config.contract_size)
+        # 此时 final_usdt 代表我们希望投入的 *保证金*
+        # 保证金 * 杠杆 = 名义总价值
+        nominal_value = final_usdt * config.leverage
+        contract_size = nominal_value / (price_data['price'] * config.contract_size)
+        
+        # ------------------- 核心修改结束 -------------------
+        
         contract_size = round(contract_size, 2)  # 精度处理
         
         # 确保最小交易量
@@ -295,7 +303,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         if contract_size < min_contracts:
             contract_size = min_contracts
         
-        # 详细日志
+        # 详细日志 (更新日志术语)
         calculation_details = f"""
         🎯 增强版仓位计算详情:
         账户余额: {usdt_balance:.2f} USDT
@@ -304,7 +312,8 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         信心倍数: {confidence_multiplier} | 趋势倍数: {trend_multiplier}
         RSI倍数: {rsi_multiplier} | 波动率倍数: {volatility_multiplier}
         杠杆倍数: {leverage_multiplier}
-        建议投资: {suggested_usdt:.2f} USDT → 最终投资: {final_usdt:.2f} USDT
+        建议保证金: {suggested_usdt:.2f} USDT → 最终保证金: {final_usdt:.2f} USDT
+        名义总价值 (保证金 * 杠杆): {nominal_value:.2f} USDT
         合约数量: {contract_size:.2f}张
         """
         logger.log_info(calculation_details)
@@ -810,9 +819,15 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
 
+        # ------------------- 核心修改开始 -------------------
+        
         # Correct contract quantity calculation!
-        # Formula: Contract quantity = (Investment USDT) / (Current price * Contract multiplier)
-        contract_size = (final_usdt) / (price_data['price'] * config.contract_size)
+        # 此时 final_usdt 代表保证金
+        # 保证金 * 杠杆 = 名义总价值
+        nominal_value = final_usdt * config.leverage
+        contract_size = nominal_value / (price_data['price'] * config.contract_size)
+
+        # ------------------- 核心修改结束 -------------------
 
         # Precision handling: OKX BTC contract minimum trading unit is 0.01 contracts
         contract_size = round(contract_size, 2)  # Keep 2 decimal places
@@ -824,9 +839,10 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
 
         calculation_summary = f"""
             📊 仓位计算详情:
-            基础投资: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
+            基础保证金: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
             趋势倍数: {trend_multiplier} | RSI倍数: {rsi_multiplier}
-            建议投资: {suggested_usdt:.2f} USDT → 最终投资: {final_usdt:.2f} USDT
+            建议保证金: {suggested_usdt:.2f} USDT → 最终保证金: {final_usdt:.2f} USDT
+            名义总价值 (保证金 * 杠杆): {nominal_value:.2f} USDT
             合约数量: {contract_size:.4f}张 → 四舍五入: {round(contract_size, 2):.2f}张
             """
         logger.log_info(calculation_summary)
