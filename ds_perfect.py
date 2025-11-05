@@ -261,22 +261,10 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             first_position_min = usdt_balance * posMngmt['first_position_min_ratio']
             # 取较大值作为基础金额
             dynamic_base_usdt = max(dynamic_base_usdt, first_position_min)
-        else:
-            # 非首次开仓（加仓），应用加仓比例限制
-            first_position_size = current_position['size']  # 假设current_position包含头仓大小
-            
-            # 计算基于头仓的最大和最小加仓金额
-            max_addition = first_position_size * posMngmt['add_position_max_ratio']
-            min_addition = first_position_size * posMngmt['add_position_min_ratio']
-            
-            # 计算建议加仓金额
-            suggested_addition = (dynamic_base_usdt * confidence_multiplier * 
-                                trend_multiplier * rsi_multiplier * 
-                                volatility_multiplier * leverage_multiplier)
-            
-            # 应用加仓限制
-            dynamic_base_usdt = max(min_addition, min(suggested_addition, max_addition))
-        
+
+        if not is_first_position:
+            logger.log_info(f"ℹ️ 检测到加仓信号，使用标准逻辑计算仓位。")
+
         # 计算建议投资金额
         suggested_usdt = (dynamic_base_usdt * confidence_multiplier * 
                          trend_multiplier * rsi_multiplier * 
@@ -286,15 +274,11 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
         
-        # ------------------- 核心修改开始 -------------------
-        
         # 转换为合约张数
         # 此时 final_usdt 代表我们希望投入的 *保证金*
         # 保证金 * 杠杆 = 名义总价值
         nominal_value = final_usdt * config.leverage
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
-        
-        # ------------------- 核心修改结束 -------------------
         
         contract_size = round(contract_size, 2)  # 精度处理
         
@@ -766,14 +750,6 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
 
     # 🆕 安全检查：确保 price_data 存在且包含价格
     if not price_data or 'price' not in price_data or not price_data['price']:
-        logger.log_error("position_calculation", "价格数据无效，使用最小仓位")
-        return getattr(config, 'min_amount', 0.01)
-
-    # 🆕 安全检查：确保配置存在
-    if not posMngmt:
-        logger.log_error("position_calculation", "仓位管理配置缺失，使用最小仓位")
-        return getattr(config, 'min_amount', 0.01)
-
         logger.log_error("position_calculation", "价格数据无效，使用最小仓位")
         return getattr(config, 'min_amount', 0.01)
 
