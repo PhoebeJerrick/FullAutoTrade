@@ -194,11 +194,10 @@ def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
     dynamic_base = usdt_balance * base_ratio
     
     # 设置上下限（保持不变）
-    min_base = 50  # 最小50U
+    min_base = 10  # 最小10U (<<<<< 修改这里！将 50 修改为 10)
     max_base = 500 # 最大500U
     
     return max(min_base, min(dynamic_base, max_base))
-
 
 def calculate_volatility_adjustment(symbol: str, df: pd.DataFrame) -> float:
     """基于波动率调整仓位"""
