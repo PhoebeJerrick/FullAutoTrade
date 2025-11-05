@@ -43,6 +43,12 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
         'max_position_ratio': 7,
     },
+    # DASH 配置 (示例)
+    'DASH/USDT:USDT': {
+        'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
 }
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
@@ -80,6 +86,9 @@ class TradingConfig:
         # Position management
         self.position_management = {
             'enable_intelligent_position': True,
+            'first_position_min_ratio': current_config.get('first_position_min_ratio', 0.05),  # 头仓最小比例，默认5%
+            'add_position_max_ratio': 1.0,     # 加仓最大比例（相对于头仓，默认100%，即不超过头仓）
+            'add_position_min_ratio': 0.2,      # 加仓最小比例（相对于头仓，默认20%）
             'base_usdt_amount': current_config.get('base_usdt_amount', 100.0),
             'high_confidence_multiplier': 1.5,
             'medium_confidence_multiplier': 1.0,
