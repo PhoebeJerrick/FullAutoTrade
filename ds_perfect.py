@@ -4501,74 +4501,75 @@ def main():
     last_position_analysis = 0
     position_analysis_interval = 3600  # 每小时分析一次
 
-    while True:
-        try:
-            current_time = time.time()
-            
-            # 定期分析持仓历史
-            if current_time - last_position_analysis >= position_analysis_interval:
-                for symbol in symbols_to_trade:
-                    analyze_position_history(symbol)
-                last_position_analysis = current_time
-                
-            # Health check - 修复这里
-            if current_time - last_health_check >= health_check_interval:
-                logger.log_info("🔍 Running scheduled health check...")
-                
-                # 对每个交易品种执行健康检查
-                health_ok = True
-                for symbol in SYMBOL_CONFIGS.keys():
-                    if not health_check(symbol):
-                        health_ok = False
-                        break
-                
-                if not health_ok:
-                    consecutive_errors += 1
-                    # 安全地获取配置限制
-                    try:
-                        max_errors = first_config.max_consecutive_errors
-                    except (AttributeError, TypeError):
-                        max_errors = 5  # 默认值
-                    
-                    if consecutive_errors >= max_errors:
-                        logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                        break
-                else:
-                    consecutive_errors = 0
-                last_health_check = current_time
-        
-            # Configuration reload check - every 5 minutes
-            if current_time - last_config_check >= config_check_interval:
-                last_config_check = current_time
-
-            # Run trading bot for all symbols
-            for symbol in symbols_to_trade:
-                trading_bot(symbol)
-            
-            # Log performance for each symbol
-            for symbol in symbols_to_trade:
-                log_performance_metrics(symbol)
-
-            # Wait for next cycle
-            time.sleep(60)
-        
-        except KeyboardInterrupt:
-            logger.log_warning("\n🛑 User interrupted the program.")
-            break
-
-        except Exception as e:
-            logger.log_error("main_loop", f"Error: {str(e)}")
-            consecutive_errors += 1
-            # 安全地获取配置限制
+    try:
+        while True:
             try:
-                max_errors = first_config.max_consecutive_errors
-            except (AttributeError, TypeError):
-                max_errors = 5  # 默认值
+                current_time = time.time()
                 
-            if consecutive_errors >= max_errors:
-                logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                # 定期分析持仓历史
+                if current_time - last_position_analysis >= position_analysis_interval:
+                    for symbol in symbols_to_trade:
+                        analyze_position_history(symbol)
+                    last_position_analysis = current_time
+                    
+                # Health check - 修复这里
+                if current_time - last_health_check >= health_check_interval:
+                    logger.log_info("🔍 Running scheduled health check...")
+                    
+                    # 对每个交易品种执行健康检查
+                    health_ok = True
+                    for symbol in SYMBOL_CONFIGS.keys():
+                        if not health_check(symbol):
+                            health_ok = False
+                            break
+                    
+                    if not health_ok:
+                        consecutive_errors += 1
+                        # 安全地获取配置限制
+                        try:
+                            max_errors = first_config.max_consecutive_errors
+                        except (AttributeError, TypeError):
+                            max_errors = 5  # 默认值
+                        
+                        if consecutive_errors >= max_errors:
+                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                            break
+                    else:
+                        consecutive_errors = 0
+                    last_health_check = current_time
+            
+                # Configuration reload check - every 5 minutes
+                if current_time - last_config_check >= config_check_interval:
+                    last_config_check = current_time
+
+                # Run trading bot for all symbols
+                for symbol in symbols_to_trade:
+                    trading_bot(symbol)
+                
+                # Log performance for each symbol
+                for symbol in symbols_to_trade:
+                    log_performance_metrics(symbol)
+
+                # Wait for next cycle
+                time.sleep(60)
+            
+            except KeyboardInterrupt:
+                logger.log_warning("\n🛑 User interrupted the program.")
                 break
-            time.sleep(60)
+
+            except Exception as e:
+                logger.log_error("main_loop", f"Error: {str(e)}")
+                consecutive_errors += 1
+                # 安全地获取配置限制
+                try:
+                    max_errors = first_config.max_consecutive_errors
+                except (AttributeError, TypeError):
+                    max_errors = 5  # 默认值
+                    
+                if consecutive_errors >= max_errors:
+                    logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                    break
+                time.sleep(60)
 
     finally:
         cleanup_resources()
