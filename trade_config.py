@@ -43,12 +43,12 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
         'max_position_ratio': 7,
     },
-    # DASH 配置 (示例)
-    'DASH/USDT:USDT': {
-        'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
+    # # DASH 配置 (示例)
+    # 'DASH/USDT:USDT': {
+    #     'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
+    #     'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
+    #     'max_position_ratio': 7,
+    # },
 }
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
