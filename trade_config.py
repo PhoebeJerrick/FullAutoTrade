@@ -94,7 +94,11 @@ class TradingConfig:
             'medium_confidence_multiplier': 1.0,
             'low_confidence_multiplier': 0.5,
             'max_position_ratio': current_config.get('max_position_ratio', 10),
-            'trend_strength_multiplier': 1.2
+            'trend_strength_multiplier': 1.2,
+            "enable_scaling_in": True,  # 是否允许加仓
+            "max_scaling_times": 3,     # 最大加仓次数
+            "scaling_multiplier": 0.5,  # 每次加仓的仓位乘数（相对于首次开仓）
+            "min_interval_minutes": 30  # 加仓最小时间间隔（分钟）
         }
         
         # 风险管理和止盈止损配置
