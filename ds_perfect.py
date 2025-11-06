@@ -570,11 +570,17 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         
         contract_size = round(contract_size, 2)  # 精度处理
         
-        # 确保最小交易量
+        # 在返回 contract_size 之前添加精度检查
         min_contracts = getattr(config, 'min_amount', 0.01)
-        if contract_size < min_contracts:
-            contract_size = min_contracts
-        
+        if min_contracts > 0:
+            # 向下取整到最小交易单位的整数倍
+            contract_size = (contract_size // min_contracts) * min_contracts
+            if contract_size < min_contracts:
+                contract_size = min_contracts
+
+        # 确保最小交易量
+        contract_size = max(contract_size, min_contracts)      
+
         # 详细日志 (更新日志术语)
         calculation_details = f"""
         🎯 增强版仓位计算详情:
@@ -590,6 +596,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         """
         logger.log_info(calculation_details)
         
+
         return contract_size
         
     except Exception as e:
@@ -1096,10 +1103,16 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         # Precision handling: OKX BTC contract minimum trading unit is 0.01 contracts
         contract_size = round(contract_size, 2)  # Keep 2 decimal places
 
-        # Ensure minimum trading volume
+        # 在返回 contract_size 之前添加精度检查
         min_contracts = getattr(config, 'min_amount', 0.01)
-        if contract_size < min_contracts:
-            contract_size = min_contracts
+        if min_contracts > 0:
+            # 向下取整到最小交易单位的整数倍
+            contract_size = (contract_size // min_contracts) * min_contracts
+            if contract_size < min_contracts:
+                contract_size = min_contracts
+
+        # 确保最小交易量
+        contract_size = max(contract_size, min_contracts)
 
         calculation_summary = f"""
             📊 仓位计算详情:
@@ -3549,22 +3562,29 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     """
     创建订单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API
     支持市价单和限价单
-    
-    Args:
-        symbol: 交易品种
-        side: 交易方向 'buy' 或 'sell'
-        amount: 订单数量
-        order_type: 订单类型 'market' 或 'limit'
-        limit_price: 限价单价格（仅限价单需要）
-        stop_loss_price: 止损价格
-        take_profit_price: 止盈价格
-        
-    Returns:
-        API响应结果
     """
     config = SYMBOL_CONFIGS[symbol]
     try:
         inst_id = get_correct_inst_id(symbol)
+        
+        # 🆕 添加：调整订单数量到符合交易所精度要求
+        min_amount = getattr(config, 'min_amount', 0.01)
+        
+        # 计算符合精度要求的数量
+        if min_amount > 0:
+            # 向下取整到最小交易单位的整数倍
+            adjusted_amount = (amount // min_amount) * min_amount
+            if adjusted_amount < min_amount:
+                adjusted_amount = min_amount
+        else:
+            adjusted_amount = amount
+            
+        # 确保调整后的数量不小于最小交易量
+        adjusted_amount = max(adjusted_amount, min_amount)
+        
+        # 如果调整后的数量与原数量不同，记录警告
+        if abs(adjusted_amount - amount) > 0.001:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 订单数量从 {amount:.4f} 调整为 {adjusted_amount:.4f} 以满足交易所精度要求")
         
         # 基础参数
         params = {
@@ -3572,7 +3592,7 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
             'tdMode': config.margin_mode,
             'side': side,
             'ordType': order_type,
-            'sz': str(amount),
+            'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
         }
         
         # 🆕 修复：确保价格参数是字符串格式
@@ -3599,7 +3619,7 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
                     'slTriggerPx': sl_price_str,
                     'slOrdPx': '-1',  # 市价止损
                     'algoOrdType': 'conditional',  # 条件单类型
-                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
                     'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
                 }
             ]
@@ -3608,54 +3628,16 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         order_type_name = "市价单" if order_type == 'market' else "限价单"
         log_order_params(f"{order_type_name}带止损止盈", params, "create_order_with_sl_tp")
         
-        # 🆕 修复：安全地格式化日志，处理字符串和数字类型
-        if order_type == 'market':
-            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行市价{side}开仓: {amount} 张")
-        else:
-            # 安全格式化限价单价格
-            try:
-                if isinstance(limit_price, str):
-                    price_display = limit_price
-                else:
-                    price_display = f"{limit_price:.2f}"
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行限价{side}开仓: {amount} 张 @ {price_display}")
-            except Exception as format_error:
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行限价{side}开仓: {amount} 张 @ {limit_price}")
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行{order_type_name}{side}开仓: {adjusted_amount:.4f} 张")
         
-        # 🆕 修复：安全地格式化止损止盈价格日志
         if stop_loss_price is not None:
-            try:
-                if isinstance(stop_loss_price, str):
-                    sl_display = stop_loss_price
-                else:
-                    sl_display = f"{stop_loss_price:.2f}"
-                logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {sl_display}")
-            except Exception:
-                logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {stop_loss_price}")
+            logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {stop_loss_price:.2f}")
                 
         if take_profit_price is not None:
-            try:
-                if isinstance(take_profit_price, str):
-                    tp_display = take_profit_price
-                else:
-                    tp_display = f"{take_profit_price:.2f}"
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {tp_display}")
-            except Exception:
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {take_profit_price}")
-        
-        # 打印原始请求数据（仅限价单详细打印）
-        if order_type == 'limit':
-            logger.log_info(f"🚀 {get_base_currency(symbol)}: 原始请求数据:")
-            logger.log_info(f"   接口: POST /api/v5/trade/order")
-            logger.log_info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {take_profit_price:.2f}")
         
         # 使用CCXT的私有API方法调用/trade/order接口
         response = exchange.private_post_trade_order(params)
-        
-        # 打印原始响应数据（仅限价单详细打印）
-        if order_type == 'limit':
-            logger.log_info(f"📥 {get_base_currency(symbol)}: 原始响应数据:")
-            logger.log_info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
         
         log_api_response(response, "create_order_with_sl_tp")
         
@@ -3671,8 +3653,8 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         logger.log_error(f"order_creation_exception_{get_base_currency(symbol)}", f"{order_type_name}开仓失败: {str(e)}")
         import traceback
         logger.log_error(f"order_traceback_{get_base_currency(symbol)}", f"详细错误信息: {traceback.format_exc()}")
-        return None
-    
+        return None    
+
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 添加整体仓位管理"""
     global position
