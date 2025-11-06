@@ -3696,23 +3696,24 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == side
     
     if is_scaling:
-        # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
-        # (注意：用户要求暂时不管加仓逻辑，这里的逻辑是原版的，可能不完美，但我们遵从用户要求不修改)
-        position_history = get_position_history(symbol) # 假设存在 get_position_history
-        overall_levels = calculate_overall_stop_loss_take_profit(
-            symbol, position_history, current_price, price_data
-        )
-        
-        stop_loss_price = overall_levels['stop_loss']
-        take_profit_price = overall_levels['take_profit']
-        
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张")
-        
-        # 临时添加：由于 get_position_history() 未定义，我们使用备用逻辑
-        # 实际使用中，您需要实现 get_position_history()
-    except NameError:
-        logger.log_warning(f"⚠️ get_position_history() 未定义，加仓止损使用标准逻辑")
-        is_scaling = False # 降级为非加仓
+        try:
+            # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
+            # (注意：用户要求暂时不管加仓逻辑，这里的逻辑是原版的，可能不完美，但我们遵从用户要求不修改)
+            position_history = get_position_history(symbol) # 假设存在 get_position_history
+            overall_levels = calculate_overall_stop_loss_take_profit(
+                symbol, position_history, current_price, price_data
+            )
+            
+            stop_loss_price = overall_levels['stop_loss']
+            take_profit_price = overall_levels['take_profit']
+            
+            logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张")
+            
+            # 临时添加：由于 get_position_history() 未定义，我们使用备用逻辑
+            # 实际使用中，您需要实现 get_position_history()
+        except NameError:
+            logger.log_warning(f"⚠️ {get_position_history()} 未定义，加仓止损使用标准逻辑")
+            is_scaling = False # 降级为非加仓
         
     if not is_scaling:
         # 首次开仓：使用原有逻辑
