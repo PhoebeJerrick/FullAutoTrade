@@ -36,6 +36,8 @@ position = None
 
 # 全局变量 - 记录每个品种的加仓状态
 SCALING_HISTORY: Dict[str, Dict] = {}
+# 添加全局变量来存储持仓历史
+POSITION_HISTORY: Dict[str, List[Dict]] = {}
 
 # Use relative path
 env_path = '../ExApiConfig/ExApiConfig.env'  # .env file in config folder of parent directory
@@ -288,6 +290,167 @@ def calculate_volatility_adjustment(symbol: str, df: pd.DataFrame) -> float:
         return 0.8
     else:  # 低波动
         return 1.0
+
+
+# 添加全局变量来存储持仓历史
+POSITION_HISTORY: Dict[str, List[Dict]] = {}
+
+def get_position_history(symbol: str) -> list:
+    """获取品种的持仓历史记录"""
+    try:
+        if symbol not in POSITION_HISTORY:
+            POSITION_HISTORY[symbol] = []
+        
+        # 从持仓历史中筛选出有效的持仓记录
+        current_history = POSITION_HISTORY[symbol]
+        
+        # 只返回最近50条记录，避免内存占用过大
+        max_history = 50
+        if len(current_history) > max_history:
+            current_history = current_history[-max_history:]
+            POSITION_HISTORY[symbol] = current_history
+            
+        return current_history
+        
+    except Exception as e:
+        logger.log_error(f"get_position_history_{get_base_currency(symbol)}", f"获取持仓历史失败: {str(e)}")
+        return []
+
+def add_to_position_history(symbol: str, position_data: dict):
+    """添加持仓历史记录"""
+    try:
+        if symbol not in POSITION_HISTORY:
+            POSITION_HISTORY[symbol] = []
+        
+        # 添加时间戳
+        position_record = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': symbol,
+            'side': position_data.get('side'),
+            'size': position_data.get('size'),
+            'entry_price': position_data.get('entry_price'),
+            'unrealized_pnl': position_data.get('unrealized_pnl', 0),
+            'leverage': position_data.get('leverage'),
+            'margin_mode': position_data.get('margin_mode')
+        }
+        
+        # 如果是平仓操作，添加平仓信息
+        if position_data.get('action') == 'close':
+            position_record.update({
+                'action': 'close',
+                'close_price': position_data.get('close_price'),
+                'close_reason': position_data.get('close_reason', 'manual'),
+                'realized_pnl': position_data.get('realized_pnl', 0)
+            })
+        else:
+            position_record['action'] = position_data.get('action', 'open')
+        
+        POSITION_HISTORY[symbol].append(position_record)
+        
+        logger.log_info(f"📝 {get_base_currency(symbol)}: 添加持仓历史 - {position_record['action']} {position_record['side']} {position_record['size']}张")
+        
+    except Exception as e:
+        logger.log_error(f"add_to_position_history_{get_base_currency(symbol)}", f"添加持仓历史失败: {str(e)}")
+
+def cleanup_resources():
+    """清理资源"""
+    try:
+        logger.log_info("🧹 清理资源...")
+        
+        # 1. 保存持仓历史到文件（可选）
+        save_position_history()
+        
+        # 2. 关闭交易所连接
+        global exchange
+        if exchange:
+            try:
+                # CCXT 交易所对象通常不需要显式关闭，但我们可以标记为 None
+                exchange = None
+                logger.log_info("✅ 交易所连接已清理")
+            except Exception as e:
+                logger.log_warning(f"⚠️ 交易所连接清理异常: {str(e)}")
+        
+        # 3. 清理 DeepSeek 客户端
+        global deepseek_client
+        if deepseek_client:
+            deepseek_client = None
+            logger.log_info("✅ DeepSeek 客户端已清理")
+        
+        # 4. 清理全局变量
+        global price_history, signal_history, SCALING_HISTORY, POSITION_HISTORY
+        price_history.clear()
+        signal_history.clear()
+        SCALING_HISTORY.clear()
+        POSITION_HISTORY.clear()
+        
+        logger.log_info("✅ 所有资源清理完成")
+        
+    except Exception as e:
+        logger.log_error("cleanup_resources", f"资源清理异常: {str(e)}")
+
+def save_position_history():
+    """保存持仓历史到文件"""
+    try:
+        if not POSITION_HISTORY:
+            return
+            
+        # 创建数据目录
+        data_dir = "trading_data"
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        
+        # 保存每个品种的持仓历史
+        for symbol, history in POSITION_HISTORY.items():
+            if history:
+                filename = f"{data_dir}/{get_base_currency(symbol)}_position_history.json"
+                try:
+                    # 转换 datetime 对象为字符串
+                    serializable_history = []
+                    for record in history:
+                        serializable_record = record.copy()
+                        # 确保所有值都是可序列化的
+                        for key, value in serializable_record.items():
+                            if isinstance(value, (datetime, pd.Timestamp)):
+                                serializable_record[key] = value.strftime('%Y-%m-%d %H:%M:%S')
+                        serializable_history.append(serializable_record)
+                    
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(serializable_history, f, indent=2, ensure_ascii=False)
+                    
+                    logger.log_info(f"💾 {get_base_currency(symbol)}: 持仓历史已保存到 {filename}")
+                    
+                except Exception as e:
+                    logger.log_error(f"save_history_{get_base_currency(symbol)}", f"保存持仓历史失败: {str(e)}")
+                    
+    except Exception as e:
+        logger.log_error("save_position_history", f"保存持仓历史异常: {str(e)}")
+
+def load_position_history():
+    """从文件加载持仓历史"""
+    try:
+        data_dir = "trading_data"
+        if not os.path.exists(data_dir):
+            return
+            
+        for filename in os.listdir(data_dir):
+            if filename.endswith("_position_history.json"):
+                filepath = os.path.join(data_dir, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        history = json.load(f)
+                    
+                    # 提取品种名称
+                    symbol_name = filename.replace("_position_history.json", "")
+                    # 这里需要根据文件名映射回完整的symbol，可能需要调整
+                    # 暂时跳过具体映射
+                    logger.log_info(f"📂 加载持仓历史: {filename} ({len(history)} 条记录)")
+                    
+                except Exception as e:
+                    logger.log_warning(f"⚠️ 加载持仓历史文件失败 {filename}: {str(e)}")
+                    
+    except Exception as e:
+        logger.log_error("load_position_history", f"加载持仓历史异常: {str(e)}")
+
 
 def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_price: float, price_data: dict) -> dict:
     """基于整体仓位计算止损止盈"""
@@ -2622,7 +2785,17 @@ def execute_profit_taking(symbol: str, current_position: dict, profit_taking_sig
             close_size = getattr(config, 'min_amount', 0.01)
             
         logger.log_info(f"💰 执行部分止盈: 平仓{close_size:.2f}张合约 ({take_profit_ratio:.1%}仓位)")
-        
+
+        # 🆕 记录止盈操作到持仓历史
+        add_to_position_history(symbol, {
+            'side': current_position['side'],
+            'size': close_size,
+            'entry_price': current_position['entry_price'],
+            'action': 'partial_close',
+            'close_reason': f'profit_taking_level_{profit_taking_signal["level"]}',
+            'take_profit_ratio': take_profit_ratio
+        })
+
         if not config.test_mode:
             # 记录止盈订单参数 - 永续合约市价平仓
             if current_position['side'] == 'long':
@@ -3266,7 +3439,16 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
         
         position_size = position['size']
         logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
-        
+
+        # 🆕 记录平仓前的持仓信息到历史
+        add_to_position_history(symbol, {
+            'side': position['side'],
+            'size': position_size,
+            'entry_price': position['entry_price'],
+            'action': 'close',
+            'close_reason': reason
+        })
+
         if position['side'] == 'long':
             # 平多仓
             close_params = {
@@ -3500,6 +3682,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     if signal_data['signal'] == 'HOLD':
         logger.log_info(f"⏸️ {get_base_currency(symbol)}: 保持观望，不执行交易")
         return
+    
+    # 验证价格数据完整性
+    if not price_data or 'price' not in price_data:
+        logger.log_error(f"invalid_price_data_{get_base_currency(symbol)}", "价格数据无效")
+        return
 
     current_price = price_data['price']
     side = 'long' if signal_data['signal'] == 'BUY' else 'short'
@@ -3630,7 +3817,16 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
             if order_result and order_result.get('code') == '0':
                 order_id = order_result['data'][0]['ordId']
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交-{position_size:.2f}张, 订单ID: {order_id}")  
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交-{position_size:.2f}张, 订单ID: {order_id}")
+                # 🆕 记录开仓操作到持仓历史
+                add_to_position_history(symbol, {
+                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
+                    'size': position_size,
+                    'entry_price': current_price,
+                    'action': 'open',
+                    'order_id': order_id,
+                    'signal_confidence': signal_data['confidence']
+                })
             else:
                 logger.log_error(f"buy_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
                 return
@@ -3660,6 +3856,15 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             if order_result and order_result.get('code') == '0':
                 order_id = order_result['data'][0]['ordId']
                 logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开空仓提交-{position_size:.2f}张, 订单ID: {order_id}")  
+                # 🆕 记录开仓操作到持仓历史
+                add_to_position_history(symbol, {
+                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
+                    'size': position_size,
+                    'entry_price': current_price,
+                    'action': 'open',
+                    'order_id': order_id,
+                    'signal_confidence': signal_data['confidence']
+                })
             else:
                 logger.log_error(f"sell_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开空仓提交失败")
                 return
@@ -3698,7 +3903,6 @@ def filter_signal(signal_data, price_data):
 def trading_bot(symbol: str):
     """
     主要交易逻辑循环 - 现在接受 symbol 参数
-    (已升级，包含主动持仓管理)
     """
     global CURRENT_SYMBOL
     CURRENT_SYMBOL = symbol  # 设置当前品种，以便日志记录器使用
@@ -3712,6 +3916,9 @@ def trading_bot(symbol: str):
     logger.log_info(f"=====================================")
 
     try:
+        # 添加执行时间记录
+        start_time = time.time()
+
         # 1. 获取市场和价格数据 (使用 symbol)
         df, price_data = fetch_ohlcv(symbol)
 
@@ -3721,6 +3928,12 @@ def trading_bot(symbol: str):
             
         # 2. 获取当前持仓 (使用 symbol)
         current_position = get_current_position(symbol)
+
+        # 记录数据状态
+        data_status = f"数据: {len(df)}条K线 | 价格: {price_data['price']:.2f}"
+        if current_position:
+            data_status += f" | 持仓: {current_position['side']} {current_position['size']}张"
+        logger.log_info(f"📊 {get_base_currency(symbol)}: {data_status}")
 
         # 3. [新] 持仓管理模块
         # 如果有持仓，优先处理持仓（止盈、移动止损、安全检查）
@@ -3787,10 +4000,29 @@ def trading_bot(symbol: str):
         # 8. 执行智能交易
         # (此函数负责开仓、反向平仓、或在持仓时加仓)
         execute_intelligent_trade(symbol, filtered_signal, price_data)
+
+        # 记录执行时间
+        execution_time = time.time() - start_time
+        logger.log_info(f"⏱️ {get_base_currency(symbol)}: 本轮执行完成，耗时 {execution_time:.2f}秒")
         
     except Exception as e:
         logger.log_error(f"trading_bot_{get_base_currency(symbol)}", str(e))
 # ✅ --- 修改结束 ---
+        import traceback
+        logger.log_error(f"trading_bot_traceback_{get_base_currency(symbol)}", traceback.format_exc())
+
+def cleanup_resources():
+    """清理资源"""
+    logger.log_info("🧹 清理资源...")
+    # 可以在这里添加交易所连接关闭等清理操作
+    pass
+
+def signal_handler(signum, frame):
+    """信号处理函数"""
+    logger.log_warning(f"🛑 接收到信号 {signum}，程序退出")
+    cleanup_resources()
+    sys.exit(0)
+
 
 def health_check(symbol: str):
     """Check the health of the system for specific symbol."""
@@ -4116,6 +4348,50 @@ def log_performance_metrics(symbol: str):
     }
     logger.log_performance(performance_metrics)
 
+
+def analyze_position_history(symbol: str) -> dict:
+    """分析持仓历史，提供统计数据"""
+    try:
+        history = get_position_history(symbol)
+        if not history:
+            return {'total_trades': 0, 'message': '无历史数据'}
+        
+        # 统计信息
+        total_trades = len(history)
+        open_trades = [h for h in history if h.get('action') in ['open', 'add']]
+        close_trades = [h for h in history if h.get('action') in ['close', 'partial_close']]
+        
+        # 计算盈利情况
+        profitable_trades = 0
+        total_profit = 0
+        
+        for trade in close_trades:
+            if trade.get('realized_pnl', 0) > 0:
+                profitable_trades += 1
+            total_profit += trade.get('realized_pnl', 0)
+        
+        win_rate = profitable_trades / len(close_trades) if close_trades else 0
+        
+        analysis = {
+            'total_trades': total_trades,
+            'open_trades': len(open_trades),
+            'closed_trades': len(close_trades),
+            'win_rate': f"{win_rate:.1%}",
+            'total_profit': total_profit,
+            'avg_profit_per_trade': total_profit / len(close_trades) if close_trades else 0,
+            'recent_activity': history[-5:] if len(history) >= 5 else history
+        }
+        
+        logger.log_info(f"📈 {get_base_currency(symbol)} 持仓历史分析: "
+                       f"总交易{total_trades}次, 胜率{analysis['win_rate']}, "
+                       f"总盈利{total_profit:.2f} USDT")
+        
+        return analysis
+        
+    except Exception as e:
+        logger.log_error(f"analyze_position_history_{get_base_currency(symbol)}", f"持仓历史分析失败: {str(e)}")
+        return {'error': str(e)}
+
 def main():
     """
     主程序入口 - 支持多交易品种
@@ -4127,7 +4403,16 @@ def main():
     # print("所有可用的私有API方法:")
     # private_methods = [method for method in dir(exchge) if method.startswith('private')]
     # for method in private_methods:
+
     #     print(method)
+    # 添加信号处理
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # 🆕 加载持仓历史数据
+    logger.log_info("📂 加载历史数据...")
+    load_position_history()
 
     # 1. 动态加载交易品种列表
     symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
@@ -4217,10 +4502,20 @@ def main():
     last_perf_log = 0
     perf_log_interval = first_config.perf_log_interval
 
+    # 在定时任务中添加持仓历史分析
+    last_position_analysis = 0
+    position_analysis_interval = 3600  # 每小时分析一次
+
     while True:
         try:
             current_time = time.time()
             
+            # 定期分析持仓历史
+            if current_time - last_position_analysis >= position_analysis_interval:
+                for symbol in symbols_to_trade:
+                    analyze_position_history(symbol)
+                last_position_analysis = current_time
+                
             # Health check - 修复这里
             if current_time - last_health_check >= health_check_interval:
                 logger.log_info("🔍 Running scheduled health check...")
@@ -4269,7 +4564,6 @@ def main():
         except Exception as e:
             logger.log_error("main_loop", f"Error: {str(e)}")
             consecutive_errors += 1
-    
             # 安全地获取配置限制
             try:
                 max_errors = first_config.max_consecutive_errors
@@ -4281,6 +4575,9 @@ def main():
                 break
             time.sleep(60)
 
+        finally:
+        cleanup_resources()
+        logger.log_info("👋 程序退出")
 
 if __name__ == "__main__":
     main()
