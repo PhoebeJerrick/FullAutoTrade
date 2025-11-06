@@ -357,7 +357,7 @@ def cleanup_resources():
     try:
         logger.log_info("🧹 清理资源...")
         
-        # 1. 保存持仓历史到文件（可选）
+        # 1. 保存持仓历史到文件
         save_position_history()
         
         # 2. 关闭交易所连接
@@ -4012,12 +4012,6 @@ def trading_bot(symbol: str):
         import traceback
         logger.log_error(f"trading_bot_traceback_{get_base_currency(symbol)}", traceback.format_exc())
 
-def cleanup_resources():
-    """清理资源"""
-    logger.log_info("🧹 清理资源...")
-    # 可以在这里添加交易所连接关闭等清理操作
-    pass
-
 def signal_handler(signum, frame):
     """信号处理函数"""
     logger.log_warning(f"🛑 接收到信号 {signum}，程序退出")
@@ -4577,8 +4571,8 @@ def main():
             time.sleep(60)
 
         finally:
-        cleanup_resources()
-        logger.log_info("👋 程序退出")
+            cleanup_resources()
+            logger.log_info("👋 程序退出")
 
 if __name__ == "__main__":
     main()
