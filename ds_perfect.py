@@ -4570,9 +4570,9 @@ def main():
                 break
             time.sleep(60)
 
-        finally:
-            cleanup_resources()
-            logger.log_info("👋 程序退出")
+    finally:
+        cleanup_resources()
+        logger.log_info("👋 程序退出")
 
 if __name__ == "__main__":
     main()
