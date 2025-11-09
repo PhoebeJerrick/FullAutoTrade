@@ -2319,6 +2319,7 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过订单检查")
             return algo_orders_analysis
         
+        logger.log_info(f"⚠️ {get_base_currency(symbol)}: 持仓验证成功")
         # 检查条件单（单向止盈止损）
         try:
             # 🆕 修复：使用正确的参数检查条件单
@@ -4168,57 +4169,58 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
         return False
 
-def debug_position_fields(symbol: str):
-    """调试函数：查看持仓的所有可用字段"""
+def debug_algo_orders(symbol: str):
+    """调试函数：查看所有策略委托订单的详细信息"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        positions = exchange.fetch_positions([config.symbol])
-        found_position = False
+        logger.log_info(f"🔍 {get_base_currency(symbol)} 策略委托订单调试开始:")
         
-        logger.log_info(f"🔍 {get_base_currency(symbol)} 持仓字段调试开始:")
+        # 方法1：使用私有API
+        inst_id = get_correct_inst_id(symbol)
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+            'ordType': 'oco'
+        }
         
-        for i, pos in enumerate(positions):
-            if pos['symbol'] == config.symbol:
-                found_position = True
-                logger.log_info(f"  --- 持仓 #{i+1} ---")
-                logger.log_info(f"  合约: {pos.get('symbol')}")
-                logger.log_info(f"  方向: {pos.get('side')}")
-                logger.log_info(f"  数量: {pos.get('contracts')}")
-                logger.log_info(f"  入场价: {pos.get('entryPrice')}")
-                logger.log_info(f"  未实现盈亏: {pos.get('unrealizedPnl')}")
-                logger.log_info(f"  保证金模式: {pos.get('marginMode')}")
-                
-                # 特别关注止损止盈相关字段
-                logger.log_info(f"  --- 止损止盈字段 ---")
-                stop_loss_fields = ['stopLossPrice', 'slTriggerPx', 'stopLoss', 'slPrice', 'stopLossTriggerPrice']
-                take_profit_fields = ['takeProfitPrice', 'tpTriggerPx', 'takeProfit', 'tpPrice', 'takeProfitTriggerPrice']
-                
-                for field in stop_loss_fields:
-                    if field in pos:
-                        logger.log_info(f"  止损字段 '{field}': {pos[field]}")
-                
-                for field in take_profit_fields:
-                    if field in pos:
-                        logger.log_info(f"  止盈字段 '{field}': {pos[field]}")
-                
-                # 打印所有字段（排除大字段）
-                logger.log_info(f"  --- 所有字段 ---")
-                for key, value in pos.items():
-                    if key not in ['info', 'timestamp', 'datetime'] and value is not None:
-                        if isinstance(value, (str, int, float, bool)) and len(str(value)) < 100:
-                            logger.log_info(f"  {key}: {value}")
-                        else:
-                            logger.log_info(f"  {key}: [数据类型: {type(value).__name__}, 长度: {len(str(value)) if hasattr(value, '__len__') else 'N/A'}]")
-                
-                break
+        logger.log_info(f"  orders_algo_pending查询参数: {params}")
         
-        if not found_position:
-            logger.log_info(f"  ❌ 未找到 {get_base_currency(symbol)} 的持仓")
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        logger.log_info(f"  API响应代码: {response.get('code')}")
+        logger.log_info(f"  API响应消息: {response.get('msg')}")
+        
+        if response['code'] == '0' and response['data']:
+            logger.log_info(f"  找到 {len(response['data'])} 个策略委托订单:")
+            for i, order in enumerate(response['data']):
+                logger.log_info(f"  --- 订单 #{i+1} ---")
+                for key, value in order.items():
+                    if value and key not in ['info']:
+                        logger.log_info(f"    {key}: {value}")
+        else:
+            logger.log_info(f"  ❌ 未找到策略委托订单或查询失败")
             
-        logger.log_info(f"🔍 {get_base_currency(symbol)} 持仓字段调试结束")
+        # 方法2：使用标准CCXT方法
+        logger.log_info(f"  --- 使用fetch_open_orders ---")
+        orders = exchange.fetch_open_orders(config.symbol)
+        logger.log_info(f"  找到 {len(orders)} 个普通订单")
+        for i, order in enumerate(orders):
+            logger.log_info(f"  --- 普通订单 #{i+1} ---")
+            logger.log_info(f"    ID: {order['id']}")
+            logger.log_info(f"    类型: {order['type']}")
+            logger.info(f"    状态: {order['status']}")
+            logger.log_info(f"    方向: {order['side']}")
+            logger.log_info(f"    数量: {order['amount']}")
+            if hasattr(order, 'info') and isinstance(order.info, dict):
+                logger.log_info(f"    原始信息:")
+                for key, value in order.info.items():
+                    if value and key not in ['info'] and len(str(value)) < 100:
+                        logger.log_info(f"      {key}: {value}")
+        
+        logger.log_info(f"🔍 {get_base_currency(symbol)} 策略委托订单调试结束")
         
     except Exception as e:
-        logger.log_error(f"debug_position_{get_base_currency(symbol)}", f"调试持仓字段失败: {str(e)}")
+        logger.log_error(f"debug_algo_orders_{get_base_currency(symbol)}", f"调试策略委托订单失败: {str(e)}")
+
 
 def check_existing_positions_on_startup():
     """启动时检查所有交易品种的现有持仓 - 修复版本"""
@@ -4229,7 +4231,7 @@ def check_existing_positions_on_startup():
             logger.log_info(f"📊 检查 {get_base_currency(symbol)} 的持仓状态...")
             
             # 🆕 调试：先打印持仓字段信息
-            debug_position_fields(symbol)
+            debug_algo_orders(symbol)
 
             # 获取当前持仓
             current_position = get_current_position(symbol)
