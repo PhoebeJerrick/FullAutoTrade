@@ -64,7 +64,7 @@ class TestConfig:
         self.leverage = 50  # 杠杆
         self.test_mode = False  # 真实交易
         self.margin_mode = 'isolated'
-        self.base_usdt_amount = 2  # 增加保证金到100 USDT以确保满足最小交易量
+        self.base_usdt_amount = 2  # 保证金
         self.min_amount = 0.001  # 最小交易量
         self.stop_loss_percent = 0.01  # 1% 止损
         self.take_profit_percent = 0.01  # 1% 止盈
@@ -138,28 +138,10 @@ def get_correct_inst_id():
     else:
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
 
-def get_market_info():
-    """获取市场信息，包括最小交易量"""
-    try:
-        markets = exchange.load_markets()
-        symbol = config.symbol
-        if symbol in markets:
-            market = markets[symbol]
-            logger.info(f"📊 市场信息 - 最小数量: {market.get('limits', {}).get('amount', {}).get('min', '未知')}")
-            logger.info(f"📊 市场信息 - 数量精度: {market.get('precision', {}).get('amount', '未知')}")
-            return market
-        return None
-    except Exception as e:
-        logger.error(f"获取市场信息失败: {str(e)}")
-        return None
-
 def setup_exchange():
     """设置交易所参数"""
     try:
         logger.info("🔄 设置交易所参数...")
-        
-        # 获取市场信息
-        market_info = get_market_info()
         
         # 设置杠杆
         leverage_params = {
@@ -199,7 +181,7 @@ def calculate_position_size():
         # 计算：使用基础USDT金额乘以杠杆除以当前价格
         current_price = get_current_price()
         if current_price == 0:
-            return config.min_amount
+            return 1  # 返回最小1张合约
             
         # 计算合约数量（以BTC为单位）
         btc_amount = (config.base_usdt_amount * config.leverage) / current_price
@@ -385,7 +367,7 @@ def close_position(side: str, amount: float):
         log_order_params("市价平仓", params, "close_position")
         logger.info(f"🔄 执行{side}仓位平仓: {amount} 张")
         
-        response = exchange.private_post_trade_close_position(params)
+        response = exchange.private_post_trade_order(params)
         
         log_api_response(response, "close_position")
         
@@ -486,23 +468,39 @@ def set_stop_loss_order(side: str, amount: float, trigger_price: float):
         return None
 
 def get_current_position():
-    """获取当前持仓"""
+    """获取当前持仓 - 改进版本"""
     try:
-        positions = exchange.fetch_positions([config.symbol])
+        # 使用CCXT的fetch_positions方法获取所有持仓
+        positions = exchange.fetch_positions()
+        
         if not positions:
+            logger.info("📊 没有找到任何持仓")
             return None
         
+        # 查找当前交易对的持仓
+        target_symbol = config.symbol
+        logger.info(f"📊 查找持仓: {target_symbol}")
+        
         for pos in positions:
-            if pos['symbol'] == config.symbol:
-                contracts = float(pos['contracts']) if pos['contracts'] else 0
-                if contracts > 0:
-                    return {
-                        'side': pos['side'],
-                        'size': contracts,
-                        'entry_price': float(pos['entryPrice']) if pos['entryPrice'] else 0,
-                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
-                        'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage
-                    }
+            symbol = pos.get('symbol', '')
+            contracts = float(pos.get('contracts', 0))
+            
+            # 记录所有持仓信息用于调试
+            logger.info(f"📊 持仓信息: 符号={symbol}, 合约数={contracts}, 方向={pos.get('side')}, 入场价={pos.get('entryPrice')}")
+            
+            # 检查是否为目标交易对且有持仓
+            if symbol == target_symbol and contracts > 0:
+                position_info = {
+                    'side': pos.get('side', 'unknown'),
+                    'size': contracts,
+                    'entry_price': float(pos.get('entryPrice', 0)),
+                    'unrealized_pnl': float(pos.get('unrealizedPnl', 0)),
+                    'leverage': float(pos.get('leverage', config.leverage))
+                }
+                logger.info(f"✅ 找到目标持仓: {position_info}")
+                return position_info
+        
+        logger.info("❌ 未找到目标交易对的持仓")
         return None
         
     except Exception as e:
@@ -582,6 +580,21 @@ def wait_for_order_fill(order_id: str, timeout: int = 60) -> bool:
     logger.warning(f"⏰ 订单等待超时: {order_id}")
     return False
 
+def wait_for_position(side: str, timeout: int = 30) -> Dict[str, Any]:
+    """等待持仓出现"""
+    logger.info(f"⏳ 等待{side}持仓出现...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        position = get_current_position()
+        if position and position['side'] == side:
+            logger.info(f"✅ {side}持仓已建立")
+            return position
+        time.sleep(2)  # 每2秒检查一次
+    
+    logger.error(f"❌ {side}持仓未在{timeout}秒内出现")
+    return None
+
 def run_enhanced_test():
     """运行增强测试流程"""
     logger.info("🚀 开始增强测试流程")
@@ -643,10 +656,9 @@ def run_enhanced_test():
         logger.error("❌ 空单未在30秒内成交")
         return False
     
-    # 检查空单持仓
-    time.sleep(2)  # 等待系统更新
-    short_position = get_current_position()
-    if not short_position or short_position['side'] != 'sell':
+    # 等待空单持仓出现
+    short_position = wait_for_position('short', 30)
+    if not short_position:
         logger.error("❌ 空单持仓未找到")
         return False
     
@@ -668,7 +680,7 @@ def run_enhanced_test():
     
     # 平空单
     logger.info("🔄 执行空单平仓...")
-    close_result = close_position('sell', short_position['size'])
+    close_result = close_position('short', short_position['size'])
     
     if not close_result or close_result.get('code') != '0':
         logger.error("❌ 空单平仓失败")
@@ -682,7 +694,7 @@ def run_enhanced_test():
         return False
     
     # 确认持仓已平
-    time.sleep(2)  # 等待系统更新
+    time.sleep(3)  # 等待系统更新
     position_after_close = get_current_position()
     if position_after_close:
         logger.error(f"❌ 持仓未完全平仓，剩余: {position_after_close['size']}张")
@@ -716,10 +728,9 @@ def run_enhanced_test():
         logger.error("❌ 多单未在30秒内成交")
         return False
     
-    # 检查多单持仓
-    time.sleep(2)  # 等待系统更新
-    long_position = get_current_position()
-    if not long_position or long_position['side'] != 'buy':
+    # 等待多单持仓出现
+    long_position = wait_for_position('long', 30)
+    if not long_position:
         logger.error("❌ 多单持仓未找到")
         return False
     
@@ -743,10 +754,10 @@ def run_enhanced_test():
     logger.info("🔹 阶段5: 设置止盈(1%距离)")
     logger.info("-" * 40)
     
-    _, take_profit_price = calculate_stop_loss_take_profit_prices('buy', long_position['entry_price'])
+    _, take_profit_price = calculate_stop_loss_take_profit_prices('long', long_position['entry_price'])
     
     tp_result = set_take_profit_order(
-        side='buy',
+        side='long',
         amount=long_position['size'],
         trigger_price=take_profit_price
     )
@@ -762,10 +773,10 @@ def run_enhanced_test():
     logger.info("🔹 阶段6: 设置止损(1%距离)")
     logger.info("-" * 40)
     
-    stop_loss_price, _ = calculate_stop_loss_take_profit_prices('buy', long_position['entry_price'])
+    stop_loss_price, _ = calculate_stop_loss_take_profit_prices('long', long_position['entry_price'])
     
     sl_result = set_stop_loss_order(
-        side='buy',
+        side='long',
         amount=long_position['size'],
         trigger_price=stop_loss_price
     )
