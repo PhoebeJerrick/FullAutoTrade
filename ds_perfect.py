@@ -3555,37 +3555,43 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
             return True
         
-        position_size = position['size']
+        position_side = current_position['side'] #long or short.
+        margin_mode = current_position['margin_mode']
+        position_size = current_position['size']
         logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
 
         # 🆕 记录平仓前的持仓信息到历史
         add_to_position_history(symbol, {
-            'side': position['side'],
+            'side': position_side,
             'size': position_size,
-            'entry_price': position['entry_price'],
+            'entry_price': current_position['entry_price'],
             'action': 'close',
             'close_reason': reason
         })
 
-        if position['side'] == 'long':
+        close_params = {
+            'instd': get_correct_inst_id(symbol),
+            'tdMode': margin_mode,  # 🆕 保证金模式
+            'posSide': position_side,  # 🆕 保证金模式
+            'reduceOnly': True
+        }
+
+        if current_position['side'] == 'long':
             # 平多仓
-            close_params = {
-                'reduceOnly': True
-            }
-            
             # 记录订单参数
             log_order_params("平多仓", close_params, "close_position_safely")
             log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
                 # 执行平仓
-                order = exchange.create_market_order(
-                    config.symbol,
-                    'sell',
-                    position_size,
+                order = exchange.create_order(
+                    symbol=config.symbol,
+                    type='market',
+                    side='sell',
+                    amount=position_size,
+                    price=None,
                     params=close_params
                 )
-                
                 # 验证订单是否创建成功
                 if order and order.get('id'):
                     reset_scaling_status(symbol)
@@ -3602,10 +3608,6 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
                 
         else:  # short
             # 平空仓
-            close_params = {
-                'reduceOnly': True
-            }
-            
             log_order_params("平空仓", close_params, "close_position_safely")
             log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
             
@@ -4240,49 +4242,35 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
     """因趋势反转而平仓"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        order_tag = create_order_tag()
         position_size = position['size']
         
-        logger.log_warning(f"🔄 执行趋势反转平仓: {reason}")
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}执行趋势反转平仓: {reason}")
         
-        if position['side'] == 'long':
-            # 平多仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details(symbol,'sell', position_size, 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
-                    config.symbol,
-                    'sell',
-                    position_size,
-                    params=close_params
-                )
-        else:  # short
-            # 平空仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details(symbol,'buy', position_size, 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
-                    config.symbol,
-                    'buy',
-                    position_size,
-                    params=close_params
-                )
+        cur_side = 'sell' if position_side == 'long' else 'buy'
+        position_side = position['side'] # long or short
+        # 平仓
+        close_params = {
+            'tdMode': config.margin_mode,
+            'posSide': position_side,
+            'ordType': 'market',
+            'reduceOnly': True
+        }
+        log_order_params("趋势反转平仓", close_params, f"close_ {get_base_currency(symbol)}_{position_side}_pos_due_to_trend_reversal")
+        log_perpetual_order_details(symbol,cur_side, position_size, 'market', reduce_only=True)
         
-        logger.log_info("✅ 趋势反转平仓执行完成")
+        if not config.test_mode:
+            exchange.create_market_order(
+                config.symbol,
+                cur_side,
+                position_size,
+                params=close_params
+            )
+
+        logger.log_info(f"✅ {get_base_currency(symbol)}趋势反转平仓执行完成")
         return False  # 表示持仓已平
         
     except Exception as e:
-        logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
+        logger.log_error("trend_reversal_close", f"{get_base_currency(symbol)}趋势反转平仓失败: {str(e)}")
         return True  # 平仓失败，保持持仓
 
 def close_position_fallback(symbol: str, position: dict, reason: str) -> bool:
@@ -4298,26 +4286,15 @@ def close_position_fallback(symbol: str, position: dict, reason: str) -> bool:
         try:
             inst_id = get_correct_inst_id(symbol)
             
-            if position_side == 'long':
-                # 平多仓
-                params = {
-                    'instId': inst_id,
-                    'tdMode': config.margin_mode,
-                    'side': 'sell',
-                    'ordType': 'market',
-                    'sz': str(position_size),
-                    'reduceOnly': True
-                }
-            else:
-                # 平空仓
-                params = {
-                    'instId': inst_id,
-                    'tdMode': config.margin_mode,
-                    'side': 'buy',
-                    'ordType': 'market',
-                    'sz': str(position_size),
-                    'reduceOnly': True
-                }
+            params = {
+                'instId': inst_id,
+                'tdMode': config.margin_mode,
+                'side': 'sell' if position_side == 'long' else 'buy',
+                'posSide': position_side,
+                'ordType': 'market',
+                'sz': str(position_size),
+                'reduceOnly': True
+            }
             
             logger.log_info(f"🔄 {get_base_currency(symbol)}: 尝试备用平仓方法1 - 私有API")
             response = exchange.private_post_trade_order(params)
