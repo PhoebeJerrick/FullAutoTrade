@@ -64,13 +64,13 @@ class TestConfig:
         self.leverage = 5  # 杠杆
         self.test_mode = False  # 真实交易
         self.margin_mode = 'isolated'
-        self.base_usdt_amount = 1  # 保证金
-        self.min_amount = 0.001  # 最小交易量
-        self.stop_loss_percent = 0.03  # 1% 止损
-        self.take_profit_percent = 0.05  # 1% 止盈
+        self.base_usdt_amount = 1  # 1 USDT保证金
+        self.min_contract_size = 0.0001  # 最小0.0001张合约
+        self.stop_loss_percent = 0.03  # 3% 止损
+        self.take_profit_percent = 0.05  # 5% 止盈
         self.price_offset_percent = 0.001  # 限价单价格偏移
         self.wait_time_seconds = 10  # 等待10秒后平仓
-        self.contract_size = 0.01  # BTC合约大小，根据OKX规则
+        self.contract_size = 0.01  # BTC合约大小，1张=0.01 BTC
 
 # 账号配置
 def get_account_config(account_name="default"):
@@ -174,39 +174,41 @@ def get_current_price():
     except Exception as e:
         logger.error(f"获取价格失败: {str(e)}")
         return 0
-
 def calculate_position_size():
-    """计算仓位大小，确保符合合约大小要求"""
+    """计算仓位大小 - 精确计算最小可用仓位"""
     try:
-        # 计算：使用基础USDT金额乘以杠杆除以当前价格
         current_price = get_current_price()
         if current_price == 0:
-            return 1  # 返回最小1张合约
+            return config.min_contract_size
             
-        # 计算合约数量（以BTC为单位）
-        btc_amount = (config.base_usdt_amount * config.leverage) / current_price
+        # 计算需要的BTC数量
+        required_btc = (config.base_usdt_amount * config.leverage) / current_price
         
-        # 转换为合约张数（1张合约 = 0.01 BTC）
-        contract_size = btc_amount / config.contract_size
-        
-        # 确保是整数张
-        contract_size = int(contract_size)
+        # 转换为合约张数
+        contract_size = required_btc / config.contract_size
         
         # 确保不低于最小交易量
-        if contract_size < 1:
-            contract_size = 1
+        if contract_size < config.min_contract_size:
+            contract_size = config.min_contract_size
             
-        # 转换回BTC数量
-        btc_amount = contract_size * config.contract_size
+        # 根据精度调整（4位小数）
+        contract_size = round(contract_size, 4)
         
-        logger.info(f"📏 计算仓位大小: {contract_size} 张合约 ({btc_amount:.4f} BTC)")
-        logger.info(f"   保证金: {config.base_usdt_amount} USDT, 杠杆: {config.leverage}x")
+        actual_btc = contract_size * config.contract_size
+        logger.info(f"📏 仓位计算详情:")
+        logger.info(f"   保证金: {config.base_usdt_amount} USDT")
+        logger.info(f"   杠杆: {config.leverage}x")
+        logger.info(f"   总价值: {config.base_usdt_amount * config.leverage} USDT")
+        logger.info(f"   当前价格: {current_price:.2f} USDT")
+        logger.info(f"   需要BTC: {required_btc:.8f} BTC")
+        logger.info(f"   合约张数: {contract_size} 张")
+        logger.info(f"   实际BTC: {actual_btc:.8f} BTC")
         
         return contract_size
         
     except Exception as e:
         logger.error(f"计算仓位大小失败: {str(e)}")
-        return 1  # 返回最小1张合约
+        return config.min_contract_size
 
 def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tuple[float, float]:
     """计算止损和止盈价格"""
@@ -605,7 +607,11 @@ def run_enhanced_test():
         logger.error("❌ 交易所设置失败，测试中止")
         return False
     
-    # 2. 获取当前价格
+    # 2. 先测试最小订单大小
+    logger.info("🧪 先测试最小订单大小...")
+    test_minimum_order()
+    
+    # 3. 获取当前价格
     current_price = get_current_price()
     if current_price == 0:
         logger.error("❌ 无法获取当前价格，测试中止")
@@ -614,16 +620,12 @@ def run_enhanced_test():
     logger.info(f"🎯 测试参数:")
     logger.info(f"   保证金: {config.base_usdt_amount} USDT")
     logger.info(f"   杠杆: {config.leverage}x")
-    logger.info(f"   止损止盈距离: {config.stop_loss_percent*100}%")
+    logger.info(f"   止损: {config.stop_loss_percent*100}%")
+    logger.info(f"   止盈: {config.take_profit_percent*100}%")
     logger.info(f"   等待时间: {config.wait_time_seconds}秒")
-    logger.info(f"   合约大小: {config.contract_size} BTC/张")
     
-    # 3. 计算仓位大小
+    # 4. 计算仓位大小
     position_size = calculate_position_size()
-    
-    if position_size < 1:
-        logger.error("❌ 计算出的仓位大小小于1张合约，无法开仓")
-        return False
     
     # 阶段1: 开空单同时设置止损止盈
     logger.info("")
