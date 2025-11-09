@@ -451,13 +451,137 @@ def load_position_history():
     except Exception as e:
         logger.log_error("load_position_history", f"加载持仓历史异常: {str(e)}")
 
+def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
+    """自适应止损计算 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    try:
+        df = price_data['full_data']
+        atr = calculate_atr(df)
+        
+        # 方法1: 基于ATR的止损
+        atr_stop_distance = atr * 1.5  # 1.5倍ATR
+        
+        # 方法2: 基于支撑阻力位的止损
+        levels = price_data['levels_analysis']
+        
+        if side == 'long':
+            # 🆕 多头：止损在支撑位下方
+            support_level = levels.get('static_support', current_price * 0.98)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.98)
+            
+            # 选择较近的支撑位
+            structure_stop = min(support_level, dynamic_support)
+            
+            # 结合ATR和结构止损，选择较近的
+            atr_stop_price = current_price - atr_stop_distance
+            stop_loss = max(structure_stop, atr_stop_price)
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            min_stop_price = current_price - max_stop_distance
+            stop_loss = max(stop_loss, min_stop_price)
+            
+        else:  # short - 🆕 修复空头止损逻辑
+            # 空头：止损在阻力位上方
+            resistance_level = levels.get('static_resistance', current_price * 1.02)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.02)
+            
+            # 选择较远的阻力位（更严格的止损）
+            structure_stop = max(resistance_level, dynamic_resistance)
+            
+            # 结合ATR和结构止损，选择较远的
+            atr_stop_price = current_price + atr_stop_distance
+            stop_loss = min(structure_stop, atr_stop_price)  # 取较小值，因为要选择较近的阻力位
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            max_stop_price = current_price + max_stop_distance
+            stop_loss = min(stop_loss, max_stop_price)
+        
+        stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
+        direction = "above" if side == 'short' and stop_loss > current_price else "below"
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 自适应止损 - {stop_loss:.2f} ({direction}当前价, 距离: {stop_distance_percent:.2f}%)")
+        
+        return stop_loss
+        
+    except Exception as e:
+        logger.log_error(f"adaptive_stop_loss_{get_base_currency(symbol)}", str(e))
+        # 备用止损
+        if side == 'long':
+            return current_price * 0.98
+        else:
+            return current_price * 1.02
+
+def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0) -> float:
+    """计算智能止盈价格 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        current_price = price_data['price']
+        df = price_data['full_data']
+        
+        if side == 'long':
+            # 多头止盈计算
+            # 方法1: 基于阻力位
+            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.05)
+            
+            # 方法2: 基于ATR
+            atr = calculate_atr(df)
+            atr_take_profit = current_price + (atr * risk_reward_ratio)
+            
+            # 方法3: 基于固定风险回报比
+            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 0.98))
+            rr_take_profit = entry_price + (risk * risk_reward_ratio)
+            
+            # 取最合理的止盈价格
+            take_profit_price = min(resistance_level, atr_take_profit, rr_take_profit)
+            
+            # 确保止盈价格合理
+            min_take_profit = current_price * 1.01  # 至少1%盈利
+            take_profit_price = max(take_profit_price, min_take_profit)
+            
+        else:  # short - 🆕 修复空头止盈逻辑
+            # 空头止盈计算
+            # 方法1: 基于支撑位
+            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.95)
+            
+            # 方法2: 基于ATR
+            atr = calculate_atr(df)
+            atr_take_profit = current_price - (atr * risk_reward_ratio)
+            
+            # 方法3: 基于固定风险回报比
+            risk = abs(price_data.get('stop_loss', entry_price * 1.02) - entry_price)
+            rr_take_profit = entry_price - (risk * risk_reward_ratio)
+            
+            # 取最合理的止盈价格（对于空头，数值越小越好）
+            take_profit_price = max(support_level, atr_take_profit, rr_take_profit)
+            
+            # 确保止盈价格合理
+            max_take_profit = current_price * 0.99  # 至少1%盈利
+            take_profit_price = min(take_profit_price, max_take_profit)
+        
+        take_profit_ratio = abs(take_profit_price - entry_price) / entry_price * 100
+        profit_type = "above" if side == 'long' and take_profit_price > entry_price else "below"
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 智能止盈计算 - 入场{entry_price:.2f}, 止盈{take_profit_price:.2f} ({profit_type}入场价, 盈利{take_profit_ratio:.2f}%)")
+        
+        return take_profit_price
+        
+    except Exception as e:
+        logger.log_error(f"take_profit_calculation_{get_base_currency(symbol)}", f"止盈计算失败: {str(e)}")
+        # 备用止盈计算
+        if side == 'long':
+            return entry_price * 1.03  # 默认3%止盈
+        else:
+            return entry_price * 0.97  # 默认3%止盈
+
 
 def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_price: float, price_data: dict) -> dict:
-    """基于整体仓位计算止损止盈"""
+    """基于整体仓位计算止损止盈 - 修复版本"""
     if not position_history:
-        # 🆕 修复：返回字典而不是元组
-        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', current_price, price_data)
-        take_profit = calculate_intelligent_take_profit(symbol, 'long', current_price, price_data, 2.0)
+        # 🆕 修复：返回正确的止损止盈计算
+        # 如果没有历史记录，使用当前价格作为参考
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'short', current_price, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'short', current_price, price_data, 2.0)
         return {
             'stop_loss': stop_loss,
             'take_profit': take_profit,
@@ -484,7 +608,6 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
         'weighted_entry': weighted_entry,
         'total_size': total_size
     }
-
 
 def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
     """增强版仓位计算"""
@@ -1588,65 +1711,6 @@ def calculate_dynamic_risk_reward_threshold(symbol: str, price_data: dict) -> fl
         logger.log_error("dynamic_rr_threshold", str(e))
         return 1.0  # 默认阈值
 
-def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
-    """自适应止损计算"""
-    config = SYMBOL_CONFIGS[symbol]
-    
-    try:
-        df = price_data['full_data']
-        atr = calculate_atr(df)
-        
-        # 方法1: 基于ATR的止损
-        atr_stop_distance = atr * 1.5  # 1.5倍ATR
-        
-        # 方法2: 基于支撑阻力位的止损
-        levels = price_data['levels_analysis']
-        
-        if side == 'long':
-            support_level = levels.get('static_support', current_price * 0.98)
-            dynamic_support = levels.get('dynamic_support', current_price * 0.98)
-            
-            # 选择较近的支撑位
-            structure_stop = min(support_level, dynamic_support)
-            
-            # 结合ATR和结构止损，选择较近的
-            atr_stop_price = current_price - atr_stop_distance
-            stop_loss = max(structure_stop, atr_stop_price)
-            
-            # 确保止损合理（不超过当前价格的5%）
-            max_stop_distance = current_price * 0.05
-            min_stop_price = current_price - max_stop_distance
-            stop_loss = max(stop_loss, min_stop_price)
-            
-        else:  # short
-            resistance_level = levels.get('static_resistance', current_price * 1.02)
-            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.02)
-            
-            # 选择较近的阻力位
-            structure_stop = max(resistance_level, dynamic_resistance)
-            
-            # 结合ATR和结构止损，选择较近的
-            atr_stop_price = current_price + atr_stop_distance
-            stop_loss = min(structure_stop, atr_stop_price)
-            
-            # 确保止损合理（不超过当前价格的5%）
-            max_stop_distance = current_price * 0.05
-            max_stop_price = current_price + max_stop_distance
-            stop_loss = min(stop_loss, max_stop_price)
-        
-        stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 自适应止损 - {stop_loss:.2f} (距离: {stop_distance_percent:.2f}%)")
-        
-        return stop_loss
-        
-    except Exception as e:
-        logger.log_error(f"adaptive_stop_loss_{get_base_currency(symbol)}", str(e))
-        # 备用止损
-        if side == 'long':
-            return current_price * 0.98
-        else:
-            return current_price * 1.02
-
 
 def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> float:
     """计算风险回报比 - 修复版本"""
@@ -1678,26 +1742,45 @@ def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take
         return 0
 
 def validate_price_relationship(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> bool:
-    """验证价格关系的合理性"""
+    """验证价格关系的合理性 - 增强版本"""
     try:
         if side == 'long':
             # 多头：止损价 < 入场价 < 止盈价
             if not (stop_loss_price < entry_price < take_profit_price):
-                logger.log_error("price_validation", f"多头价格关系错误: 止损{stop_loss_price} < 入场{entry_price} < 止盈{take_profit_price}")
+                logger.log_error("price_validation", 
+                               f"多头价格关系错误: 止损{stop_loss_price:.2f} < 入场{entry_price:.2f} < 止盈{take_profit_price:.2f}")
                 return False
         else:  # short
             # 空头：止盈价 < 入场价 < 止损价
             if not (take_profit_price < entry_price < stop_loss_price):
-                logger.log_error("price_validation", f"空头价格关系错误: 止盈{take_profit_price} < 入场{entry_price} < 止损{stop_loss_price}")
+                logger.log_error("price_validation", 
+                               f"空头价格关系错误: 止盈{take_profit_price:.2f} < 入场{entry_price:.2f} < 止损{stop_loss_price:.2f}")
                 return False
         
         # 检查价格是否过于接近
-        if abs(entry_price - stop_loss_price) / entry_price < 0.001:  # 小于0.1%
+        if abs(entry_price - stop_loss_price) / entry_price < 0.005:  # 小于0.5%
             logger.log_warning("⚠️ 止损价格过于接近入场价格")
             return False
             
-        if abs(take_profit_price - entry_price) / entry_price < 0.001:  # 小于0.1%
+        if abs(take_profit_price - entry_price) / entry_price < 0.005:  # 小于0.5%
             logger.log_warning("⚠️ 止盈价格过于接近入场价格")
+            return False
+            
+        # 🆕 检查盈亏比是否合理
+        if side == 'long':
+            risk = entry_price - stop_loss_price
+            reward = take_profit_price - entry_price
+        else:
+            risk = stop_loss_price - entry_price
+            reward = entry_price - take_profit_price
+            
+        if risk <= 0:
+            logger.log_warning("⚠️ 风险为0或负数")
+            return False
+            
+        risk_reward_ratio = reward / risk
+        if risk_reward_ratio < 0.5:  # 最小盈亏比0.5
+            logger.log_warning(f"⚠️ 盈亏比过低: {risk_reward_ratio:.2f}")
             return False
             
         return True
@@ -1705,7 +1788,6 @@ def validate_price_relationship(entry_price: float, stop_loss_price: float, take
     except Exception as e:
         logger.log_error("price_relationship_validation", str(e))
         return False
-
 
 def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss_price: float, 
                                     take_profit_price: float, side: str, min_risk_reward: float = 1.5) -> dict:
@@ -2586,67 +2668,6 @@ def cancel_existing_take_profit_orders(symbol: str):
                     
     except Exception as e:
         logger.log_error(f"cancel_take_profit_orders_{get_base_currency(symbol)}", str(e))
-
-
-def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0) -> float:
-    """计算智能止盈价格"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        current_price = price_data['price']
-        df = price_data['full_data']
-        
-        if side == 'long':
-            # 多头止盈计算
-            # 方法1: 基于阻力位
-            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.05)
-            
-            # 方法2: 基于ATR
-            atr = calculate_atr(df)
-            atr_take_profit = current_price + (atr * risk_reward_ratio)
-            
-            # 方法3: 基于固定风险回报比
-            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 0.98))
-            rr_take_profit = entry_price + (risk * risk_reward_ratio)
-            
-            # 取最合理的止盈价格
-            take_profit_price = min(resistance_level, atr_take_profit, rr_take_profit)
-            
-            # 确保止盈价格合理
-            min_take_profit = current_price * 1.01  # 至少1%盈利
-            take_profit_price = max(take_profit_price, min_take_profit)
-            
-        else:  # short
-            # 空头止盈计算
-            # 方法1: 基于支撑位
-            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.95)
-            
-            # 方法2: 基于ATR
-            atr = calculate_atr(df)
-            atr_take_profit = current_price - (atr * risk_reward_ratio)
-            
-            # 方法3: 基于固定风险回报比
-            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 1.02))
-            rr_take_profit = entry_price - (risk * risk_reward_ratio)
-            
-            # 取最合理的止盈价格
-            take_profit_price = max(support_level, atr_take_profit, rr_take_profit)
-            
-            # 确保止盈价格合理
-            max_take_profit = current_price * 0.99  # 至少1%盈利
-            take_profit_price = min(take_profit_price, max_take_profit)
-        
-        take_profit_ratio = abs(take_profit_price - entry_price) / entry_price * 100
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 智能止盈计算 - 入场{entry_price:.2f}, 止盈{take_profit_price:.2f} (盈利{take_profit_ratio:.2f}%)")
-        
-        return take_profit_price
-        
-    except Exception as e:
-        logger.log_error(f"take_profit_calculation_{get_base_currency(symbol)}", f"止盈计算失败: {str(e)}")
-        # 备用止盈计算
-        if side == 'long':
-            return entry_price * 1.03  # 默认3%止盈
-        else:
-            return entry_price * 0.97  # 默认3%止盈
 
 
 def safe_json_parse(json_str):
@@ -3725,17 +3746,23 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         return
 
     current_price = price_data['price']
-    side = 'long' if signal_data['signal'] == 'BUY' else 'short'
+    signal_side = 'long' if signal_data['signal'] == 'BUY' else 'short'
     current_position = get_current_position(symbol)
     
-    # 🆕 检查是否是加仓情况
-    is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == side
+    # 🆕 修复：正确判断交易方向
+    if current_position:
+        # 如果有持仓，使用持仓方向来计算止损止盈
+        position_side = current_position['side']
+        is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == signal_side
+    else:
+        # 如果没有持仓，使用信号方向
+        position_side = signal_side
+        is_scaling = False
     
     if is_scaling:
         try:
             # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
-            # (注意：用户要求暂时不管加仓逻辑，这里的逻辑是原版的，可能不完美，但我们遵从用户要求不修改)
-            position_history = get_position_history(symbol) # 假设存在 get_position_history
+            position_history = get_position_history(symbol)
             overall_levels = calculate_overall_stop_loss_take_profit(
                 symbol, position_history, current_price, price_data
             )
@@ -3745,31 +3772,49 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             
             logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张")
             
-            # 临时添加：由于 get_position_history() 未定义，我们使用备用逻辑
-            # 实际使用中，您需要实现 get_position_history()
-        except NameError:
-            logger.log_warning(f"⚠️ {get_position_history()} 未定义，加仓止损使用标准逻辑")
-            is_scaling = False # 降级为非加仓
-        
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓止损计算失败: {str(e)}")
+            is_scaling = False
+    
     if not is_scaling:
-        # 首次开仓：使用原有逻辑
-        stop_loss_price = calculate_adaptive_stop_loss(symbol, side, current_price, price_data)
+        # 首次开仓或非加仓：使用原有逻辑
+        stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
         
         # 动态盈亏比
-        dynamic_min_rr = 1.2 #calculate_dynamic_risk_reward_threshold(symbol, price_data)
+        dynamic_min_rr = 1.2
         trend_strength = price_data['trend_strength']
         
         tp_result = calculate_aggressive_take_profit(
-            symbol, side, current_price, stop_loss_price, 
+            symbol, position_side, current_price, stop_loss_price, 
             price_data, dynamic_min_rr, trend_strength
         )
         take_profit_price = tp_result['take_profit']
         actual_rr = tp_result['actual_risk_reward']
 
-    # 🆕 修复：添加价格关系验证
-    if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, side):
+    # 🆕 修复：添加详细的价格关系验证日志
+    logger.log_info(f"🔍 {get_base_currency(symbol)}: 价格关系验证 - 方向:{position_side}, 入场:{current_price:.2f}, 止损:{stop_loss_price:.2f}, 止盈:{take_profit_price:.2f}")
+    
+    if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, position_side):
         logger.log_error(f"price_validation_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
-        return
+        
+        # 🆕 尝试自动修正价格
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 尝试自动修正价格...")
+        if position_side == 'long':
+            # 多头修正
+            corrected_stop_loss = current_price * 0.98
+            corrected_take_profit = current_price * 1.03
+        else:
+            # 空头修正
+            corrected_stop_loss = current_price * 1.02
+            corrected_take_profit = current_price * 0.97
+        
+        if validate_price_relationship(current_price, corrected_stop_loss, corrected_take_profit, position_side):
+            stop_loss_price = corrected_stop_loss
+            take_profit_price = corrected_take_profit
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 价格自动修正成功")
+        else:
+            logger.log_error(f"price_correction_failed_{get_base_currency(symbol)}", "价格自动修正失败")
+            return
 
     # 🆕 修复：添加盈亏比有效性检查
     if 'actual_rr' not in locals() or actual_rr <= 0:
