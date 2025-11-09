@@ -66,8 +66,8 @@ class TestConfig:
         self.margin_mode = 'isolated'
         self.base_usdt_amount = 1  # 保证金
         self.min_amount = 0.001  # 最小交易量
-        self.stop_loss_percent = 0.01  # 1% 止损
-        self.take_profit_percent = 0.01  # 1% 止盈
+        self.stop_loss_percent = 0.03  # 1% 止损
+        self.take_profit_percent = 0.05  # 1% 止盈
         self.price_offset_percent = 0.001  # 限价单价格偏移
         self.wait_time_seconds = 10  # 等待10秒后平仓
         self.contract_size = 0.01  # BTC合约大小，根据OKX规则
@@ -210,7 +210,7 @@ def calculate_position_size():
 
 def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tuple[float, float]:
     """计算止损和止盈价格"""
-    if side == 'buy':  # 多头
+    if side == 'long':  # 多头
         stop_loss_price = entry_price * (1 - config.stop_loss_percent)
         take_profit_price = entry_price * (1 + config.take_profit_percent)
     else:  # 空头
@@ -255,7 +255,7 @@ def create_order_with_sl_tp(side: str, amount: float, order_type: str = 'market'
                     'slOrdPx': '-1',  # 市价止损
                     'algoOrdType': 'conditional',  # 条件单类型
                     'sz': str(amount),  # 止损止盈数量与主订单相同
-                    'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
+                    'side': 'buy' if side == 'short' else 'sell'  # 止损止盈方向与开仓方向相反
                 }
             ]
         
@@ -393,7 +393,7 @@ def set_take_profit_order(side: str, amount: float, trigger_price: float):
         inst_id = get_correct_inst_id()
         
         # 止盈方向与开仓方向相反
-        tp_side = 'buy' if side == 'sell' else 'sell'
+        tp_side = 'buy' if side == 'short' else 'sell'
         
         params = {
             'instId': inst_id,
@@ -434,7 +434,7 @@ def set_stop_loss_order(side: str, amount: float, trigger_price: float):
         inst_id = get_correct_inst_id()
         
         # 止损方向与开仓方向相反
-        sl_side = 'buy' if side == 'sell' else 'sell'
+        sl_side = 'buy' if side == 'short' else 'sell'
         
         params = {
             'instId': inst_id,
