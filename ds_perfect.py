@@ -1373,7 +1373,7 @@ def log_api_response(response, function_name=""):
 
 def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str], 
                      order_type: str = 'conditional', stop_loss_price: float = None, take_profit_price: float = None) -> bool:
-    """创建策略委托订单 - 根据OKX API重新实现"""
+    """创建策略委托订单 - 根据OKX API重新实现 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         inst_id = get_correct_inst_id(symbol)
@@ -1390,18 +1390,34 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         
         margin_mode = getattr(config, 'margin_mode', 'isolated')
         
-        # 🆕 修复：根据OKX API正确构建参数
+        # 🆕 修复：根据持仓方向确定正确的委托方向
+        position = get_current_position(symbol)
+        if position:
+            position_side = position['side']  # 'long' or 'short'
+            
+            # 🆕 修复：根据持仓方向确定平仓方向
+            if position_side == 'long':
+                # 多头持仓：平仓方向是卖出
+                close_side = 'sell'
+            else:  # short
+                # 空头持仓：平仓方向是买入
+                close_side = 'buy'
+        else:
+            # 如果没有持仓，使用传入的方向（这种情况应该很少）
+            close_side = side
+        
+        # 🆕 修复：构建基础参数
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
+            'algoOrdType': order_type,  # 🆕 修复：添加算法订单类型
         }
         
         # 根据订单类型设置不同参数
         if order_type == 'conditional':
-            # 条件单参数
+            # 🆕 修复：条件单参数 - 使用正确的平仓方向
             params.update({
-                'side': side.upper(),
-                'ordType': 'conditional',
+                'side': close_side.upper(),  # 🆕 使用平仓方向
                 'sz': sz,
                 'tpTriggerPx': take_profit_price if take_profit_price else '',
                 'slTriggerPx': stop_loss_price if stop_loss_price else '',
@@ -1412,8 +1428,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         elif order_type == 'oco':
             # 🆕 修复：OCO订单的正确参数设置
             params.update({
-                'side': side.upper(),
-                'ordType': 'oco',
+                'side': close_side.upper(),  # 🆕 使用平仓方向
                 'sz': sz,
                 'tpTriggerPx': take_profit_price if take_profit_price else '',
                 'slTriggerPx': stop_loss_price if stop_loss_price else '',
@@ -1424,7 +1439,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         # 记录订单参数
         log_order_params(f"策略委托{order_type}", params, "create_algo_order")
         
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 创建策略委托 - 类型:{order_type}, 方向:{side}, 数量:{sz}")
+        logger.log_info(f"📊 {get_base_currency(symbol)}: 创建策略委托 - 类型:{order_type}, 方向:{close_side}, 数量:{sz}")
         
         # 调用OKX策略委托下单接口
         response = exchange.privatePostTradeOrderAlgo(params)
@@ -2319,17 +2334,18 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过订单检查")
             return algo_orders_analysis
         
-        logger.log_info(f"⚠️ {get_base_currency(symbol)}: 持仓验证成功")
-        # 检查条件单（单向止盈止损）
+        logger.log_info(f"✅ {get_base_currency(symbol)}: 持仓验证成功")
+        
+        # 🆕 修复：使用正确的算法订单类型参数
         try:
-            # 🆕 修复：使用正确的参数检查条件单
-            params = {
+            # 检查条件单
+            conditional_params = {
                 'instType': 'SWAP',
                 'instId': get_correct_inst_id(symbol),
-                'algoOrdType': 'oco'  # 或者尝试 'stop' / 'oco'
+                'algoOrdType': 'conditional'  # 🆕 修复：使用正确的参数名
             }
             
-            conditional_response = exchange.private_get_trade_orders_algo_pending(params)
+            conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
             
             if conditional_response['code'] == '0' and conditional_response['data']:
                 inst_id = get_correct_inst_id(symbol)
@@ -2339,25 +2355,59 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
                         order_size = float(order.get('sz', 0))
                         
                         # 判断是止损单还是止盈单
-                        if 'slTriggerPx' in order and order['slTriggerPx']:
+                        if 'slTriggerPx' in order and order['slTriggerPx'] and float(order['slTriggerPx']) > 0:
                             algo_orders_analysis['has_stop_loss'] = True
                             algo_orders_analysis['stop_loss_orders'].append({
                                 'algoId': order['algoId'],
                                 'size': order_size,
-                                'triggerPrice': float(order['slTriggerPx'])
+                                'triggerPrice': float(order['slTriggerPx']),
+                                'orderType': 'conditional'
                             })
                             algo_orders_analysis['total_covered_size'] += order_size
                         
-                        if 'tpTriggerPx' in order and order['tpTriggerPx']:
+                        if 'tpTriggerPx' in order and order['tpTriggerPx'] and float(order['tpTriggerPx']) > 0:
                             algo_orders_analysis['has_take_profit'] = True
                             algo_orders_analysis['take_profit_orders'].append({
                                 'algoId': order['algoId'],
                                 'size': order_size,
-                                'triggerPrice': float(order['tpTriggerPx'])
+                                'triggerPrice': float(order['tpTriggerPx']),
+                                'orderType': 'conditional'
                             })
                             algo_orders_analysis['total_covered_size'] += order_size
+                            
         except Exception as e:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 条件单检查失败: {str(e)}")
+        
+        # 🆕 修复：检查OCO订单
+        try:
+            oco_params = {
+                'instType': 'SWAP',
+                'instId': get_correct_inst_id(symbol),
+                'algoOrdType': 'oco'  # 🆕 检查OCO订单
+            }
+            
+            oco_response = exchange.private_get_trade_orders_algo_pending(oco_params)
+            
+            if oco_response['code'] == '0' and oco_response['data']:
+                inst_id = get_correct_inst_id(symbol)
+                
+                for order in oco_response['data']:
+                    if order['instId'] == inst_id:
+                        order_size = float(order.get('sz', 0))
+                        
+                        algo_orders_analysis['oco_orders'].append({
+                            'algoId': order['algoId'],
+                            'size': order_size,
+                            'stopLossPrice': float(order.get('slTriggerPx', 0)),
+                            'takeProfitPrice': float(order.get('tpTriggerPx', 0)),
+                            'orderType': 'oco'
+                        })
+                        algo_orders_analysis['total_covered_size'] += order_size
+                        algo_orders_analysis['has_stop_loss'] = True
+                        algo_orders_analysis['has_take_profit'] = True
+                        
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: OCO订单检查失败: {str(e)}")
         
         # 🆕 计算剩余需要设置的数量
         algo_orders_analysis['remaining_size'] = max(0, position['size'] - algo_orders_analysis['total_covered_size'])
@@ -2380,7 +2430,6 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             'total_covered_size': 0,
             'remaining_size': position['size']
         }
-
 
 # 🆕 --- 核心修改：智能化移动止损，不再取消止盈单 ---
 def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float) -> bool:
@@ -3188,7 +3237,7 @@ def cancel_specific_algo_orders(symbol: str, algo_orders: list, order_type: str 
         return 0
 
 def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data: dict, orders_analysis: dict):
-    """设置缺失的止损止盈订单"""
+    """设置缺失的止损止盈订单 - 修复方向逻辑"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         current_price = price_data['price']
@@ -3216,6 +3265,9 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
                 symbol, 'long', position['entry_price'], price_data, risk_reward_ratio=2.0
             )
             
+            # 🆕 修复：多头持仓的平仓方向是卖出
+            close_side = 'sell'
+            
         else:  # short
             if stop_loss_config['kline_based_stop_loss']:
                 stop_loss_price = calculate_kline_based_stop_loss(
@@ -3228,6 +3280,9 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
             take_profit_price = calculate_intelligent_take_profit(
                 symbol, 'short', position['entry_price'], price_data, risk_reward_ratio=2.0
             )
+            
+            # 🆕 修复：空头持仓的平仓方向是买入
+            close_side = 'buy'
         
         # 根据缺失情况设置相应的订单
         success = True
@@ -3236,26 +3291,16 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         if not orders_analysis['has_stop_loss'] and not orders_analysis['has_take_profit']:
             logger.log_info(f"🆕 {get_base_currency(symbol)}: 设置双向止盈止损 - 数量{remaining_size}张")
             
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
+            # 🆕 修复：使用正确的平仓方向
+            result = create_algo_order(
+                symbol=symbol,
+                side=close_side,  # 🆕 使用正确的平仓方向
+                sz=remaining_size,
+                trigger_price=stop_loss_price,  # 对于OCO订单，这个参数可能不需要，但API要求
+                order_type='oco',
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price
+            )
             
             if not result:
                 success = False
@@ -3265,22 +3310,14 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         elif orders_analysis['has_stop_loss'] and not orders_analysis['has_take_profit']:
             logger.log_info(f"🎯 {get_base_currency(symbol)}: 设置止盈单 - 数量{remaining_size}张")
             
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=take_profit_price,
-                    order_type='conditional'
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=take_profit_price,
-                    order_type='conditional'
-                )
+            # 🆕 修复：使用正确的平仓方向
+            result = create_algo_order(
+                symbol=symbol,
+                side=close_side,  # 🆕 使用正确的平仓方向
+                sz=remaining_size,
+                trigger_price=take_profit_price,
+                order_type='conditional'
+            )
             
             if not result:
                 success = False
@@ -3290,22 +3327,14 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         elif not orders_analysis['has_stop_loss'] and orders_analysis['has_take_profit']:
             logger.log_info(f"🛡️ {get_base_currency(symbol)}: 设置止损单 - 数量{remaining_size}张")
             
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='conditional'
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='conditional'
-                )
+            # 🆕 修复：使用正确的平仓方向
+            result = create_algo_order(
+                symbol=symbol,
+                side=close_side,  # 🆕 使用正确的平仓方向
+                sz=remaining_size,
+                trigger_price=stop_loss_price,
+                order_type='conditional'
+            )
             
             if not result:
                 success = False
@@ -3315,26 +3344,16 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         elif orders_analysis['remaining_size'] > 0:
             logger.log_info(f"📦 {get_base_currency(symbol)}: 补充设置剩余仓位止盈止损 - 数量{remaining_size}张")
             
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
+            # 🆕 修复：使用正确的平仓方向
+            result = create_algo_order(
+                symbol=symbol,
+                side=close_side,  # 🆕 使用正确的平仓方向
+                sz=remaining_size,
+                trigger_price=stop_loss_price,
+                order_type='oco',
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price
+            )
             
             if not result:
                 success = False
@@ -3351,6 +3370,7 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
     except Exception as e:
         logger.log_error(f"setup_missing_stop_loss_take_profit_{get_base_currency(symbol)}", f"设置缺失止盈止损失败: {str(e)}")
         return False
+
 
 def check_and_set_stop_loss(symbol: str, position: dict, price_data: dict):
     """检查并设置止损和止盈订单 - 增强版本"""
@@ -4199,23 +4219,6 @@ def debug_algo_orders(symbol: str):
         else:
             logger.log_info(f"  ❌ 未找到策略委托订单或查询失败")
             
-        # 方法2：使用标准CCXT方法
-        logger.log_info(f"  --- 使用fetch_open_orders ---")
-        orders = exchange.fetch_open_orders(config.symbol)
-        logger.log_info(f"  找到 {len(orders)} 个普通订单")
-        for i, order in enumerate(orders):
-            logger.log_info(f"  --- 普通订单 #{i+1} ---")
-            logger.log_info(f"    ID: {order['id']}")
-            logger.log_info(f"    类型: {order['type']}")
-            logger.info(f"    状态: {order['status']}")
-            logger.log_info(f"    方向: {order['side']}")
-            logger.log_info(f"    数量: {order['amount']}")
-            if hasattr(order, 'info') and isinstance(order.info, dict):
-                logger.log_info(f"    原始信息:")
-                for key, value in order.info.items():
-                    if value and key not in ['info'] and len(str(value)) < 100:
-                        logger.log_info(f"      {key}: {value}")
-        
         logger.log_info(f"🔍 {get_base_currency(symbol)} 策略委托订单调试结束")
         
     except Exception as e:
@@ -4231,7 +4234,7 @@ def check_existing_positions_on_startup():
             logger.log_info(f"📊 检查 {get_base_currency(symbol)} 的持仓状态...")
             
             # 🆕 调试：先打印持仓字段信息
-            debug_algo_orders(symbol)
+            # debug_algo_orders(symbol)
 
             # 获取当前持仓
             current_position = get_current_position(symbol)
