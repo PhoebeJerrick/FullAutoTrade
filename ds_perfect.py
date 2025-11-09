@@ -1465,7 +1465,8 @@ def cancel_existing_algo_orders(symbol: str):
     try:
         params = {
             'instType': 'SWAP',
-            'algoOrdType': 'conditional'
+            'instId': get_correct_inst_id(symbol),
+            'ordType': 'conditional'
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
@@ -2342,7 +2343,7 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             conditional_params = {
                 'instType': 'SWAP',
                 'instId': get_correct_inst_id(symbol),
-                'algoOrdType': 'conditional'  # 🆕 修复：使用正确的参数名
+                'ordType': 'conditional'  # 🆕 修复：使用正确的参数名
             }
             
             conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
@@ -2383,7 +2384,7 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             oco_params = {
                 'instType': 'SWAP',
                 'instId': get_correct_inst_id(symbol),
-                'algoOrdType': 'oco'  # 🆕 检查OCO订单
+                'ordType': 'oco'  # 🆕 检查OCO订单
             }
             
             oco_response = exchange.private_get_trade_orders_algo_pending(oco_params)
@@ -2529,7 +2530,8 @@ def cancel_existing_take_profit_orders(symbol: str):
     try:
         params = {
             'instType': 'SWAP',
-            'algoOrdType': 'conditional'
+            'instId': get_correct_inst_id(symbol),
+            'ordType': 'conditional'
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
