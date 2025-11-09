@@ -644,6 +644,16 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             contract_size = nominal_value / (price_data['price'] * config.contract_size)
             contract_size = round(contract_size, 2)
             
+            # 🆕 修复：根据品种调整最终合约数量
+            base_currency = get_base_currency(symbol)
+            
+            # 需要整数张合约的品种
+            integer_only_currencies = ['BCH', 'LTC', 'DASH']
+            if base_currency in integer_only_currencies:
+                # 确保至少1张，向上取整到整数
+                contract_size = max(1, math.ceil(contract_size))
+                logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+
             logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.2f}张")
             
             return contract_size
@@ -712,6 +722,16 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
 
         # 确保最小交易量
         contract_size = max(contract_size, min_contracts)      
+
+        # 🆕 修复：根据品种调整最终合约数量
+        base_currency = get_base_currency(symbol)
+        
+        # 需要整数张合约的品种
+        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        if base_currency in integer_only_currencies:
+            # 确保至少1张，向上取整到整数
+            contract_size = max(1, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
 
         # 详细日志 (更新日志术语)
         calculation_details = f"""
@@ -1246,6 +1266,16 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         # 确保最小交易量
         contract_size = max(contract_size, min_contracts)
 
+        # 🆕 修复：根据品种调整最终合约数量
+        base_currency = get_base_currency(symbol)
+        
+        # 需要整数张合约的品种
+        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        if base_currency in integer_only_currencies:
+            # 确保至少1张，向上取整到整数
+            contract_size = max(1, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+            
         calculation_summary = f"""
             📊 仓位计算详情:
             基础保证金: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
@@ -2596,7 +2626,7 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
     except Exception as e:
         logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", str(e))
         return False
-# ✅ --- 修改结束 ---
+    # ✅ --- 修改结束 ---
 
 
 def adjust_take_profit_dynamically(symbol: str, current_position: dict, price_data: dict) -> bool:
@@ -3642,18 +3672,28 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     try:
         inst_id = get_correct_inst_id(symbol)
         
-        # 🆕 添加：调整订单数量到符合交易所精度要求
+        # 🆕 修复：根据品种调整合约数量精度
+        # 获取品种特定的最小交易单位
         min_amount = getattr(config, 'min_amount', 0.01)
         
-        # 计算符合精度要求的数量
-        if min_amount > 0:
-            # 向下取整到最小交易单位的整数倍
-            adjusted_amount = (amount // min_amount) * min_amount
-            if adjusted_amount < min_amount:
-                adjusted_amount = min_amount
+        # 🆕 特殊处理：某些品种要求整数张合约
+        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
+        base_currency = get_base_currency(symbol)
+        
+        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH']:
+            # 这些品种要求整数张合约
+            adjusted_amount = max(1, int(round(amount)))  # 至少1张，四舍五入到整数
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 整数张合约调整 - 从 {amount:.4f} 调整为 {adjusted_amount} 张")
         else:
-            adjusted_amount = amount
-            
+            # 其他品种使用原有的精度调整
+            if min_amount > 0:
+                # 向下取整到最小交易单位的整数倍
+                adjusted_amount = (amount // min_amount) * min_amount
+                if adjusted_amount < min_amount:
+                    adjusted_amount = min_amount
+            else:
+                adjusted_amount = amount
+        
         # 确保调整后的数量不小于最小交易量
         adjusted_amount = max(adjusted_amount, min_amount)
         
@@ -3661,6 +3701,11 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         if abs(adjusted_amount - amount) > 0.001:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 订单数量从 {amount:.4f} 调整为 {adjusted_amount:.4f} 以满足交易所精度要求")
         
+        # 🆕 额外检查：确保调整后的数量仍然有效
+        if adjusted_amount <= 0:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 调整后的合约数量无效: {adjusted_amount}")
+            return None
+
         # 基础参数
         params = {
             'instId': inst_id,
