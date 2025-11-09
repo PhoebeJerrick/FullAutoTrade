@@ -1371,6 +1371,53 @@ def log_api_response(response, function_name=""):
     except Exception as e:
         logger.log_error("log_api_response", f"记录API响应失败: {str(e)}")
 
+def get_current_position(symbol: str) -> Optional[dict]:
+    """Get current position status - 增强版持仓检测"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        positions = exchange.fetch_positions([config.symbol])
+        if not positions:
+            return None
+        
+        for pos in positions:
+            if pos['symbol'] == config.symbol:
+                contracts = float(pos['contracts']) if pos['contracts'] else 0
+                side = pos.get('side')
+                
+                # 🆕 增强验证：确保持仓真实存在
+                if (contracts > 0 and 
+                    side in ['long', 'short'] and 
+                    pos.get('marginMode') in ['isolated', 'cross'] and
+                    pos.get('entryPrice') and 
+                    float(pos['entryPrice']) > 0):
+                    
+                    # 🆕 额外验证：通过余额检查
+                    try:
+                        balance = exchange.fetch_balance()
+                        total_balance = balance['total'].get('USDT', 0)
+                        if total_balance <= 0:
+                            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常，跳过持仓")
+                            continue
+                    except:
+                        pass
+                    
+                    return {
+                        'side': side,
+                        'size': contracts,
+                        'entry_price': float(pos['entryPrice']),
+                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
+                        'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
+                        'symbol': pos['symbol'],
+                        'margin_mode': pos.get('marginMode', ''),
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+
+        return None
+
+    except Exception as e:
+        logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
+        return None
+
 def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str], 
                      order_type: str = 'conditional', stop_loss_price: float = None, take_profit_price: float = None) -> bool:
     """创建策略委托订单 - 根据OKX API重新实现 - 修复版本"""
@@ -2194,12 +2241,16 @@ def generate_technical_analysis_text(price_data):
     return analysis_text
 
 def verify_position_exists(symbol: str, position_info: dict) -> bool:
-    """验证持仓是否真实存在"""
+    """验证持仓是否真实存在 - 增强版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         # 方法1：通过账户余额验证
         balance = exchange.fetch_balance()
         total_balance = balance['total'].get('USDT', 0)
+        
+        if total_balance <= 0:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常")
+            return False
         
         # 方法2：尝试获取更详细的持仓信息
         positions = exchange.fetch_positions([config.symbol])
@@ -2207,13 +2258,37 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
             if (pos['symbol'] == config.symbol and 
                 float(pos.get('contracts', 0)) > 0 and
                 pos.get('side') == position_info['side']):
-                return True
+                
+                # 🆕 额外验证：检查持仓的详细信息
+                if (pos.get('entryPrice') and 
+                    float(pos['entryPrice']) > 0 and
+                    pos.get('marginMode') in ['isolated', 'cross']):
+                    return True
         
-        # 方法3：如果上述方法都失败，记录详细日志
+        # 方法3：使用私有API获取持仓
+        try:
+            params = {
+                'instType': 'SWAP',
+                'instId': get_correct_inst_id(symbol)
+            }
+            response = exchange.private_get_account_positions(params)
+            
+            if response['code'] == '0' and response['data']:
+                for pos in response['data']:
+                    if (pos['instId'] == get_correct_inst_id(symbol) and
+                        float(pos.get('pos', 0)) > 0 and
+                        pos.get('posSide') == 'net' and
+                        ((position_info['side'] == 'long' and pos.get('posSide') == 'long') or 
+                         (position_info['side'] == 'short' and pos.get('posSide') == 'short'))):
+                        return True
+        except Exception as api_error:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 私有API持仓查询失败: {str(api_error)}")
+        
+        # 方法4：如果上述方法都失败，记录详细日志
         logger.log_warning(f"🔍 {get_base_currency(symbol)}: 持仓验证失败 - 详细持仓信息:")
         for pos in positions:
             if pos['symbol'] == config.symbol:
-                logger.log_warning(f"  - 合约: {pos.get('contracts')}, 方向: {pos.get('side')}, 模式: {pos.get('marginMode')}")
+                logger.log_warning(f"  - 合约: {pos.get('contracts')}, 方向: {pos.get('side')}, 模式: {pos.get('marginMode')}, 入场价: {pos.get('entryPrice')}")
         
         return False
         
@@ -2222,53 +2297,7 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
         return False
 
 
-def get_current_position(symbol: str) -> Optional[dict]:
-    """Get current position status - 增强版持仓检测"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        positions = exchange.fetch_positions([config.symbol])
-        if not positions:
-            return None
-        
-        for pos in positions:
-            if pos['symbol'] == config.symbol:
-                contracts = float(pos['contracts']) if pos['contracts'] else 0
-                side = pos.get('side')
-                
-                # 🆕 增强验证：确保持仓真实存在
-                if (contracts > 0 and 
-                    side in ['long', 'short'] and 
-                    pos.get('marginMode') in ['isolated', 'cross'] and
-                    pos.get('entryPrice') and 
-                    float(pos['entryPrice']) > 0):
-                    
-                    # 🆕 额外验证：通过余额检查
-                    try:
-                        balance = exchange.fetch_balance()
-                        total_balance = balance['total'].get('USDT', 0)
-                        if total_balance <= 0:
-                            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常，跳过持仓")
-                            continue
-                    except:
-                        pass
-                    
-                    return {
-                        'side': side,
-                        'size': contracts,
-                        'entry_price': float(pos['entryPrice']),
-                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
-                        'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
-                        'symbol': pos['symbol'],
-                        'margin_mode': pos.get('marginMode', ''),
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
 
-        return None
-
-    except Exception as e:
-        logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
-        return None
-    
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
     """设置移动止损"""
     config = SYMBOL_CONFIGS[symbol]
@@ -4124,72 +4153,233 @@ def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data
         logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
         return True  # 平仓失败，保持持仓
 
-def close_position_with_reason(symbol: str, position: dict, reason: str):
-    """根据原因平仓 - 修复版本"""
+def close_position_fallback(symbol: str, position: dict, reason: str) -> bool:
+    """备用平仓方法 - 使用不同的API方式"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        # 🆕 首先验证持仓是否真实存在
-        if not verify_position_exists(symbol, position):
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过平仓操作")
-            return True  # 返回True表示处理完成（虽然没真正平仓）
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 使用备用平仓方法 - {reason}")
         
-        order_tag = create_order_tag()
         position_size = position['size']
+        position_side = position['side']
         
-        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason}")
+        # 🆕 方法1: 使用私有API直接平仓
+        try:
+            inst_id = get_correct_inst_id(symbol)
+            
+            if position_side == 'long':
+                # 平多仓
+                params = {
+                    'instId': inst_id,
+                    'tdMode': config.margin_mode,
+                    'side': 'sell',
+                    'ordType': 'market',
+                    'sz': str(position_size),
+                    'reduceOnly': True
+                }
+            else:
+                # 平空仓
+                params = {
+                    'instId': inst_id,
+                    'tdMode': config.margin_mode,
+                    'side': 'buy',
+                    'ordType': 'market',
+                    'sz': str(position_size),
+                    'reduceOnly': True
+                }
+            
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 尝试备用平仓方法1 - 私有API")
+            response = exchange.private_post_trade_order(params)
+            
+            if response and response.get('code') == '0':
+                order_id = response['data'][0]['ordId']
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法1成功，订单ID: {order_id}")
+                reset_scaling_status(symbol)
+                return True
+                
+        except Exception as e1:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法1失败: {str(e1)}")
         
+        # 🆕 方法2: 使用限价单平仓
+        try:
+            # 获取当前价格
+            ticker = exchange.fetch_ticker(config.symbol)
+            current_price = ticker['last']
+            
+            if position_side == 'long':
+                # 平多仓 - 使用稍低的价格确保成交
+                limit_price = current_price * 0.995
+                order = exchange.create_order(
+                    config.symbol,
+                    'limit',
+                    'sell',
+                    position_size,
+                    limit_price,
+                    {'reduceOnly': True}
+                )
+            else:
+                # 平空仓 - 使用稍高的价格确保成交
+                limit_price = current_price * 1.005
+                order = exchange.create_order(
+                    config.symbol,
+                    'limit',
+                    'buy',
+                    position_size,
+                    limit_price,
+                    {'reduceOnly': True}
+                )
+            
+            if order and order.get('id'):
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法2成功，订单ID: {order['id']}")
+                reset_scaling_status(symbol)
+                return True
+                
+        except Exception as e2:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法2失败: {str(e2)}")
+        
+        # 🆕 方法3: 最后尝试 - 使用更简化的方式
+        try:
+            if position_side == 'long':
+                order = exchange.create_market_sell_order(config.symbol, position_size, {'reduceOnly': True})
+            else:
+                order = exchange.create_market_buy_order(config.symbol, position_size, {'reduceOnly': True})
+            
+            if order and order.get('id'):
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法3成功，订单ID: {order['id']}")
+                reset_scaling_status(symbol)
+                return True
+                
+        except Exception as e3:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法3失败: {str(e3)}")
+        
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 所有平仓方法均失败")
+        return False
+        
+    except Exception as e:
+        logger.log_error(f"close_position_fallback_{get_base_currency(symbol)}", f"备用平仓方法异常: {str(e)}")
+        return False
+
+
+def close_position_with_reason(symbol: str, position: dict, reason: str) -> bool:
+    """根据原因平仓 - 增强版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        # 🆕 重新获取最新持仓信息，避免数据过时
+        current_position = get_current_position(symbol)
+        if not current_position:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 实际无持仓，无需平仓")
+            return True
+            
+        # 🆕 验证持仓方向是否匹配
+        if current_position['side'] != position['side']:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓方向不匹配，重新获取持仓信息")
+            position = current_position
+        
+        # 🆕 验证持仓数量
+        position_size = current_position['size']
+        if position_size <= 0:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
+            return True
+            
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason} - {position_size}张")
+
+        # 🆕 记录平仓前的持仓信息到历史
+        add_to_position_history(symbol, {
+            'side': position['side'],
+            'size': position_size,
+            'entry_price': position['entry_price'],
+            'action': 'close',
+            'close_reason': reason
+        })
+
+        # 🆕 取消该品种的所有策略委托订单
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 平仓前取消所有策略委托订单")
+        cancel_existing_algo_orders(symbol)
+        time.sleep(1)  # 等待取消操作完成
+
         if position['side'] == 'long':
             # 平多仓
             close_params = {
                 'reduceOnly': True,
-                'tag': order_tag
+                'tag': create_order_tag()
             }
-            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            
+            # 记录订单参数
+            log_order_params("平多仓", close_params, "close_position_with_reason")
             log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
-                # 🆕 添加异常处理
                 try:
-                    exchange.create_market_order(
+                    # 🆕 使用更安全的订单创建方式
+                    order = exchange.create_order(
                         config.symbol,
+                        'market',
                         'sell',
                         position_size,
-                        params=close_params
+                        None,
+                        close_params
                     )
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功")
+                    
+                    # 🆕 验证订单是否创建成功
+                    if order and order.get('id'):
+                        reset_scaling_status(symbol)
+                        logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功，ID: {order['id']}")
+                        
+                        # 等待并验证平仓结果
+                        return verify_position_closed(symbol, position_size, 'long')
+                    else:
+                        logger.log_error(f"❌ {get_base_currency(symbol)}: 平多仓订单提交失败，响应: {order}")
+                        return False
+                        
                 except Exception as order_error:
                     logger.log_error(f"close_long_position_{get_base_currency(symbol)}", 
-                                   f"平多仓失败: {str(order_error)}")
-                    return False
+                                   f"平多仓异常: {str(order_error)}")
+                    # 🆕 尝试备用方法
+                    return close_position_fallback(symbol, position, reason)
+            else:
+                logger.log_info("测试模式 - 模拟平多仓成功")
+                return True
+                
         else:  # short
             # 平空仓
             close_params = {
                 'reduceOnly': True,
-                'tag': order_tag
+                'tag': create_order_tag()
             }
-            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            
+            log_order_params("平空仓", close_params, "close_position_with_reason")
             log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
                 try:
-                    exchange.create_market_order(
+                    order = exchange.create_order(
                         config.symbol,
+                        'market',
                         'buy',
                         position_size,
-                        params=close_params
+                        None,
+                        close_params
                     )
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功")
+                    
+                    if order and order.get('id'):
+                        reset_scaling_status(symbol)
+                        logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功，ID: {order['id']}")
+                        return verify_position_closed(symbol, position_size, 'short')
+                    else:
+                        logger.log_error(f"❌ {get_base_currency(symbol)}: 平空仓订单提交失败，响应: {order}")
+                        return False
+                        
                 except Exception as order_error:
                     logger.log_error(f"close_short_position_{get_base_currency(symbol)}", 
-                                   f"平空仓失败: {str(order_error)}")
-                    return False
-        
-        logger.log_info(f"✅ {get_base_currency(symbol)}: 平仓执行完成")
-        return True
-        
+                                   f"平空仓异常: {str(order_error)}")
+                    return close_position_fallback(symbol, position, reason)
+            else:
+                logger.log_info("测试模式 - 模拟平空仓成功")
+                return True
+                
     except Exception as e:
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
-        return False
+        # 🆕 尝试备用方法
+        return close_position_fallback(symbol, position, reason)
 
 def debug_algo_orders(symbol: str):
     """调试函数：查看所有策略委托订单的详细信息"""
