@@ -2324,7 +2324,8 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             # 🆕 修复：使用正确的参数检查条件单
             params = {
                 'instType': 'SWAP',
-                'instId': get_correct_inst_id(symbol)
+                'instId': get_correct_inst_id(symbol),
+                'algoOrdType': 'oco'  # 或者尝试 'stop' / 'oco'
             }
             
             conditional_response = exchange.private_get_trade_orders_algo_pending(params)
@@ -4167,6 +4168,57 @@ def close_position_with_reason(symbol: str, position: dict, reason: str):
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
         return False
 
+def debug_position_fields(symbol: str):
+    """调试函数：查看持仓的所有可用字段"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        positions = exchange.fetch_positions([config.symbol])
+        found_position = False
+        
+        logger.log_info(f"🔍 {get_base_currency(symbol)} 持仓字段调试开始:")
+        
+        for i, pos in enumerate(positions):
+            if pos['symbol'] == config.symbol:
+                found_position = True
+                logger.log_info(f"  --- 持仓 #{i+1} ---")
+                logger.log_info(f"  合约: {pos.get('symbol')}")
+                logger.log_info(f"  方向: {pos.get('side')}")
+                logger.log_info(f"  数量: {pos.get('contracts')}")
+                logger.log_info(f"  入场价: {pos.get('entryPrice')}")
+                logger.log_info(f"  未实现盈亏: {pos.get('unrealizedPnl')}")
+                logger.log_info(f"  保证金模式: {pos.get('marginMode')}")
+                
+                # 特别关注止损止盈相关字段
+                logger.log_info(f"  --- 止损止盈字段 ---")
+                stop_loss_fields = ['stopLossPrice', 'slTriggerPx', 'stopLoss', 'slPrice', 'stopLossTriggerPrice']
+                take_profit_fields = ['takeProfitPrice', 'tpTriggerPx', 'takeProfit', 'tpPrice', 'takeProfitTriggerPrice']
+                
+                for field in stop_loss_fields:
+                    if field in pos:
+                        logger.log_info(f"  止损字段 '{field}': {pos[field]}")
+                
+                for field in take_profit_fields:
+                    if field in pos:
+                        logger.log_info(f"  止盈字段 '{field}': {pos[field]}")
+                
+                # 打印所有字段（排除大字段）
+                logger.log_info(f"  --- 所有字段 ---")
+                for key, value in pos.items():
+                    if key not in ['info', 'timestamp', 'datetime'] and value is not None:
+                        if isinstance(value, (str, int, float, bool)) and len(str(value)) < 100:
+                            logger.log_info(f"  {key}: {value}")
+                        else:
+                            logger.log_info(f"  {key}: [数据类型: {type(value).__name__}, 长度: {len(str(value)) if hasattr(value, '__len__') else 'N/A'}]")
+                
+                break
+        
+        if not found_position:
+            logger.log_info(f"  ❌ 未找到 {get_base_currency(symbol)} 的持仓")
+            
+        logger.log_info(f"🔍 {get_base_currency(symbol)} 持仓字段调试结束")
+        
+    except Exception as e:
+        logger.log_error(f"debug_position_{get_base_currency(symbol)}", f"调试持仓字段失败: {str(e)}")
 
 def check_existing_positions_on_startup():
     """启动时检查所有交易品种的现有持仓 - 修复版本"""
@@ -4176,6 +4228,9 @@ def check_existing_positions_on_startup():
         try:
             logger.log_info(f"📊 检查 {get_base_currency(symbol)} 的持仓状态...")
             
+            # 🆕 调试：先打印持仓字段信息
+            debug_position_fields(symbol)
+
             # 获取当前持仓
             current_position = get_current_position(symbol)
             
@@ -4462,6 +4517,7 @@ def main():
         logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
+
     # 🆕 启动时持仓检查
     check_existing_positions_on_startup()      
 
