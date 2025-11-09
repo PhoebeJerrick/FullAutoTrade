@@ -597,6 +597,109 @@ def wait_for_position(side: str, timeout: int = 30) -> Dict[str, Any]:
     logger.error(f"❌ {side}持仓未在{timeout}秒内出现")
     return None
 
+def get_market_info():
+    """获取市场信息，包括最小交易量"""
+    try:
+        markets = exchange.load_markets()
+        symbol = config.symbol
+        if symbol in markets:
+            market = markets[symbol]
+            limits = market.get('limits', {})
+            amount_limits = limits.get('amount', {})
+            min_amount = amount_limits.get('min')
+            precision = market.get('precision', {}).get('amount')
+            
+            logger.info(f"📊 市场信息 - 最小数量: {min_amount}")
+            logger.info(f"📊 市场信息 - 数量精度: {precision}")
+            logger.info(f"📊 市场信息 - 完整信息: {market}")
+            
+            return {
+                'min_amount': min_amount,
+                'precision': precision,
+                'market_info': market
+            }
+        return None
+    except Exception as e:
+        logger.error(f"获取市场信息失败: {str(e)}")
+        return None
+
+def calculate_position_size():
+    """计算仓位大小 - 使用最小的合约数量"""
+    try:
+        # 获取市场信息
+        market_info = get_market_info()
+        
+        # 根据你的描述，OKX支持小数合约，最小可以是0.0001张
+        # 对应0.0001 * 0.01 = 0.000001 BTC
+        min_contract_size = 0.0001  # 最小0.0001张合约
+        
+        # 计算需要的合约张数
+        current_price = get_current_price()
+        if current_price == 0:
+            return min_contract_size
+            
+        # 计算需要的BTC数量
+        required_btc = (config.base_usdt_amount * config.leverage) / current_price
+        
+        # 转换为合约张数
+        contract_size = required_btc / config.contract_size
+        
+        # 确保不低于最小交易量
+        if contract_size < min_contract_size:
+            contract_size = min_contract_size
+            
+        # 根据精度调整
+        contract_size = round(contract_size, 4)  # 保留4位小数
+        
+        logger.info(f"📏 计算仓位大小: {contract_size} 张合约 ({contract_size * config.contract_size:.6f} BTC)")
+        logger.info(f"   保证金: {config.base_usdt_amount} USDT, 杠杆: {config.leverage}x")
+        
+        return contract_size
+        
+    except Exception as e:
+        logger.error(f"计算仓位大小失败: {str(e)}")
+        return 0.0001  # 返回最小0.0001张合约
+
+def test_minimum_order():
+    """测试最小订单大小"""
+    try:
+        logger.info("🧪 测试最小订单大小...")
+        
+        # 尝试使用不同的订单大小
+        test_sizes = [0.0001, 0.0005, 0.001, 0.01]
+        
+        for size in test_sizes:
+            logger.info(f"🧪 测试订单大小: {size} 张")
+            
+            # 尝试开一个小仓位
+            order_result = create_order_without_sl_tp(
+                side='buy',
+                amount=size,
+                order_type='market'
+            )
+            
+            if order_result and order_result.get('code') == '0':
+                logger.info(f"✅ 订单大小 {size} 张 - 成功")
+                order_id = order_result['data'][0]['ordId']
+                
+                # 等待订单成交
+                if wait_for_order_fill(order_id, 10):
+                    # 检查持仓
+                    position = get_current_position()
+                    if position:
+                        logger.info(f"📊 持仓建立: {position['size']} 张")
+                        # 立即平仓
+                        close_position('long', position['size'])
+                        time.sleep(2)
+                    break
+                else:
+                    logger.info(f"❌ 订单大小 {size} 张 - 成交失败")
+            else:
+                logger.info(f"❌ 订单大小 {size} 张 - 创建失败")
+                
+    except Exception as e:
+        logger.error(f"最小订单测试失败: {str(e)}")
+
 def run_enhanced_test():
     """运行增强测试流程"""
     logger.info("🚀 开始增强测试流程")
