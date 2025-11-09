@@ -184,7 +184,7 @@ def calculate_position_size():
             
         # 计算合约数量
         contract_size = (config.base_usdt_amount * config.leverage) / current_price
-        contract_size = round(contract_size, 4)  # 保留4位小数
+        contract_size = round(contract_size, 2)  # 保留4位小数
         
         # 确保不低于最小交易量
         if contract_size < config.min_amount:
