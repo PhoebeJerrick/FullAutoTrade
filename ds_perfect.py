@@ -1610,7 +1610,7 @@ def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_pri
         params = {
             'instId': inst_id,
             'tdMode': margin_mode,
-            'algoOrdType': order_type,  # 🆕 修复：添加算法订单类型
+            'OrdType':order_type,
         }
         
         # 根据订单类型设置不同参数
@@ -2105,6 +2105,7 @@ def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
         result = create_algo_order(
         symbol=symbol,  # ✅ 修正参数名
         side=trigger_action,
+        order_type=algo_order_type,
         sz=remaining_size,
         trigger_price=trigger_price
         )
