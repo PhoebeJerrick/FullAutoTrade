@@ -61,10 +61,10 @@ logger = TestLogger()
 class TestConfig:
     def __init__(self):
         self.symbol = 'BTC/USDT:USDT'
-        self.leverage = 50  # 杠杆
+        self.leverage = 5  # 杠杆
         self.test_mode = False  # 真实交易
         self.margin_mode = 'isolated'
-        self.base_usdt_amount = 2  # 保证金
+        self.base_usdt_amount = 1  # 保证金
         self.min_amount = 0.001  # 最小交易量
         self.stop_loss_percent = 0.01  # 1% 止损
         self.take_profit_percent = 0.01  # 1% 止盈
@@ -354,7 +354,7 @@ def close_position(side: str, amount: float):
         inst_id = get_correct_inst_id()
         
         # 平仓方向与开仓方向相反
-        close_side = 'buy' if side == 'sell' else 'sell'
+        close_side = 'buy' if side == 'short' else 'sell'
         
         params = {
             'instId': inst_id,
