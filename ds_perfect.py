@@ -3804,6 +3804,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         position_side = signal_side
         is_scaling = False
     
+    # 🆕 修复：预先定义变量
+    tp_result = None
+    actual_rr = 0
+    dynamic_min_rr = 1.2
+    
     if is_scaling:
         try:
             # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
@@ -3826,6 +3831,12 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 reward = current_price - take_profit_price
             actual_rr = reward / risk if risk > 0 else 0
             
+            # 🆕 修复：创建模拟的 tp_result
+            tp_result = {
+                'is_acceptable': True,  # 加仓时默认接受
+                'actual_risk_reward': actual_rr
+            }
+            
         except Exception as e:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓止损计算失败: {str(e)}")
             is_scaling = False
@@ -3835,7 +3846,6 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
         
         # 动态盈亏比
-        dynamic_min_rr = 1.2
         trend_strength = price_data['trend_strength']
         
         tp_result = calculate_aggressive_take_profit(
@@ -3843,7 +3853,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             price_data, dynamic_min_rr, trend_strength
         )
         take_profit_price = tp_result['take_profit']
-        actual_rr = tp_result['actual_risk_reward']  # 🆕 这里赋值 actual_rr
+        actual_rr = tp_result['actual_risk_reward']
 
     # 🆕 修复：添加详细的价格关系验证日志
     logger.log_info(f"🔍 {get_base_currency(symbol)}: 价格关系验证 - 方向:{position_side}, 入场:{current_price:.2f}, 止损:{stop_loss_price:.2f}, 止盈:{take_profit_price:.2f}")
@@ -3867,7 +3877,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             take_profit_price = corrected_take_profit
             logger.log_info(f"✅ {get_base_currency(symbol)}: 价格自动修正成功")
             
-            # 🆕 修复：价格修正后重新计算 actual_rr
+            # 🆕 修复：价格修正后重新计算 actual_rr 和 tp_result
             if position_side == 'long':
                 risk = current_price - stop_loss_price
                 reward = take_profit_price - current_price
@@ -3876,18 +3886,30 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
                 reward = current_price - take_profit_price
             actual_rr = reward / risk if risk > 0 else 0
             
+            # 🆕 修复：重新创建 tp_result
+            tp_result = {
+                'is_acceptable': actual_rr >= dynamic_min_rr * 0.8,  # 使用宽松条件
+                'actual_risk_reward': actual_rr,
+                'take_profit': take_profit_price
+            }
+            
         else:
             logger.log_error(f"price_correction_failed_{get_base_currency(symbol)}", "价格自动修正失败")
             return
 
-    # 🆕 修复：添加盈亏比有效性检查
-    if 'actual_rr' not in locals() or actual_rr <= 0:
-        logger.log_error(f"invalid_rr_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 无效盈亏比 {actual_rr if 'actual_rr' in locals() else '未定义'}，放弃开仓")
+    # 🆕 修复：添加安全性检查
+    if tp_result is None:
+        logger.log_error(f"tp_result_missing_{get_base_currency(symbol)}", "❌ tp_result 未定义，放弃开仓")
+        return
+        
+    if 'actual_risk_reward' not in tp_result or tp_result['actual_risk_reward'] <= 0:
+        logger.log_error(f"invalid_rr_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 无效盈亏比 {tp_result.get('actual_risk_reward', '未定义')}，放弃开仓")
         return
     
     # 🆕 步骤4: 放宽接受条件
-    if not tp_result.get('is_acceptable', True):  # 🆕 使用 get 方法避免 KeyError
+    if not tp_result.get('is_acceptable', True):
         # 即使不满足完整阈值，如果盈亏比合理也可以考虑
+        actual_rr = tp_result.get('actual_risk_reward', 0)
         if actual_rr >= 0.8:  # 最低可接受盈亏比
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 盈亏比{actual_rr:.2f}略低于阈值{dynamic_min_rr:.2f}，但仍可接受")
         else:
@@ -3907,7 +3929,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     ├── 实际盈亏比: {actual_rr:.2f}:1
     ├── 目标阈值: {dynamic_min_rr:.2f}:1
     ├── 仓位大小: {position_size:.2f}张
-    └── 状态: {'✅ 满足开仓条件' if tp_result['is_acceptable'] else '⚠️ 条件放宽'}
+    └── 状态: {'✅ 满足开仓条件' if tp_result.get('is_acceptable', False) else '⚠️ 条件放宽'}
     """
     logger.log_info(trade_analysis)
 
@@ -4020,6 +4042,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
         import traceback
         traceback.print_exc()
+
 
 def filter_signal(signal_data, price_data):
     """过滤信号 - 增强版，考虑盈亏比因素"""
