@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# ds_short_sl_tp_test.py - BTC空单止盈止损测试程序（基于原有稳定框架）
+# ds_sltp_test.py - BTC空单止盈止损测试程序（基于原有稳定框架）
 # 流程：
 # 1. 开BTC空单并附带止盈止损
 # 2. 确认止盈止损正确设置
 # 3. 等待5秒
 # 4. 限价平仓
-# 5. 确认仓位已平
-# 6. 检查止盈止损是否还在，如果还在则撤销
+# 5. 确认仓位已经平掉
+# 6. 检查止盈止损是否还在，如果还在撤销掉
 
 import os
 import time
@@ -30,12 +30,27 @@ from ds_debug import (
     get_current_price, get_lot_size_info, adjust_position_size, calculate_position_size,
     calculate_stop_loss_take_profit_prices, create_order_with_sl_tp, create_order_without_sl_tp,
     close_position, wait_for_order_fill, get_current_position, check_sl_tp_orders,
-    cancel_all_sl_tp_orders, cancel_existing_orders, wait_for_position, verify_position_closed,
-    cleanup_after_test
+    cancel_all_sl_tp_orders, cancel_existing_orders, wait_for_position, cleanup_after_test
 )
 
 # 创建专用logger
 logger = TestLogger(log_dir="../Output/short_sl_tp_test", file_name="Short_SL_TP_Test_{timestamp}.log")
+
+def verify_position_closed(timeout: int = 10) -> bool:
+    """验证仓位是否已平 - 新增函数"""
+    logger.info("🔍 验证仓位是否已平...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        position = get_current_position()
+        if not position:
+            logger.info("✅ 确认仓位已平")
+            return True
+        logger.info(f"⏳ 仍有持仓: {position}, 等待中...")
+        time.sleep(2)
+    
+    logger.error("❌ 仓位未在指定时间内平掉")
+    return False
 
 def run_short_sl_tp_test():
     """
