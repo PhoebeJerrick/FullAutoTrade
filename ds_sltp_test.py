@@ -5,6 +5,7 @@
 import os
 import time
 import sys
+import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import ccxt
@@ -565,7 +566,6 @@ def run_short_sl_tp_test():
     
     # 方法1: 通过主订单查询止损止盈信息
     has_sl_tp = check_sl_tp_from_main_order(short_order_id)
-    # has_sl_tp = check_algo_order_detail(short_order_id)
     if not has_sl_tp:
         logger.warning("⚠️ 通过主订单未发现止损止盈信息，尝试分开设置...")
         
@@ -586,20 +586,69 @@ def run_short_sl_tp_test():
             return False
     else:
         logger.info("✅ 止损止盈订单设置正确")
-    
-    # 阶段3: 等待5秒
+
+    # 阶段3: 等待5秒后取消现有止盈止损单
     logger.info("")
-    logger.info("🔹 阶段3: 等待5秒")
+    logger.info("🔹 阶段3: 取消现有止盈止损单")
     logger.info("-" * 40)
     
-    logger.info(f"⏳ 等待 {config.wait_time_seconds} 秒...")
-    for i in range(config.wait_time_seconds, 0, -1):
-        logger.info(f"   {i}秒后平仓...")
-        time.sleep(1)
+    logger.info("⏳ 等待5秒后取消止盈止损单...")
+    time.sleep(5)
     
-    # 阶段4: 限价平仓
+    # 取消当前止盈止损单
+    logger.info("🔄 取消当前止盈止损单...")
+    if cancel_all_sl_tp_orders():
+        logger.info("✅ 止盈止损单取消命令已执行")
+    else:
+        logger.error("❌ 止盈止损单取消失败")
+        return False
+    
+    # 确认止盈止损单已取消
+    logger.info("🔍 确认止盈止损单已取消...")
+    time.sleep(2)  # 等待系统处理取消操作
+    has_remaining = check_sl_tp_orders()
+    if not has_remaining:
+        logger.info("✅ 确认所有止盈止损单已取消")
+    else:
+        logger.warning("⚠️ 仍有止盈止损单存在，尝试再次取消...")
+        if cancel_all_sl_tp_orders() and not check_sl_tp_orders():
+            logger.info("✅ 再次取消后确认已无止损止盈单")
+        else:
+            logger.error("❌ 无法完全取消止盈止损单，测试中止")
+            return False
+
+    # 阶段4: 重新设置止盈止损单
     logger.info("")
-    logger.info("🔹 阶段4: 限价平仓")
+    logger.info("🔹 阶段4: 重新设置止盈止损单")
+    logger.info("-" * 40)
+    
+    # 基于入场价重新计算止损止盈价格
+    new_sl, new_tp = calculate_stop_loss_take_profit_prices('short', short_position['entry_price'])
+    logger.info(f"📊 重新计算止损: {new_sl:.2f}, 止盈: {new_tp:.2f}")
+    
+    # 重新设置止盈止损
+    if not set_sl_tp_separately('short', short_position['size'], new_sl, new_tp):
+        logger.error("❌ 重新设置止盈止损单失败")
+        return False
+    
+    # 确认重新设置成功
+    time.sleep(2)
+    if check_sl_tp_orders():
+        logger.info("✅ 重新设置的止盈止损单已确认")
+    else:
+        logger.warning("⚠️ 重新设置的止盈止损单未查询到")
+
+    # 阶段5: 等待5秒后准备平仓
+    logger.info("")
+    logger.info("🔹 阶段5: 等待5秒后平仓")
+    logger.info("-" * 40)
+    
+    logger.info("⏳ 等待5秒...")
+    time.sleep(5)
+
+    # 阶段6: 平仓当前订单
+    logger.info("")
+    logger.info("🔹 阶段6: 平仓当前订单")
     logger.info("-" * 40)
     
     close_order_id = create_limit_close_order('short', short_position['size'])
@@ -624,24 +673,22 @@ def run_short_sl_tp_test():
         if not close_result:
             logger.error("❌ 市价平仓失败")
             return False
-    
-    # 阶段5: 确认仓位已平
+
+    # 阶段7: 确认仓位已平
     logger.info("")
-    logger.info("🔹 阶段5: 确认仓位已平")
+    logger.info("🔹 阶段7: 确认仓位已平")
     logger.info("-" * 40)
     
     if not verify_position_closed():
         logger.error("❌ 仓位未完全平掉")
         return False
-    
-    # 阶段6: 检查并清理止盈止损订单
+
+    # 阶段8: 检查并清理剩余止盈止损单
     logger.info("")
-    logger.info("🔹 阶段6: 检查并清理止盈止损订单")
+    logger.info("🔹 阶段8: 清理剩余止盈止损单")
     logger.info("-" * 40)
     
-    logger.info("📋 检查平仓后止盈止损订单状态...")
-    
-    # 检查是否还有止损止盈订单
+    logger.info("🔍 检查是否有剩余止盈止损单...")
     has_remaining_orders = check_sl_tp_orders()
     
     if has_remaining_orders:
@@ -654,8 +701,8 @@ def run_short_sl_tp_test():
             logger.error("❌ 止盈止损订单清理失败")
             return False
     else:
-        logger.info("✅ 止盈止损订单已自动取消")
-    
+        logger.info("✅ 平仓后无剩余止盈止损订单")
+
     # 最终确认
     logger.info("")
     logger.info("🔹 最终状态确认")
@@ -728,7 +775,6 @@ def main():
     except Exception as e:
         logger.error(f"💥 测试程序异常: {str(e)}")
         cleanup_after_test()
-        import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
