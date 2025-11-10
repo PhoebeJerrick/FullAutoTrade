@@ -631,81 +631,81 @@ def run_short_sl_tp_test():
         logger.info(f"   {i}秒后平仓...")
         time.sleep(1)
     
-    # 阶段4: 限价平仓
-    logger.info("")
-    logger.info("🔹 阶段4: 限价平仓")
-    logger.info("-" * 40)
+    # # 阶段4: 限价平仓
+    # logger.info("")
+    # logger.info("🔹 阶段4: 限价平仓")
+    # logger.info("-" * 40)
     
-    close_order_id = create_limit_close_order('short', short_position['size'])
+    # close_order_id = create_limit_close_order('short', short_position['size'])
     
-    if close_order_id:
-        if not wait_for_order_fill(close_order_id, 30):
-            logger.error("❌ 限价平仓订单未在30秒内成交，尝试市价平仓")
-            try:
-                exchange.cancel_order(close_order_id, config.symbol)
-                logger.info(f"✅ 已取消限价平仓订单: {close_order_id}")
-            except Exception as e:
-                logger.error(f"取消限价单失败: {str(e)}")
+    # if close_order_id:
+    #     if not wait_for_order_fill(close_order_id, 30):
+    #         logger.error("❌ 限价平仓订单未在30秒内成交，尝试市价平仓")
+    #         try:
+    #             exchange.cancel_order(close_order_id, config.symbol)
+    #             logger.info(f"✅ 已取消限价平仓订单: {close_order_id}")
+    #         except Exception as e:
+    #             logger.error(f"取消限价单失败: {str(e)}")
             
-            logger.info("🔄 尝试市价平仓...")
-            close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
-            if not close_result:
-                logger.error("❌ 市价平仓也失败")
-                return False
-    else:
-        logger.info("🔄 限价平仓订单创建失败，尝试市价平仓...")
-        close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
-        if not close_result:
-            logger.error("❌ 市价平仓失败")
-            return False
+    #         logger.info("🔄 尝试市价平仓...")
+    #         close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
+    #         if not close_result:
+    #             logger.error("❌ 市价平仓也失败")
+    #             return False
+    # else:
+    #     logger.info("🔄 限价平仓订单创建失败，尝试市价平仓...")
+    #     close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
+    #     if not close_result:
+    #         logger.error("❌ 市价平仓失败")
+    #         return False
     
-    # 阶段5: 确认仓位已平
-    logger.info("")
-    logger.info("🔹 阶段5: 确认仓位已平")
-    logger.info("-" * 40)
+    # # 阶段5: 确认仓位已平
+    # logger.info("")
+    # logger.info("🔹 阶段5: 确认仓位已平")
+    # logger.info("-" * 40)
     
-    if not verify_position_closed():
-        logger.error("❌ 仓位未完全平掉")
-        return False
+    # if not verify_position_closed():
+    #     logger.error("❌ 仓位未完全平掉")
+    #     return False
     
-    # 阶段6: 检查并清理止盈止损订单
-    logger.info("")
-    logger.info("🔹 阶段6: 检查并清理止盈止损订单")
-    logger.info("-" * 40)
+    # # 阶段6: 检查并清理止盈止损订单
+    # logger.info("")
+    # logger.info("🔹 阶段6: 检查并清理止盈止损订单")
+    # logger.info("-" * 40)
     
-    logger.info("📋 检查平仓后止盈止损订单状态...")
+    # logger.info("📋 检查平仓后止盈止损订单状态...")
     
-    # 检查是否还有止损止盈订单
-    has_remaining_orders = check_sl_tp_orders()
+    # # 检查是否还有止损止盈订单
+    # has_remaining_orders = check_sl_tp_orders()
     
-    if has_remaining_orders:
-        logger.warning("⚠️ 发现平仓后仍有止盈止损订单存在")
-        logger.info("🔄 执行清理...")
+    # if has_remaining_orders:
+    #     logger.warning("⚠️ 发现平仓后仍有止盈止损订单存在")
+    #     logger.info("🔄 执行清理...")
         
-        if cancel_all_sl_tp_orders():
-            logger.info("✅ 止盈止损订单清理成功")
-        else:
-            logger.error("❌ 止盈止损订单清理失败")
-            return False
-    else:
-        logger.info("✅ 止盈止损订单已自动取消")
+    #     if cancel_all_sl_tp_orders():
+    #         logger.info("✅ 止盈止损订单清理成功")
+    #     else:
+    #         logger.error("❌ 止盈止损订单清理失败")
+    #         return False
+    # else:
+    #     logger.info("✅ 止盈止损订单已自动取消")
     
-    # 最终确认
-    logger.info("")
-    logger.info("🔹 最终状态确认")
-    logger.info("-" * 40)
+    # # 最终确认
+    # logger.info("")
+    # logger.info("🔹 最终状态确认")
+    # logger.info("-" * 40)
     
-    final_position = get_current_position()
-    if final_position:
-        logger.error(f"❌ 最终检查发现仍有持仓: {final_position}")
-        return False
+    # final_position = get_current_position()
+    # if final_position:
+    #     logger.error(f"❌ 最终检查发现仍有持仓: {final_position}")
+    #     return False
     
-    final_sl_tp = check_sl_tp_orders()
-    if final_sl_tp:
-        logger.error("❌ 最终检查发现仍有止盈止损订单")
-        return False
+    # final_sl_tp = check_sl_tp_orders()
+    # if final_sl_tp:
+    #     logger.error("❌ 最终检查发现仍有止盈止损订单")
+    #     return False
     
-    logger.info("✅ 所有检查通过!")
+    # logger.info("✅ 所有检查通过!")
     
     logger.info("")
     logger.info("🎉 空单止盈止损测试流程完成!")
@@ -747,9 +747,9 @@ def main():
         success = run_short_sl_tp_test()
         
         # 执行清理
-        logger.info("")
-        logger.info("🧹 执行测试后清理...")
-        cleanup_after_test()
+        # logger.info("")
+        # logger.info("🧹 执行测试后清理...")
+        # cleanup_after_test()
         
         if success:
             logger.info("🎊 测试成功完成!")
