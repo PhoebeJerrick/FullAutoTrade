@@ -631,8 +631,6 @@ def check_sl_tp_orders():
         logger.info(f"📋 查询 {inst_id} 的止损止盈条件单...")
         response = exchange.private_get_trade_orders_algo_pending(params)
         
-        log_api_response(response, "check_sl_tp_orders")
-        
         if response and response.get('code') == '0':
             orders = response.get('data', [])
             
@@ -1197,13 +1195,6 @@ def run_enhanced_test():
     logger.info("")
     logger.info("🔹 最终状态检查")
     logger.info("-" * 40)
-    
-    # 检查最终持仓
-    final_position = get_current_position()
-    if final_position:
-        logger.info(f"📊 最终持仓: {final_position['side']} {final_position['size']}张, 入场价: {final_position['entry_price']:.2f}")
-    else:
-        logger.info("📊 无持仓")
     
     # 最终验证止损止盈设置
     logger.info("📋 最终止损止盈订单状态:")
