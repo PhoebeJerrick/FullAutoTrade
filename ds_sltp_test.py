@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 
 # ds_sltp_test.py - BTC空单止盈止损测试程序（基于原有稳定框架）
-# 流程：
-# 1. 开BTC空单并附带止盈止损
-# 2. 确认止盈止损正确设置
-# 3. 等待5秒
-# 4. 限价平仓
-# 5. 确认仓位已经平掉
-# 6. 检查止盈止损是否还在，如果还在撤销掉
 
 import os
 import time
@@ -37,7 +30,7 @@ from ds_debug import (
 logger = TestLogger(log_dir="../Output/short_sl_tp_test", file_name="Short_SL_TP_Test_{timestamp}.log")
 
 def verify_position_closed(timeout: int = 10) -> bool:
-    """验证仓位是否已平 - 新增函数"""
+    """验证仓位是否已平"""
     logger.info("🔍 验证仓位是否已平...")
     
     start_time = time.time()
@@ -51,6 +44,79 @@ def verify_position_closed(timeout: int = 10) -> bool:
     
     logger.error("❌ 仓位未在指定时间内平掉")
     return False
+
+def create_limit_close_order(side: str, amount: float) -> Optional[str]:
+    """创建限价平仓订单"""
+    try:
+        inst_id = get_correct_inst_id()
+        current_price = get_current_price()
+        
+        # 根据方向确定限价价格
+        if side == 'short':  # 平空单，买入
+            limit_price = current_price * 0.999  # 比当前价稍低
+            close_side = 'buy'
+        else:  # 平多单，卖出
+            limit_price = current_price * 1.001  # 比当前价稍高
+            close_side = 'sell'
+        
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': close_side,
+            'ordType': 'limit',
+            'sz': str(amount),
+            'px': str(limit_price),
+        }
+        
+        log_order_params("限价平仓", params, "create_limit_close_order")
+        logger.info(f"🔄 执行{side}仓位限价平仓: {amount} 张 @ {limit_price:.2f}")
+        
+        response = exchange.private_post_trade_order(params)
+        log_api_response(response, "限价平仓")
+        
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ 限价平仓订单创建成功: {order_id}")
+            return order_id
+        else:
+            logger.error(f"❌ 限价平仓订单创建失败: {response}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"创建限价平仓订单失败: {str(e)}")
+        return None
+
+def enforce_lot_size_requirement(position_size: float) -> float:
+    """
+    强制确保仓位大小符合交易所的lot size要求
+    """
+    try:
+        # 获取市场信息
+        market_info = get_lot_size_info()
+        min_amount = market_info.get('min_amount', 0.001)  # BTC/USDT最小交易量通常是0.001
+        
+        logger.info(f"📏 交易所最小交易量: {min_amount}")
+        logger.info(f"📏 原始仓位大小: {position_size}")
+        
+        # 确保仓位大小是最小交易量的整数倍
+        if min_amount > 0:
+            # 计算最接近的整数倍
+            multiple = round(position_size / min_amount)
+            enforced_size = multiple * min_amount
+            
+            # 确保不低于最小交易量
+            if enforced_size < min_amount:
+                enforced_size = min_amount
+            
+            logger.info(f"📏 调整后仓位大小: {enforced_size} ({multiple}倍最小交易量)")
+            
+            return enforced_size
+        else:
+            return position_size
+            
+    except Exception as e:
+        logger.error(f"强制调整仓位大小失败: {str(e)}")
+        return position_size
 
 def run_short_sl_tp_test():
     """
@@ -74,12 +140,8 @@ def run_short_sl_tp_test():
     position_size = calculate_position_size()
     logger.info(f"📏 计算得到的仓位大小: {position_size}")
     
-    # 再次确认仓位大小符合要求
-    market_info = get_lot_size_info()
-    min_amount = market_info['min_amount']
-    if position_size < min_amount:
-        logger.warning(f"⚠️ 仓位大小 {position_size} 小于最小交易量 {min_amount}，使用最小值")
-        position_size = min_amount
+    # 4. 强制确保仓位大小符合lot size要求
+    position_size = enforce_lot_size_requirement(position_size)
     
     logger.info(f"🎯 最终使用的仓位大小: {position_size}")
     
@@ -159,47 +221,33 @@ def run_short_sl_tp_test():
     logger.info("🔹 阶段4: 限价平仓")
     logger.info("-" * 40)
     
-    # 使用原有的平仓函数，但使用限价方式
-    # 首先获取当前价格
-    current_price = get_current_price()
-    # 使用比当前价格稍低的价格来确保快速成交
-    limit_price = current_price * 0.999
+    # 使用限价平仓
+    close_order_id = create_limit_close_order('short', short_position['size'])
     
-    # 创建限价平仓单
-    inst_id = get_correct_inst_id()
-    params = {
-        'instId': inst_id,
-        'tdMode': config.margin_mode,
-        'side': 'buy',  # 平空单
-        'ordType': 'limit',
-        'sz': str(short_position['size']),
-        'px': str(limit_price),
-    }
-    
-    log_order_params("限价平仓", params, "run_short_sl_tp_test")
-    logger.info(f"🔄 执行空单限价平仓: {short_position['size']} 张 @ {limit_price:.2f}")
-    
-    close_response = exchange.private_post_trade_order(params)
-    log_api_response(close_response, "限价平仓")
-    
-    if not close_response or close_response.get('code') != '0':
-        logger.error("❌ 限价平仓订单创建失败")
-        # 如果限价平仓失败，尝试市价平仓
-        logger.info("🔄 尝试市价平仓...")
-        close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
-        if not close_result:
-            logger.error("❌ 市价平仓也失败")
-            return False
-    else:
-        close_order_id = close_response['data'][0]['ordId']
-        logger.info(f"✅ 限价平仓订单创建成功: {close_order_id}")
-        
-        # 等待平仓成交
+    if close_order_id:
+        # 等待限价平仓成交
         if not wait_for_order_fill(close_order_id, 30):
             logger.error("❌ 限价平仓订单未在30秒内成交，尝试市价平仓")
-            # 取消限价单并市价平仓
-            exchange.cancel_order(close_order_id, config.symbol)
-            close_position('short', short_position['size'], cancel_sl_tp=True)
+            # 取消限价单
+            try:
+                exchange.cancel_order(close_order_id, config.symbol)
+                logger.info(f"✅ 已取消限价平仓订单: {close_order_id}")
+            except Exception as e:
+                logger.error(f"取消限价单失败: {str(e)}")
+            
+            # 使用市价平仓
+            logger.info("🔄 尝试市价平仓...")
+            close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
+            if not close_result:
+                logger.error("❌ 市价平仓也失败")
+                return False
+    else:
+        # 限价单创建失败，直接使用市价平仓
+        logger.info("🔄 限价平仓订单创建失败，尝试市价平仓...")
+        close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
+        if not close_result:
+            logger.error("❌ 市价平仓失败")
+            return False
     
     # 阶段5: 确认仓位已平
     logger.info("")
