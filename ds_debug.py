@@ -174,6 +174,7 @@ def get_current_price():
     except Exception as e:
         logger.error(f"获取价格失败: {str(e)}")
         return 0
+    
 def calculate_position_size():
     """计算仓位大小 - 精确计算最小可用仓位"""
     try:
@@ -623,42 +624,6 @@ def get_market_info():
         logger.error(f"获取市场信息失败: {str(e)}")
         return None
 
-def calculate_position_size():
-    """计算仓位大小 - 使用最小的合约数量"""
-    try:
-        # 获取市场信息
-        market_info = get_market_info()
-        
-        # 根据你的描述，OKX支持小数合约，最小可以是0.0001张
-        # 对应0.0001 * 0.01 = 0.000001 BTC
-        min_contract_size = 0.0001  # 最小0.0001张合约
-        
-        # 计算需要的合约张数
-        current_price = get_current_price()
-        if current_price == 0:
-            return min_contract_size
-            
-        # 计算需要的BTC数量
-        required_btc = (config.base_usdt_amount * config.leverage) / current_price
-        
-        # 转换为合约张数
-        contract_size = required_btc / config.contract_size
-        
-        # 确保不低于最小交易量
-        if contract_size < min_contract_size:
-            contract_size = min_contract_size
-            
-        # 根据精度调整
-        contract_size = round(contract_size, 4)  # 保留4位小数
-        
-        logger.info(f"📏 计算仓位大小: {contract_size} 张合约 ({contract_size * config.contract_size:.6f} BTC)")
-        logger.info(f"   保证金: {config.base_usdt_amount} USDT, 杠杆: {config.leverage}x")
-        
-        return contract_size
-        
-    except Exception as e:
-        logger.error(f"计算仓位大小失败: {str(e)}")
-        return 0.0001  # 返回最小0.0001张合约
 
 def test_minimum_order():
     """测试最小订单大小"""
