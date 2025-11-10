@@ -6,6 +6,7 @@ import os
 import time
 import sys
 import traceback
+import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import ccxt
@@ -29,6 +30,10 @@ from ds_debug import (
 
 # 创建专用logger
 logger = TestLogger(log_dir="../Output/short_sl_tp_test", file_name="Short_SL_TP_Test_{timestamp}.log")
+
+def generate_unique_cl_ord_id(prefix: str = "sl_tp_") -> str:
+    """生成唯一的自定义订单ID，用于追踪止损止盈订单"""
+    return f"{prefix}{uuid.uuid4().hex[:16]}"
 
 def verify_position_closed(timeout: int = 10) -> bool:
     """验证仓位是否已平"""
@@ -60,6 +65,9 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
             limit_price = current_price * 0.999  # 比当前价低0.1%
             close_side = 'sell'
         
+        # 生成唯一的自定义订单ID
+        cl_ord_id = generate_unique_cl_ord_id(f"close_{side}_")
+        
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -67,6 +75,7 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
             'ordType': 'limit',
             'sz': str(amount),
             'px': str(limit_price),
+            'clOrdId': cl_ord_id  # 添加自定义订单ID
         }
         
         log_order_params("限价平仓", params, "create_limit_close_order")
@@ -77,7 +86,7 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ 限价平仓订单创建成功: {order_id}")
+            logger.info(f"✅ 限价平仓订单创建成功: {order_id} (自定义ID: {cl_ord_id})")
             return order_id
         else:
             logger.error(f"❌ 限价平仓订单创建失败: {response}")
@@ -124,20 +133,32 @@ def get_safe_position_size() -> float:
         # 返回最小交易量作为保底
         return 0.01
 
-def check_sl_tp_from_main_order(order_id: str) -> bool:
+def check_sl_tp_from_main_order(order_id: str, cl_ord_id: Optional[str] = None) -> bool:
     """
     根据OKX客服建议：通过主订单查询止损止盈信息
     使用 GET /api/v5/trade/order 查询主订单的止损止盈信息
+    增加cl_ord_id参数辅助查询
     """
     try:
-        logger.info(f"🔍 通过主订单查询止损止盈信息: {order_id}")
+        logger.info(f"🔍 通过主订单查询止损止盈信息: {order_id} (自定义ID: {cl_ord_id or '未设置'})")
         
         params = {
             'instId': get_correct_inst_id(),
             'ordId': order_id,
         }
+        # 如果有自定义ID，也尝试用自定义ID查询
+        if cl_ord_id:
+            alt_params = {
+                'instId': get_correct_inst_id(),
+                'clOrdId': cl_ord_id,
+            }
         
         response = exchange.private_get_trade_order(params)
+        
+        # 如果主查询失败且有自定义ID，尝试用自定义ID查询
+        if (not response or response.get('code') != '0') and cl_ord_id:
+            logger.info(f"🔍 尝试用自定义ID查询: {cl_ord_id}")
+            response = exchange.private_get_trade_order(alt_params)
         
         if response and response.get('code') == '0':
             orders = response.get('data', [])
@@ -145,6 +166,7 @@ def check_sl_tp_from_main_order(order_id: str) -> bool:
                 order_info = orders[0]
                 logger.info(f"📋 主订单信息:")
                 logger.info(f"   订单ID: {order_info.get('ordId')}")
+                logger.info(f"   自定义ID: {order_info.get('clOrdId')}")
                 logger.info(f"   状态: {order_info.get('state')}")
                 logger.info(f"   方向: {order_info.get('side')}")
                 logger.info(f"   数量: {order_info.get('sz')}")
@@ -155,8 +177,10 @@ def check_sl_tp_from_main_order(order_id: str) -> bool:
                     logger.info(f"✅ 发现附加的止损止盈订单: {len(attach_algo_ords)}个")
                     for algo_ord in attach_algo_ords:
                         algo_id = algo_ord.get('algoId', 'Unknown')
+                        algo_cl_ord_id = algo_ord.get('algoClOrdId', 'Unknown')
                         algo_type = algo_ord.get('algoOrdType', 'Unknown')
                         logger.info(f"   算法订单ID: {algo_id}")
+                        logger.info(f"   算法自定义ID: {algo_cl_ord_id}")
                         logger.info(f"   算法订单类型: {algo_type}")
                         
                         # 检查止损止盈价格
@@ -179,19 +203,30 @@ def check_sl_tp_from_main_order(order_id: str) -> bool:
         logger.error(f"通过主订单查询止损止盈信息失败: {str(e)}")
         return False
 
-def check_algo_order_detail(algo_id: str) -> bool:
+def check_algo_order_detail(algo_id: str, algo_cl_ord_id: Optional[str] = None) -> bool:
     """
     根据OKX客服建议：通过算法订单ID查询完整信息（适用于已触发的订单）
     使用 GET /api/v5/trade/order-algo 查询算法订单完整信息
+    增加algo_cl_ord_id参数辅助查询
     """
     try:
-        logger.info(f"🔍 查询算法订单完整信息: {algo_id}")
+        logger.info(f"🔍 查询算法订单完整信息: {algo_id} (自定义ID: {algo_cl_ord_id or '未设置'})")
         
         params = {
             'algoId': algo_id,
         }
+        # 如果有自定义算法ID，准备备用查询参数
+        if algo_cl_ord_id:
+            alt_params = {
+                'algoClOrdId': algo_cl_ord_id,
+            }
         
         response = exchange.private_get_trade_order_algo(params)
+        
+        # 如果主查询失败且有自定义算法ID，尝试用自定义ID查询
+        if (not response or response.get('code') != '0') and algo_cl_ord_id:
+            logger.info(f"🔍 尝试用算法自定义ID查询: {algo_cl_ord_id}")
+            response = exchange.private_get_trade_order_algo(alt_params)
         
         if response and response.get('code') == '0':
             orders = response.get('data', [])
@@ -199,6 +234,7 @@ def check_algo_order_detail(algo_id: str) -> bool:
                 order_info = orders[0]
                 logger.info(f"✅ 算法订单详细信息:")
                 logger.info(f"   算法ID: {order_info.get('algoId')}")
+                logger.info(f"   算法自定义ID: {order_info.get('algoClOrdId')}")
                 logger.info(f"   状态: {order_info.get('state')}")
                 logger.info(f"   订单类型: {order_info.get('ordType')}")
                 
@@ -224,13 +260,14 @@ def check_algo_order_detail(algo_id: str) -> bool:
         logger.error(f"查询算法订单完整信息失败: {str(e)}")
         return False
 
-def cancel_sl_tp_orders(algo_ids: List[str]) -> bool:
-    """通过algoId列表撤销止损止盈订单"""
-    if not algo_ids:
-        logger.warning("⚠️ 没有需要撤销的algoId")
+def cancel_sl_tp_orders(algo_ids: List[str], algo_cl_ord_ids: List[str] = []) -> bool:
+    """通过algoId或algoClOrdId列表撤销止损止盈订单"""
+    if not algo_ids and not algo_cl_ord_ids:
+        logger.warning("⚠️ 没有需要撤销的algoId或algoClOrdId")
         return False
         
     success = True
+    # 先尝试用algoId撤销
     for algo_id in algo_ids:
         try:
             params = {
@@ -239,45 +276,108 @@ def cancel_sl_tp_orders(algo_ids: List[str]) -> bool:
             }
             response = exchange.private_post_trade_cancel_order_algo(params)
             if response.get('code') != '0':
-                logger.error(f"❌ 撤销算法订单 {algo_id} 失败: {response}")
-                success = False
+                logger.warning(f"⚠️ 用algoId撤销算法订单 {algo_id} 失败: {response}，将尝试其他方式")
             else:
-                logger.info(f"✅ 撤销算法订单 {algo_id} 成功")
+                logger.info(f"✅ 用algoId撤销算法订单 {algo_id} 成功")
+                continue  # 成功则不需要尝试其他方式
         except Exception as e:
-            logger.error(f"撤销算法订单 {algo_id} 出错: {str(e)}")
+            logger.warning(f"用algoId撤销算法订单 {algo_id} 出错: {str(e)}，将尝试其他方式")
+        
+        # 如果algoId撤销失败，且有对应的自定义ID，尝试用自定义ID撤销
+        if algo_cl_ord_ids:
+            for algo_cl_ord_id in algo_cl_ord_ids:
+                try:
+                    params = {
+                        'algoClOrdId': algo_cl_ord_id,
+                        'instId': get_correct_inst_id()
+                    }
+                    response = exchange.private_post_trade_cancel_order_algo(params)
+                    if response.get('code') != '0':
+                        logger.error(f"❌ 用自定义ID撤销算法订单 {algo_cl_ord_id} 失败: {response}")
+                        success = False
+                    else:
+                        logger.info(f"✅ 用自定义ID撤销算法订单 {algo_cl_ord_id} 成功")
+                except Exception as e:
+                    logger.error(f"用自定义ID撤销算法订单 {algo_cl_ord_id} 出错: {str(e)}")
+                    success = False
+        else:
             success = False
+    
+    # 如果没有algoId，直接尝试用自定义ID撤销
+    if not algo_ids and algo_cl_ord_ids:
+        for algo_cl_ord_id in algo_cl_ord_ids:
+            try:
+                params = {
+                    'algoClOrdId': algo_cl_ord_id,
+                    'instId': get_correct_inst_id()
+                }
+                response = exchange.private_post_trade_cancel_order_algo(params)
+                if response.get('code') != '0':
+                    logger.error(f"❌ 用自定义ID撤销算法订单 {algo_cl_ord_id} 失败: {response}")
+                    success = False
+                else:
+                    logger.info(f"✅ 用自定义ID撤销算法订单 {algo_cl_ord_id} 成功")
+            except Exception as e:
+                logger.error(f"用自定义ID撤销算法订单 {algo_cl_ord_id} 出错: {str(e)}")
+                success = False
+                
     return success
 
-def get_algo_orders_from_main_order(order_id: str, retry=3, delay=2) -> List[str]:
-    """从主订单获取所有算法订单ID，增加重试机制"""
+def get_algo_orders_from_main_order(order_id: str, cl_ord_id: Optional[str] = None, retry=3, delay=2) -> Dict[str, List[str]]:
+    """从主订单获取所有算法订单ID和自定义ID，增加重试机制"""
     try:
-        algo_ids = []
+        result = {
+            'algo_ids': [],
+            'algo_cl_ord_ids': []
+        }
+        
         for _ in range(retry):
             params = {
                 'instId': get_correct_inst_id(),
                 'ordId': order_id,
             }
+            
+            # 尝试用主订单ID查询
             response = exchange.private_get_trade_order(params)
             
+            # 如果有自定义ID且主查询失败，尝试用自定义ID查询
+            if (not response or response.get('code') != '0') and cl_ord_id:
+                logger.info(f"🔍 尝试用主订单自定义ID查询: {cl_ord_id}")
+                response = exchange.private_get_trade_order({
+                    'instId': get_correct_inst_id(),
+                    'clOrdId': cl_ord_id,
+                })
+            
             if response and response.get('code') == '0' and response.get('data'):
-                order_info = response['data'][0]
-                attach_algo_ords = order_info.get('attachAlgoOrds', [])
-                for algo_ord in attach_algo_ords:
-                    # 尝试多种可能的字段名（如algoId、algo_id等）
-                    algo_id = algo_ord.get('algoId') or algo_ord.get('algo_id')
-                    if algo_id:
-                        algo_ids.append(algo_id)
-                if algo_ids:  # 成功获取则退出重试
+                for data in response['data']:
+                    attach_algo_ords = data.get('attachAlgoOrds', [])
+                    for algo_ord in attach_algo_ords:
+                        # 提取算法订单ID
+                        algo_id = algo_ord.get('algoId') or algo_ord.get('algo_id')
+                        if algo_id and algo_id not in result['algo_ids']:
+                            result['algo_ids'].append(algo_id)
+                        
+                        # 提取算法自定义ID
+                        algo_cl_ord_id = algo_ord.get('algoClOrdId') or algo_ord.get('algo_cl_ord_id')
+                        if algo_cl_ord_id and algo_cl_ord_id not in result['algo_cl_ord_ids']:
+                            result['algo_cl_ord_ids'].append(algo_cl_ord_id)
+                
+                # 成功获取则退出重试
+                if result['algo_ids'] or result['algo_cl_ord_ids']:
                     break
+            
             time.sleep(delay)
         
-        if not algo_ids:
-            logger.warning(f"⚠️ 多次尝试后仍未获取到algoId，主订单ID: {order_id}")
-        return algo_ids
+        if not result['algo_ids'] and not result['algo_cl_ord_ids']:
+            logger.warning(f"⚠️ 多次尝试后仍未获取到algoId或algoClOrdId，主订单ID: {order_id}")
+        else:
+            logger.info(f"✅ 获取到{len(result['algo_ids'])}个algoId和{len(result['algo_cl_ord_ids'])}个algoClOrdId")
+            
+        return result
         
     except Exception as e:
         logger.error(f"从主订单获取算法订单ID失败: {str(e)}")
-        return []
+        return {'algo_ids': [], 'algo_cl_ord_ids': []}
 
 
 def create_universal_order(
@@ -291,8 +391,8 @@ def create_universal_order(
 ) -> Dict[str, Any]:
     """
     全能交易函数：支持限价/市价开仓，可选止损止盈设置
-    
-    Args:
+    增加了attachAlgoClOrdId支持，用于更可靠地追踪止损止盈订单
+        Args:
         side: 交易方向 'buy'（做多）或 'sell'（做空）
         ord_type: 订单类型 'market'（市价）或 'limit'（限价）
         amount: 交易数量，None则自动计算
@@ -311,6 +411,9 @@ def create_universal_order(
         amount = amount or get_safe_position_size()
         logger.info(f"📏 自动计算仓位大小: {amount}" if amount is None else f"📏 仓位大小: {amount}")
         
+        # 生成主订单自定义ID
+        cl_ord_id = generate_unique_cl_ord_id(f"{side}_")
+        
         # 基础参数构建
         params = {
             'instId': inst_id,
@@ -318,6 +421,7 @@ def create_universal_order(
             'side': side,
             'ordType': ord_type,
             'sz': str(amount),
+            'clOrdId': cl_ord_id  # 添加主订单自定义ID
         }
         
         # 限价单价格设置
@@ -348,6 +452,9 @@ def create_universal_order(
             algo['sz'] = str(amount)
             algo['side'] = opposite_side
             algo['algoOrdType'] = 'conditional'
+            # 为算法订单添加自定义ID（关键改进点）
+            algo['algoClOrdId'] = generate_unique_cl_ord_id(f"{side}_sl_tp_")
+            logger.info(f"📌 算法订单自定义ID: {algo['algoClOrdId']}")
             algo_ords.append(algo)  # 此时algo_ords最多只有一个元素    
 
         # 添加止损止盈到主订单参数
@@ -357,7 +464,7 @@ def create_universal_order(
         # 日志与订单执行
         action_name = f"{'做多' if side == 'buy' else '做空'}{'市价' if ord_type == 'market' else '限价'}单"
         log_order_params(action_name, params, "create_universal_order")
-        logger.info(f"🎯 执行{action_name}: {amount} 张")
+        logger.info(f"🎯 执行{action_name}: {amount} 张 (自定义ID: {cl_ord_id})")
         if algo_ords:
             logger.info(f"📋 附带条件单: {'、'.join(['止损' if 'slTriggerPx' in a else '止盈' for a in algo_ords])}")
         
@@ -365,35 +472,54 @@ def create_universal_order(
         response = exchange.private_post_trade_order(params)
         log_api_response(response, "create_universal_order")
         
-        result = {'order_id': None, 'response': response, 'algo_ids': [], 'success': False}
+        result = {
+            'order_id': None, 
+            'cl_ord_id': cl_ord_id,  # 返回主订单自定义ID
+            'response': response, 
+            'algo_ids': [], 
+            'algo_cl_ord_ids': [],  # 返回算法订单自定义ID
+            'success': False
+        }
         
         if response and response.get('code') == '0':
             result['success'] = True
             result['order_id'] = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
-            logger.info(f"✅ {action_name}创建成功: {result['order_id']}")
+            logger.info(f"✅ {action_name}创建成功: {result['order_id']} (自定义ID: {cl_ord_id})")
             
-            # 在create_universal_order函数中，替换原提取algoId的代码
+            # 提取algoId和algoClOrdId
             if response and response.get('code') == '0' and response.get('data'):
-                # 遍历所有数据，不使用错误的切片
+                # 遍历所有数据
                 for data in response['data']:
                     # 检查是否存在附加的算法订单信息
                     if 'attachAlgoOrds' in data:
                         for algo_ord in data['attachAlgoOrds']:
                             if 'algoId' in algo_ord:
                                 algo_id = algo_ord['algoId']
-                                result['algo_ids'].append(algo_id)
-                                logger.info(f"✅ 条件单创建成功: {algo_id}")
+                                if algo_id not in result['algo_ids']:
+                                    result['algo_ids'].append(algo_id)
+                                    logger.info(f"✅ 条件单创建成功: {algo_id}")
+                            if 'algoClOrdId' in algo_ord:
+                                algo_cl_ord_id = algo_ord['algoClOrdId']
+                                if algo_cl_ord_id not in result['algo_cl_ord_ids']:
+                                    result['algo_cl_ord_ids'].append(algo_cl_ord_id)
+                                    logger.info(f"✅ 条件单自定义ID: {algo_cl_ord_id}")
                     # 同时检查当前data是否直接包含algoId（兼容不同返回格式）
                     elif 'algoId' in data:
                         algo_id = data['algoId']
-                        result['algo_ids'].append(algo_id)
-                        logger.info(f"✅ 条件单创建成功: {algo_id}")
+                        if algo_id not in result['algo_ids']:
+                            result['algo_ids'].append(algo_id)
+                            logger.info(f"✅ 条件单创建成功: {algo_id}")
+                    elif 'algoClOrdId' in data:
+                        algo_cl_ord_id = data['algoClOrdId']
+                        if algo_cl_ord_id not in result['algo_cl_ord_ids']:
+                            result['algo_cl_ord_ids'].append(algo_cl_ord_id)
+                            logger.info(f"✅ 条件单自定义ID: {algo_cl_ord_id}")
             
             # 验证止损止盈设置
             if verify_sl_tp and algo_ords:
                 logger.info("🔍 验证止损止盈设置...")
                 time.sleep(2)
-                if check_sl_tp_from_main_order(result['order_id']):
+                if check_sl_tp_from_main_order(result['order_id'], result['cl_ord_id']):
                     logger.info("✅ 止损止盈设置验证成功")
                 else:
                     logger.warning("⚠️ 止损止盈设置验证失败，建议手动确认")
@@ -405,7 +531,14 @@ def create_universal_order(
     except Exception as e:
         logger.error(f"创建全能订单失败: {str(e)}")
         logger.error(f"详细错误信息: {traceback.format_exc()}")
-        return {'order_id': None, 'response': None, 'algo_ids': [], 'success': False}
+        return {
+            'order_id': None, 
+            'cl_ord_id': None,
+            'response': None, 
+            'algo_ids': [], 
+            'algo_cl_ord_ids': [],
+            'success': False
+        }
 
 def create_short_with_sl_tp_fixed(amount: float, stop_loss_price: float, take_profit_price: float):
     """
@@ -478,14 +611,20 @@ def usage_examples():
         take_profit_price=current_price * 0.995  # 只设置止盈
     )
 
-def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_profit_price: float):
-    """分开设置止损和止盈订单 - 备选方案"""
+def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_profit_price: float) -> Dict[str, List[str]]:
+    """分开设置止损和止盈订单 - 备选方案，返回算法订单ID和自定义ID"""
+    result = {
+        'algo_ids': [],
+        'algo_cl_ord_ids': []
+    }
+    
     try:
         inst_id = get_correct_inst_id()
         
         logger.info("🔄 分开设置止损止盈订单...")
         
         # 设置止损订单
+        sl_cl_ord_id = generate_unique_cl_ord_id(f"{side}_sl_")
         sl_params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -494,19 +633,23 @@ def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_
             'sz': str(amount),
             'slTriggerPx': str(stop_loss_price),
             'slOrdPx': '-1',
+            'algoClOrdId': sl_cl_ord_id  # 添加止损订单自定义ID
         }
         
-        logger.info("🛡️ 设置止损订单...")
+        logger.info(f"🛡️ 设置止损订单 (自定义ID: {sl_cl_ord_id})...")
         sl_response = exchange.private_post_trade_order_algo(sl_params)
         
         if sl_response and sl_response.get('code') == '0':
             sl_algo_id = sl_response['data'][0]['algoId'] if sl_response.get('data') else 'Unknown'
-            logger.info(f"✅ 止损订单设置成功: {sl_algo_id}")
+            logger.info(f"✅ 止损订单设置成功: {sl_algo_id} (自定义ID: {sl_cl_ord_id})")
+            result['algo_ids'].append(sl_algo_id)
+            result['algo_cl_ord_ids'].append(sl_cl_ord_id)
         else:
             logger.error(f"❌ 止损订单设置失败: {sl_response}")
-            return False
+            return result
         
         # 设置止盈订单
+        tp_cl_ord_id = generate_unique_cl_ord_id(f"{side}_tp_")
         tp_params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -515,22 +658,27 @@ def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_
             'sz': str(amount),
             'tpTriggerPx': str(take_profit_price),
             'tpOrdPx': '-1',
+            'algoClOrdId': tp_cl_ord_id  # 添加止盈订单自定义ID
         }
         
-        logger.info("🎯 设置止盈订单...")
+        logger.info(f"🎯 设置止盈订单 (自定义ID: {tp_cl_ord_id})...")
         tp_response = exchange.private_post_trade_order_algo(tp_params)
         
         if tp_response and tp_response.get('code') == '0':
             tp_algo_id = tp_response['data'][0]['algoId'] if tp_response.get('data') else 'Unknown'
-            logger.info(f"✅ 止盈订单设置成功: {tp_algo_id}")
-            return True
+            logger.info(f"✅ 止盈订单设置成功: {tp_algo_id} (自定义ID: {tp_cl_ord_id})")
+            result['algo_ids'].append(tp_algo_id)
+            result['algo_cl_ord_ids'].append(tp_cl_ord_id)
+            return result
         else:
             logger.error(f"❌ 止盈订单设置失败: {tp_response}")
-            return False
+            # 如果止盈设置失败，尝试撤销已设置的止损
+            cancel_sl_tp_orders([sl_algo_id], [sl_cl_ord_id])
+            return result
             
     except Exception as e:
         logger.error(f"分开设置止损止盈失败: {str(e)}")
-        return False
+        return result
 
 def run_short_sl_tp_test():
     """运行空单止盈止损测试流程"""
@@ -584,6 +732,9 @@ def run_short_sl_tp_test():
         return False
     
     short_order_id = short_order_result['order_id']
+    short_cl_ord_id = short_order_result['cl_ord_id']
+    initial_algo_ids = short_order_result['algo_ids']
+    initial_algo_cl_ord_ids = short_order_result['algo_cl_ord_ids']
     
     # 等待空单成交
     if not wait_for_order_fill(short_order_id, 30):
@@ -607,14 +758,21 @@ def run_short_sl_tp_test():
     time.sleep(3)  # 给系统一些时间处理止损止盈订单
     
     # 方法1: 通过主订单查询止损止盈信息
-    has_sl_tp = check_sl_tp_from_main_order(short_order_id)
+    has_sl_tp = check_sl_tp_from_main_order(short_order_id, short_cl_ord_id)
+    sl_tp_ids = {
+        'algo_ids': initial_algo_ids,
+        'algo_cl_ord_ids': initial_algo_cl_ord_ids
+    }
+    
     if not has_sl_tp:
         logger.warning("⚠️ 通过主订单未发现止损止盈信息，尝试分开设置...")
         
         # 备选方案：分开设置止损止盈
         recalculated_sl, recalculated_tp = calculate_stop_loss_take_profit_prices('short', short_position['entry_price'])
         
-        if set_sl_tp_separately('short', short_position['size'], recalculated_sl, recalculated_tp):
+        sl_tp_ids = set_sl_tp_separately('short', short_position['size'], recalculated_sl, recalculated_tp)
+        
+        if sl_tp_ids['algo_ids'] or sl_tp_ids['algo_cl_ord_ids']:
             logger.info("✅ 通过分开设置成功创建止损止盈订单")
             time.sleep(2)
             # 检查分开设置的订单
@@ -638,17 +796,21 @@ def run_short_sl_tp_test():
     time.sleep(5)
 
     # 取消当前止盈止损单
-    # 先获取当前主订单关联的algoId列表
-    algo_ids = get_algo_orders_from_main_order(short_order_id)  # main_order_id是你的主订单ID
+    # 先获取当前主订单关联的algoId和algoClOrdId列表
+    algo_info = get_algo_orders_from_main_order(short_order_id, short_cl_ord_id)
+    # 合并初始获取的ID和后续查询到的ID，提高成功率
+    all_algo_ids = list(set(sl_tp_ids['algo_ids'] + algo_info['algo_ids']))
+    all_algo_cl_ord_ids = list(set(sl_tp_ids['algo_cl_ord_ids'] + algo_info['algo_cl_ord_ids']))
+    
     # 精准撤销
-    if algo_ids:
-        if cancel_sl_tp_orders(algo_ids):
-            logger.info(f"✅ algo id:{algo_ids},止盈止损单取消命令已执行OK")
+    if all_algo_ids or all_algo_cl_ord_ids:
+        if cancel_sl_tp_orders(all_algo_ids, all_algo_cl_ord_ids):
+            logger.info(f"✅ 止盈止损单取消命令已执行OK (algoIds: {all_algo_ids}, 自定义IDs: {all_algo_cl_ord_ids})")
         else:
-            logger.error(f"❌ algo id:{algo_ids},止盈止损单取消失败")
+            logger.error(f"❌ 止盈止损单取消失败 (algoIds: {all_algo_ids}, 自定义IDs: {all_algo_cl_ord_ids})")
             return False
     else:
-        logger.info("✅ 没有找到需要撤销的止损止盈订单(无有效algoId)")
+        logger.info("✅ 没有找到需要撤销的止损止盈订单(无有效algoId或algoClOrdId)")
 
     
     # 确认止盈止损单已取消
@@ -675,7 +837,8 @@ def run_short_sl_tp_test():
     logger.info(f"📊 重新计算止损: {new_sl:.2f}, 止盈: {new_tp:.2f}")
     
     # 重新设置止盈止损
-    if not set_sl_tp_separately('short', short_position['size'], new_sl, new_tp):
+    sl_tp_ids = set_sl_tp_separately('short', short_position['size'], new_sl, new_tp)
+    if not sl_tp_ids['algo_ids'] and not sl_tp_ids['algo_cl_ord_ids']:
         logger.error("❌ 重新设置止盈止损单失败")
         return False
     
