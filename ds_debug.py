@@ -803,13 +803,16 @@ def cancel_all_sl_tp_orders():
             for order in orders:
                 algo_id = order.get('algoId')
                 if algo_id:
-                    # 撤销单个条件单
-                    cancel_params = {
-                        'instId': inst_id,
-                        'algoId': algo_id,
-                    }
+                    # 撤销单个条件单 - 使用正确的CCXT方法
+                    cancel_params = [
+                        {
+                            'algoId': algo_id,
+                            'instId': inst_id,
+                        }
+                    ]
                     
-                    cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+                    # 使用批量撤销条件单的API
+                    cancel_response = exchange.private_post_trade_cancel_algos(cancel_params)
                     
                     if cancel_response and cancel_response.get('code') == '0':
                         logger.info(f"✅ 已撤销条件单: {algo_id}")
@@ -834,14 +837,18 @@ def cancel_specific_algo_order(algo_id: str):
     try:
         inst_id = get_correct_inst_id()
         
-        cancel_params = {
-            'instId': inst_id,
-            'algoId': algo_id,
-        }
+        # 使用批量撤销API，即使只有一个订单
+        cancel_params = [
+            {
+                'algoId': algo_id,
+                'instId': inst_id,
+            }
+        ]
         
         logger.info(f"🔄 撤销特定条件单: {algo_id}")
         
-        response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+        # 使用批量撤销条件单的API
+        response = exchange.private_post_trade_cancel_algos(cancel_params)
         
         if response and response.get('code') == '0':
             logger.info(f"✅ 条件单撤销成功: {algo_id}")
@@ -853,6 +860,7 @@ def cancel_specific_algo_order(algo_id: str):
     except Exception as e:
         logger.error(f"撤销特定条件单失败: {str(e)}")
         return False
+
 
 def cancel_existing_orders():
     """取消现有的订单"""
