@@ -46,17 +46,19 @@ def verify_position_closed(timeout: int = 10) -> bool:
     return False
 
 def create_limit_close_order(side: str, amount: float) -> Optional[str]:
-    """创建限价平仓订单"""
+    """创建限价平仓订单 - 改进版本"""
     try:
         inst_id = get_correct_inst_id()
         current_price = get_current_price()
         
-        # 根据方向确定限价价格
+        # 根据方向确定限价价格 - 使用更合理的价格
         if side == 'short':  # 平空单，买入
-            limit_price = current_price * 0.999  # 比当前价稍低
+            # 对于空单平仓，使用比当前价格稍高的价格，确保快速成交
+            limit_price = current_price * 1.001  # 比当前价高0.1%
             close_side = 'buy'
         else:  # 平多单，卖出
-            limit_price = current_price * 1.001  # 比当前价稍高
+            # 对于多单平仓，使用比当前价格稍低的价格
+            limit_price = current_price * 0.999  # 比当前价低0.1%
             close_side = 'sell'
         
         params = {
@@ -69,7 +71,7 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         }
         
         log_order_params("限价平仓", params, "create_limit_close_order")
-        logger.info(f"🔄 执行{side}仓位限价平仓: {amount} 张 @ {limit_price:.2f}")
+        logger.info(f"🔄 执行{side}仓位限价平仓: {amount} 张 @ {limit_price:.2f} (当前价: {current_price:.2f})")
         
         response = exchange.private_post_trade_order(params)
         log_api_response(response, "限价平仓")
@@ -354,7 +356,7 @@ def run_short_sl_tp_test():
     logger.info("🔹 阶段4: 限价平仓")
     logger.info("-" * 40)
     
-    # 使用限价平仓
+    # 使用改进的限价平仓
     close_order_id = create_limit_close_order('short', short_position['size'])
     
     if close_order_id:
