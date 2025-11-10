@@ -61,16 +61,16 @@ logger = TestLogger()
 class TestConfig:
     def __init__(self):
         self.symbol = 'BTC/USDT:USDT'
-        self.leverage = 5  # 杠杆
-        self.test_mode = False  # 真实交易
+        self.leverage = 5
+        self.test_mode = False
         self.margin_mode = 'isolated'
-        self.base_usdt_amount = 1  # 1 USDT保证金
-        self.min_contract_size = 0.0001  # 最小0.0001张合约
-        self.stop_loss_percent = 0.03  # 3% 止损
-        self.take_profit_percent = 0.05  # 5% 止盈
-        self.price_offset_percent = 0.001  # 限价单价格偏移
-        self.wait_time_seconds = 10  # 等待10秒后平仓
-        self.contract_size = 0.01  # BTC合约大小，1张=0.01 BTC
+        self.base_usdt_amount = 1
+        self.min_contract_size = None  # 将在运行时从市场信息获取
+        self.stop_loss_percent = 0.03
+        self.take_profit_percent = 0.05
+        self.price_offset_percent = 0.001
+        self.wait_time_seconds = 10
+        self.contract_size = 0.01
 
 # 账号配置
 def get_account_config(account_name="default"):
@@ -142,7 +142,15 @@ def setup_exchange():
     """设置交易所参数"""
     try:
         logger.info("🔄 设置交易所参数...")
+
+        # 先获取市场信息
+        market_info = get_lot_size_info()
+        min_amount = market_info['min_amount']
+        logger.info(f"📊 最小交易单位: {min_amount}")
         
+        # 更新配置
+        config.min_contract_size = min_amount
+
         # 设置杠杆
         leverage_params = {
             'symbol': config.symbol,
@@ -175,6 +183,78 @@ def get_current_price():
         logger.error(f"获取价格失败: {str(e)}")
         return 0
     
+def get_lot_size_info():
+    """获取交易对的最小交易单位信息"""
+    try:
+        markets = exchange.load_markets()
+        symbol = config.symbol
+        
+        if symbol in markets:
+            market = markets[symbol]
+            limits = market.get('limits', {})
+            amount_limits = limits.get('amount', {})
+            
+            min_amount = amount_limits.get('min', config.min_contract_size)
+            precision = market.get('precision', {}).get('amount', 4)
+            
+            logger.info(f"📊 市场交易量信息:")
+            logger.info(f"   最小交易量: {min_amount}")
+            logger.info(f"   数量精度: {precision}")
+            
+            return {
+                'min_amount': min_amount,
+                'precision': precision,
+                'market_info': market
+            }
+        else:
+            logger.warning(f"⚠️ 未找到交易对 {symbol} 的市场信息")
+            return {
+                'min_amount': config.min_contract_size,
+                'precision': 4
+            }
+            
+    except Exception as e:
+        logger.error(f"获取市场信息失败: {str(e)}")
+        return {
+            'min_amount': config.min_contract_size,
+            'precision': 4
+        }
+
+def adjust_position_size(calculated_size: float) -> float:
+    """根据市场规则调整仓位大小"""
+    try:
+        market_info = get_lot_size_info()
+        min_amount = market_info['min_amount']
+        precision = market_info['precision']
+        
+        logger.info(f"📏 调整仓位大小:")
+        logger.info(f"   计算大小: {calculated_size}")
+        logger.info(f"   最小交易量: {min_amount}")
+        logger.info(f"   精度: {precision}")
+        
+        # 确保不低于最小交易量
+        if calculated_size < min_amount:
+            adjusted_size = min_amount
+            logger.info(f"   调整后: {adjusted_size} (使用最小值)")
+        else:
+            # 根据精度调整
+            adjusted_size = round(calculated_size, precision)
+            logger.info(f"   调整后: {adjusted_size}")
+        
+        # 验证是否为最小交易量的整数倍
+        if min_amount > 0:
+            multiple = adjusted_size / min_amount
+            if not multiple.is_integer():
+                # 如果不是整数倍，向下取整到最近的倍数
+                adjusted_size = (int(multiple) * min_amount)
+                logger.info(f"   最终调整: {adjusted_size} (lot size的整数倍)")
+        
+        return adjusted_size
+        
+    except Exception as e:
+        logger.error(f"调整仓位大小失败: {str(e)}")
+        return calculated_size
+
 def calculate_position_size():
     """计算仓位大小 - 精确计算最小可用仓位"""
     try:
@@ -192,8 +272,8 @@ def calculate_position_size():
         if contract_size < config.min_contract_size:
             contract_size = config.min_contract_size
             
-        # 根据精度调整（4位小数）
-        contract_size = round(contract_size, 4)
+        # 根据市场规则调整大小
+        contract_size = adjust_position_size(contract_size)
         
         actual_btc = contract_size * config.contract_size
         logger.info(f"📏 仓位计算详情:")
@@ -630,8 +710,12 @@ def test_minimum_order():
     try:
         logger.info("🧪 测试最小订单大小...")
         
-        # 尝试使用不同的订单大小
-        test_sizes = [0.0001, 0.0005, 0.001, 0.01]
+        # 先获取市场信息
+        market_info = get_lot_size_info()
+        min_amount = market_info['min_amount']
+        
+        # 尝试使用不同的订单大小，从最小交易量开始
+        test_sizes = [min_amount, min_amount * 2, min_amount * 5]
         
         for size in test_sizes:
             logger.info(f"🧪 测试订单大小: {size} 张")
