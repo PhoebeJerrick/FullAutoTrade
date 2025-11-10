@@ -668,7 +668,7 @@ def check_sl_tp_orders():
         params = {
             'instType': 'SWAP',  # 永续合约
             'instId': inst_id,   # 只查询特定品种
-            'ordType': 'conditional',  # 条件单类型
+            'ordType': 'conditional,oco',  # 条件单类型
         }
         
         logger.info(f"📋 查询 {inst_id} 的止损止盈条件单...")
