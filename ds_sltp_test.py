@@ -342,7 +342,9 @@ def create_universal_order(
             logger.info(f"✅ {action_name}创建成功: {result['order_id']}")
             
             # 提取算法订单ID
-            for data in response.get('data', [1:]):  # 跳过主订单数据
+            data_list = response.get('data', [])  # 先获取数据列表，默认空列表
+            # 跳过主订单数据（第一个元素），遍历剩余的算法订单
+            for data in data_list[1:]:
                 if 'algoId' in data:
                     result['algo_ids'].append(data['algoId'])
                     logger.info(f"✅ 条件单创建成功: {data['algoId']}")
