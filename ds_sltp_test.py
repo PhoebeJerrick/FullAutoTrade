@@ -298,31 +298,32 @@ def create_universal_order(
         if ord_type == 'limit' and price is not None:
             params['px'] = str(price)
             logger.info(f"💰 限价单价格: {price:.2f}")
-        
-        # 构建止损止盈参数（统一放在algo_ords中）
-        algo_ords = []
-        opposite_side = 'buy' if side == 'sell' else 'sell'  # 止损止盈方向统一为相反方向
-        
-        # 批量处理止损和止盈（修正后）
-        for ord_type, trigger_price in [
-            ('stop_loss', stop_loss_price),
-            ('take_profit', take_profit_price)
-        ]:
-            if trigger_price is not None:
-                # 正确的参数名映射
-                trigger_key = 'slTriggerPx' if ord_type == 'stop_loss' else 'tpTriggerPx'
-                ord_key = 'slOrdPx' if ord_type == 'stop_loss' else 'tpOrdPx'
                 
-                algo = {
-                    trigger_key: str(trigger_price),  # 使用正确的触发价参数名
-                    ord_key: '-1',  # 使用正确的委托价参数名
-                    'sz': str(amount),
-                    'side': opposite_side,
-                    'algoOrdType': 'conditional'
-                }
-                algo_ords.append(algo)
-                logger.info(f"{'🛡️ 止损' if ord_type == 'stop_loss' else '🎯 止盈'}: {trigger_price:.2f} (方向: {opposite_side})")
-        
+        # 整合止损和止盈到同一个algo参数（兼容单/双参数场景）
+        algo_ords = []
+        opposite_side = 'buy' if side == 'sell' else 'sell'  # 止损止盈方向为相反方向
+        algo = {}  # 初始化空的算法订单配置
+
+        # 添加止损参数（如果存在）
+        if stop_loss_price is not None:
+            algo['slTriggerPx'] = str(stop_loss_price)
+            algo['slOrdPx'] = '-1'  # 市价止损
+            logger.info(f"🛡️ 止损: {stop_loss_price:.2f} (方向: {opposite_side})")
+
+        # 添加止盈参数（如果存在）
+        if take_profit_price is not None:
+            algo['tpTriggerPx'] = str(take_profit_price)
+            algo['tpOrdPx'] = '-1'  # 市价止盈
+            logger.info(f"🎯 止盈: {take_profit_price:.2f} (方向: {opposite_side})")
+
+        # 如果存在止损或止盈，补充共用参数并添加到列表
+        if algo:  # 只有当至少有一个参数时才处理
+            # 补充共用参数（数量、方向、订单类型）
+            algo['sz'] = str(amount)
+            algo['side'] = opposite_side
+            algo['algoOrdType'] = 'conditional'
+            algo_ords.append(algo)  # 此时algo_ords最多只有一个元素    
+
         # 添加止损止盈到主订单参数
         if algo_ords:
             params['attachAlgoOrds'] = algo_ords
