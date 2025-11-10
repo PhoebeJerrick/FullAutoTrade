@@ -1,14 +1,48 @@
 #!/usr/bin/env python3
-"""
-ds_test.py - 改进的交易测试程序
-流程：
-1. 开1USDT保证金BTC空单，同时设置止盈止损(1%)
-2. 10秒后限价平仓
-3. 开1USDT保证金BTC多单
-4. 检查仓位信息，确认无止损止盈
-5. 设置止盈(1%)
-6. 设置止损(1%)
-"""
+
+# ds_debug.py - 改进的交易测试程序
+# 流程：
+# 开始
+# │
+# ├─ 初始化环境
+# │  ├─ 加载环境变量（API密钥等）
+# │  ├─ 初始化日志系统（TestLogger）
+# │  ├─ 加载交易配置（TestConfig：交易对、杠杆、保证金模式等）
+# │  └─ 初始化交易所连接（ccxt.okx）
+# │
+# ├─ 交易所设置（setup_exchange）
+# │  ├─ 获取市场信息（最小交易单位、精度等）
+# │  ├─ 设置杠杆倍数
+# │  └─ 查看USDT余额
+# │
+# ├─ 核心交易流程
+# │  │
+# │  ├─ 步骤1：开BTC空单（带止盈止损1%）
+# │  │  ├─ 计算仓位大小（calculate_position_size）
+# │  │  ├─ 获取当前价格（get_current_price）
+# │  │  ├─ 计算止损/止盈价格（calculate_stop_loss_take_profit_prices）
+# │  │  └─ 创建带止损止盈的空单（create_order_with_sl_tp）
+# │  │
+# │  ├─ 步骤2：10秒后限价平仓
+# │  │  ├─ 等待10秒（time.sleep）
+# │  │  └─ 市价平仓（close_position）
+# │  │
+# │  ├─ 步骤3：开BTC多单（无止损止盈）
+# │  │  ├─ 计算仓位大小
+# │  │  └─ 创建无止损止盈的多单（create_order_without_sl_tp）
+# │  │
+# │  ├─ 步骤4：检查仓位信息
+# │  │  ├─ 获取当前持仓（get_current_position）
+# │  │  └─ 确认无止损止盈（check_sl_tp_orders）
+# │  │
+# │  ├─ 步骤5：设置止盈（1%）
+# │  │  └─ 调用set_take_profit_order
+# │  │
+# │  └─ 步骤6：设置止损（1%）
+# │     └─ 调用set_stop_loss_order
+# │
+# 结束
+
 
 import os
 import time
