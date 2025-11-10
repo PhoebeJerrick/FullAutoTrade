@@ -224,35 +224,61 @@ def check_algo_order_detail(algo_id: str) -> bool:
         logger.error(f"查询算法订单完整信息失败: {str(e)}")
         return False
 
-def get_algo_orders_from_main_order(order_id: str) -> List[str]:
-    """
-    从主订单获取所有算法订单ID
-    """
+def cancel_sl_tp_orders(algo_ids: List[str]) -> bool:
+    """通过algoId列表撤销止损止盈订单"""
+    if not algo_ids:
+        logger.warning("⚠️ 没有需要撤销的algoId")
+        return False
+        
+    success = True
+    for algo_id in algo_ids:
+        try:
+            params = {
+                'algoId': algo_id,
+                'instId': get_correct_inst_id()
+            }
+            response = exchange.private_post_trade_cancel_order_algo(params)
+            if response.get('code') != '0':
+                logger.error(f"❌ 撤销算法订单 {algo_id} 失败: {response}")
+                success = False
+            else:
+                logger.info(f"✅ 撤销算法订单 {algo_id} 成功")
+        except Exception as e:
+            logger.error(f"撤销算法订单 {algo_id} 出错: {str(e)}")
+            success = False
+    return success
+
+def get_algo_orders_from_main_order(order_id: str, retry=3, delay=2) -> List[str]:
+    """从主订单获取所有算法订单ID，增加重试机制"""
     try:
         algo_ids = []
-        
-        params = {
-            'instId': get_correct_inst_id(),
-            'ordId': order_id,
-        }
-        
-        response = exchange.private_get_trade_order(params)
-        
-        if response and response.get('code') == '0':
-            orders = response.get('data', [])
-            if orders:
-                order_info = orders[0]
+        for _ in range(retry):
+            params = {
+                'instId': get_correct_inst_id(),
+                'ordId': order_id,
+            }
+            response = exchange.private_get_trade_order(params)
+            
+            if response and response.get('code') == '0' and response.get('data'):
+                order_info = response['data'][0]
                 attach_algo_ords = order_info.get('attachAlgoOrds', [])
-                
                 for algo_ord in attach_algo_ords:
-                    if 'algoId' in algo_ord:
-                        algo_ids.append(algo_ord['algoId'])
+                    # 尝试多种可能的字段名（如algoId、algo_id等）
+                    algo_id = algo_ord.get('algoId') or algo_ord.get('algo_id')
+                    if algo_id:
+                        algo_ids.append(algo_id)
+                if algo_ids:  # 成功获取则退出重试
+                    break
+            time.sleep(delay)
         
+        if not algo_ids:
+            logger.warning(f"⚠️ 多次尝试后仍未获取到algoId，主订单ID: {order_id}")
         return algo_ids
         
     except Exception as e:
         logger.error(f"从主订单获取算法订单ID失败: {str(e)}")
         return []
+
 
 def create_universal_order(
     side: str, 
@@ -346,13 +372,22 @@ def create_universal_order(
             result['order_id'] = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
             logger.info(f"✅ {action_name}创建成功: {result['order_id']}")
             
-            # 提取算法订单ID
-            data_list = response.get('data', [])  # 先获取数据列表，默认空列表
-            # 跳过主订单数据（第一个元素），遍历剩余的算法订单
-            for data in data_list[1:]:
-                if 'algoId' in data:
-                    result['algo_ids'].append(data['algoId'])
-                    logger.info(f"✅ 条件单创建成功: {data['algoId']}")
+            # 在create_universal_order函数中，替换原提取algoId的代码
+            if response and response.get('code') == '0' and response.get('data'):
+                # 遍历所有数据，不使用错误的切片
+                for data in response['data']:
+                    # 检查是否存在附加的算法订单信息
+                    if 'attachAlgoOrds' in data:
+                        for algo_ord in data['attachAlgoOrds']:
+                            if 'algoId' in algo_ord:
+                                algo_id = algo_ord['algoId']
+                                result['algo_ids'].append(algo_id)
+                                logger.info(f"✅ 条件单创建成功: {algo_id}")
+                    # 同时检查当前data是否直接包含algoId（兼容不同返回格式）
+                    elif 'algoId' in data:
+                        algo_id = data['algoId']
+                        result['algo_ids'].append(algo_id)
+                        logger.info(f"✅ 条件单创建成功: {algo_id}")
             
             # 验证止损止盈设置
             if verify_sl_tp and algo_ords:
@@ -601,14 +636,20 @@ def run_short_sl_tp_test():
     
     logger.info("⏳ 等待5秒后取消止盈止损单...")
     time.sleep(5)
-    
+
     # 取消当前止盈止损单
-    logger.info("🔄 取消当前止盈止损单...")
-    if cancel_all_sl_tp_orders():
-        logger.info("✅ 止盈止损单取消命令已执行")
+    # 先获取当前主订单关联的algoId列表
+    algo_ids = get_algo_orders_from_main_order(short_order_id)  # main_order_id是你的主订单ID
+    # 精准撤销
+    if algo_ids:
+        if cancel_sl_tp_orders(algo_ids):
+            logger.info(f"✅ algo id:{algo_ids},止盈止损单取消命令已执行OK")
+        else:
+            logger.error(f"❌ algo id:{algo_ids},止盈止损单取消失败")
+            return False
     else:
-        logger.error("❌ 止盈止损单取消失败")
-        return False
+        logger.info("✅ 没有找到需要撤销的止损止盈订单(无有效algoId)")
+
     
     # 确认止盈止损单已取消
     logger.info("🔍 确认止盈止损单已取消...")
