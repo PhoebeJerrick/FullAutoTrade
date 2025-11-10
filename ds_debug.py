@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# ds_debug.py - 改进的交易测试程序
+# ds_debug.py - 单项止盈止损测试-conditional
 # 流程：
 # 开始
 # │
