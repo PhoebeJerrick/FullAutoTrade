@@ -21,7 +21,7 @@ from ds_debug import TestLogger, TestConfig, get_account_config, exchange, confi
 from ds_debug import (
     log_order_params, log_api_response, get_correct_inst_id, setup_exchange,
     get_current_price, get_lot_size_info, adjust_position_size, calculate_position_size,
-    calculate_stop_loss_take_profit_prices, create_order_with_sl_tp, create_order_without_sl_tp,
+    calculate_stop_loss_take_profit_prices, create_order_without_sl_tp,
     close_position, wait_for_order_fill, get_current_position, check_sl_tp_orders,
     cancel_all_sl_tp_orders, cancel_existing_orders, wait_for_position, cleanup_after_test
 )
@@ -93,7 +93,7 @@ def enforce_lot_size_requirement(position_size: float) -> float:
     try:
         # 获取市场信息
         market_info = get_lot_size_info()
-        min_amount = market_info.get('min_amount', 0.001)  # BTC/USDT最小交易量通常是0.001
+        min_amount = market_info.get('min_amount', 0.001)
         
         logger.info(f"📏 交易所最小交易量: {min_amount}")
         logger.info(f"📏 原始仓位大小: {position_size}")
@@ -117,6 +117,124 @@ def enforce_lot_size_requirement(position_size: float) -> float:
     except Exception as e:
         logger.error(f"强制调整仓位大小失败: {str(e)}")
         return position_size
+
+def create_short_with_sl_tp_fixed(amount: float, stop_loss_price: float, take_profit_price: float):
+    """
+    修复版的创建空单并设置止损止盈函数
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 基础参数 - 空单开仓
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': 'sell',  # 空单
+            'ordType': 'market',
+            'sz': str(amount),
+        }
+        
+        # 修复：正确设置止损止盈参数
+        # 对于空单，止损是价格上涨到某个价位，止盈是价格下跌到某个价位
+        # 平仓方向与开仓方向相反：空单平仓是买入
+        params['attachAlgoOrds'] = [
+            {
+                'tpTriggerPx': str(take_profit_price),  # 止盈触发价格
+                'tpOrdPx': '-1',  # 市价止盈
+                'slTriggerPx': str(stop_loss_price),    # 止损触发价格  
+                'slOrdPx': '-1',  # 市价止损
+                'sz': str(amount),
+                'side': 'buy',  # 空单的止损止盈方向是买入平仓
+                'algoOrdType': 'conditional'
+            }
+        ]
+        
+        log_order_params("空单带止损止盈(修复版)", params, "create_short_with_sl_tp_fixed")
+        logger.info(f"🎯 执行空单开仓: {amount} 张")
+        logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f}")
+        logger.info(f"🎯 止盈价格: {take_profit_price:.2f}")
+        
+        # 创建订单
+        response = exchange.private_post_trade_order(params)
+        
+        log_api_response(response, "create_short_with_sl_tp_fixed")
+        
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ 空单创建成功: {order_id}")
+            
+            # 检查是否有止损止盈订单信息
+            if 'attachAlgoOrds' in params and response.get('data'):
+                for algo_ord in response['data']:
+                    if 'algoId' in algo_ord:
+                        logger.info(f"✅ 止损止盈订单创建成功: {algo_ord['algoId']}")
+            
+            return response
+        else:
+            logger.error(f"❌ 空单创建失败: {response}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"空单开仓失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return None
+
+def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_profit_price: float):
+    """
+    分开设置止损和止盈订单 - 备选方案
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        logger.info("🔄 分开设置止损止盈订单...")
+        
+        # 设置止损订单
+        sl_params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': 'buy' if side == 'short' else 'sell',  # 平仓方向
+            'ordType': 'conditional',
+            'sz': str(amount),
+            'slTriggerPx': str(stop_loss_price),
+            'slOrdPx': '-1',  # 市价止损
+        }
+        
+        logger.info("🛡️ 设置止损订单...")
+        sl_response = exchange.private_post_trade_order_algo(sl_params)
+        
+        if sl_response and sl_response.get('code') == '0':
+            sl_algo_id = sl_response['data'][0]['algoId'] if sl_response.get('data') else 'Unknown'
+            logger.info(f"✅ 止损订单设置成功: {sl_algo_id}")
+        else:
+            logger.error(f"❌ 止损订单设置失败: {sl_response}")
+            return False
+        
+        # 设置止盈订单
+        tp_params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': 'buy' if side == 'short' else 'sell',  # 平仓方向
+            'ordType': 'conditional',
+            'sz': str(amount),
+            'tpTriggerPx': str(take_profit_price),
+            'tpOrdPx': '-1',  # 市价止盈
+        }
+        
+        logger.info("🎯 设置止盈订单...")
+        tp_response = exchange.private_post_trade_order_algo(tp_params)
+        
+        if tp_response and tp_response.get('code') == '0':
+            tp_algo_id = tp_response['data'][0]['algoId'] if tp_response.get('data') else 'Unknown'
+            logger.info(f"✅ 止盈订单设置成功: {tp_algo_id}")
+            return True
+        else:
+            logger.error(f"❌ 止盈订单设置失败: {tp_response}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"分开设置止损止盈失败: {str(e)}")
+        return False
 
 def run_short_sl_tp_test():
     """
@@ -165,11 +283,9 @@ def run_short_sl_tp_test():
     # 取消现有订单
     cancel_existing_orders()
     
-    # 使用原有的稳定函数开空单
-    short_order_result = create_order_with_sl_tp(
-        side='sell',
+    # 使用修复版的函数开空单
+    short_order_result = create_short_with_sl_tp_fixed(
         amount=position_size,
-        order_type='market',
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price
     )
@@ -199,12 +315,29 @@ def run_short_sl_tp_test():
     logger.info("-" * 40)
     
     logger.info("📋 检查止盈止损订单...")
+    time.sleep(3)  # 给系统一些时间处理止损止盈订单
+    
     has_sl_tp = check_sl_tp_orders()
     if not has_sl_tp:
-        logger.error("❌ 未发现止盈止损订单")
-        return False
-    
-    logger.info("✅ 止盈止损订单设置正确")
+        logger.warning("⚠️ 未发现止损止盈订单，尝试分开设置...")
+        
+        # 备选方案：分开设置止损止盈
+        recalculated_sl, recalculated_tp = calculate_stop_loss_take_profit_prices('short', short_position['entry_price'])
+        
+        if set_sl_tp_separately('short', short_position['size'], recalculated_sl, recalculated_tp):
+            logger.info("✅ 通过分开设置成功创建止损止盈订单")
+            time.sleep(2)  # 等待订单处理
+            has_sl_tp = check_sl_tp_orders()
+            if has_sl_tp:
+                logger.info("✅ 止损止盈订单设置正确")
+            else:
+                logger.error("❌ 即使分开设置也未能创建止损止盈订单")
+                return False
+        else:
+            logger.error("❌ 分开设置止损止盈也失败")
+            return False
+    else:
+        logger.info("✅ 止损止盈订单设置正确")
     
     # 阶段3: 等待5秒
     logger.info("")
