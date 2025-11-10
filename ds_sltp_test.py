@@ -439,8 +439,8 @@ def run_short_sl_tp_test():
     time.sleep(3)  # 给系统一些时间处理止损止盈订单
     
     # 方法1: 通过主订单查询止损止盈信息
-    has_sl_tp = check_sl_tp_from_main_order(short_order_id)
-    
+    # has_sl_tp = check_sl_tp_from_main_order(short_order_id)
+    has_sl_tp = check_algo_order_detail(short_order_id)
     if not has_sl_tp:
         logger.warning("⚠️ 通过主订单未发现止损止盈信息，尝试分开设置...")
         
