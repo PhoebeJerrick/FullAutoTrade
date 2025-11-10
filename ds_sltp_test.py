@@ -31,9 +31,21 @@ from ds_debug import (
 # 创建专用logger
 logger = TestLogger(log_dir="../Output/short_sl_tp_test", file_name="Short_SL_TP_Test_{timestamp}.log")
 
-def generate_unique_cl_ord_id(prefix: str = "sl_tp_") -> str:
-    """生成唯一的自定义订单ID，用于追踪止损止盈订单"""
-    return f"{prefix}{uuid.uuid4().hex[:16]}"
+def generate_cl_ord_id(side: str) -> str:
+    """
+    生成符合OKX规范的clOrdId：
+    - 仅包含字母和数字
+    - 长度1-32位
+    - 前缀区分买卖方向，确保唯一性
+    """
+    # 方向前缀（纯字母）
+    prefix = "SELL" if side == "sell" else "BUY"
+    # 生成UUID并移除所有非字母数字字符（UUID本身包含字母和数字）
+    unique_str = str(uuid.uuid4()).replace('-', '')  # 去掉UUID中的横线
+    # 组合前缀和唯一字符串，总长度控制在32位以内
+    cl_ord_id = f"{prefix}{unique_str}"[:32]  # 确保不超过32位
+    return cl_ord_id
+
 
 def verify_position_closed(timeout: int = 10) -> bool:
     """验证仓位是否已平"""
@@ -66,7 +78,7 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
             close_side = 'sell'
         
         # 生成唯一的自定义订单ID
-        cl_ord_id = generate_unique_cl_ord_id(f"close_{side}_")
+        cl_ord_id = generate_cl_ord_id(side)
         
         params = {
             'instId': inst_id,
@@ -412,7 +424,7 @@ def create_universal_order(
         logger.info(f"📏 自动计算仓位大小: {amount}" if amount is None else f"📏 仓位大小: {amount}")
         
         # 生成主订单自定义ID
-        cl_ord_id = generate_unique_cl_ord_id(f"{side}_")
+        cl_ord_id = generate_cl_ord_id(side)
         
         # 基础参数构建
         params = {
@@ -453,7 +465,7 @@ def create_universal_order(
             algo['side'] = opposite_side
             algo['algoOrdType'] = 'conditional'
             # 为算法订单添加自定义ID（关键改进点）
-            algo['algoClOrdId'] = generate_unique_cl_ord_id(f"{side}_sl_tp_")
+            algo['algoClOrdId'] = generate_cl_ord_id(side)
             logger.info(f"📌 算法订单自定义ID: {algo['algoClOrdId']}")
             algo_ords.append(algo)  # 此时algo_ords最多只有一个元素    
 
@@ -624,7 +636,7 @@ def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_
         logger.info("🔄 分开设置止损止盈订单...")
         
         # 设置止损订单
-        sl_cl_ord_id = generate_unique_cl_ord_id(f"{side}_sl_")
+        sl_cl_ord_id = generate_cl_ord_id(side)
         sl_params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -649,7 +661,7 @@ def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_
             return result
         
         # 设置止盈订单
-        tp_cl_ord_id = generate_unique_cl_ord_id(f"{side}_tp_")
+        tp_cl_ord_id = generate_cl_ord_id(side)
         tp_params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
