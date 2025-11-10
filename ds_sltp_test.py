@@ -86,30 +86,42 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         logger.error(f"创建限价平仓订单失败: {str(e)}")
         return None
 
-def enforce_lot_size_requirement(position_size: float) -> float:
-    """强制确保仓位大小符合交易所的lot size要求"""
+
+def get_safe_position_size() -> float:
+    """
+    安全计算仓位大小，确保符合交易所要求
+    """
     try:
+        # 获取市场信息
         market_info = get_lot_size_info()
-        min_amount = market_info.get('min_amount', 0.001)
+        min_amount = market_info.get('min_amount', 0.01)
         
         logger.info(f"📏 交易所最小交易量: {min_amount}")
-        logger.info(f"📏 原始仓位大小: {position_size}")
         
+        # 使用原有的计算函数
+        calculated_size = calculate_position_size()
+        logger.info(f"📏 计算得到的仓位大小: {calculated_size}")
+        
+        # 确保不低于最小交易量
+        if calculated_size < min_amount:
+            logger.warning(f"⚠️ 仓位大小 {calculated_size} 小于最小交易量 {min_amount}，使用最小值")
+            return min_amount
+        
+        # 确保是min_amount的整数倍
         if min_amount > 0:
-            multiple = round(position_size / min_amount)
-            enforced_size = multiple * min_amount
+            # 使用整数除法确保是整数倍
+            multiple = int(calculated_size / min_amount)
+            safe_size = multiple * min_amount
             
-            if enforced_size < min_amount:
-                enforced_size = min_amount
-            
-            logger.info(f"📏 调整后仓位大小: {enforced_size} ({multiple}倍最小交易量)")
-            return enforced_size
+            logger.info(f"📏 安全仓位大小: {safe_size} ({multiple}倍最小交易量)")
+            return safe_size
         else:
-            return position_size
+            return calculated_size
             
     except Exception as e:
-        logger.error(f"强制调整仓位大小失败: {str(e)}")
-        return position_size
+        logger.error(f"安全计算仓位大小失败: {str(e)}")
+        # 返回最小交易量作为保底
+        return 0.01
 
 def check_sl_tp_from_main_order(order_id: str) -> bool:
     """
@@ -376,12 +388,7 @@ def run_short_sl_tp_test():
         return False
     
     # 3. 计算仓位大小
-    position_size = calculate_position_size()
-    logger.info(f"📏 计算得到的仓位大小: {position_size}")
-    
-    # 4. 强制确保仓位大小符合lot size要求
-    position_size = enforce_lot_size_requirement(position_size)
-    
+    position_size = get_safe_position_size()
     logger.info(f"🎯 最终使用的仓位大小: {position_size}")
     
     logger.info(f"📋 测试参数:")
@@ -439,8 +446,8 @@ def run_short_sl_tp_test():
     time.sleep(3)  # 给系统一些时间处理止损止盈订单
     
     # 方法1: 通过主订单查询止损止盈信息
-    # has_sl_tp = check_sl_tp_from_main_order(short_order_id)
-    has_sl_tp = check_algo_order_detail(short_order_id)
+    has_sl_tp = check_sl_tp_from_main_order(short_order_id)
+    # has_sl_tp = check_algo_order_detail(short_order_id)
     if not has_sl_tp:
         logger.warning("⚠️ 通过主订单未发现止损止盈信息，尝试分开设置...")
         
