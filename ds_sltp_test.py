@@ -256,10 +256,10 @@ def get_algo_orders_from_main_order(order_id: str) -> List[str]:
 def create_universal_order(
     side: str, 
     ord_type: str = 'market',
-    amount: float = None,
-    price: float = None,
-    stop_loss_price: float = None,
-    take_profit_price: float = None,
+    amount: Optional[float] = None,
+    price: Optional[float] = None,
+    stop_loss_price: Optional[float] = None,
+    take_profit_price: Optional[float] = None,
     verify_sl_tp: bool = True
 ) -> Dict[str, Any]:
     """
@@ -268,24 +268,23 @@ def create_universal_order(
     Args:
         side: 交易方向 'buy'（做多）或 'sell'（做空）
         ord_type: 订单类型 'market'（市价）或 'limit'（限价）
-        amount: 交易数量，如果为None则自动计算
+        amount: 交易数量，None则自动计算
         price: 限价单价格，市价单可忽略
         stop_loss_price: 止损价格，None表示不设置
         take_profit_price: 止盈价格，None表示不设置
         verify_sl_tp: 是否验证止损止盈设置
     
     Returns:
-        Dict containing order_id, response, and algo_ids if any
+        包含order_id, response, algo_ids和success状态的字典
     """
     try:
         inst_id = get_correct_inst_id()
         
-        # 自动计算仓位大小（如果未提供）
-        if amount is None:
-            amount = get_safe_position_size()
-            logger.info(f"📏 自动计算仓位大小: {amount}")
+        # 自动计算仓位大小
+        amount = amount or get_safe_position_size()
+        logger.info(f"📏 自动计算仓位大小: {amount}" if amount is None else f"📏 仓位大小: {amount}")
         
-        # 基础参数
+        # 基础参数构建
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
@@ -294,109 +293,76 @@ def create_universal_order(
             'sz': str(amount),
         }
         
-        # 设置限价单价格
+        # 限价单价格设置
         if ord_type == 'limit' and price is not None:
             params['px'] = str(price)
             logger.info(f"💰 限价单价格: {price:.2f}")
         
-        # 构建止损止盈参数
+        # 构建止损止盈参数（统一放在algo_ords中）
         algo_ords = []
+        opposite_side = 'buy' if side == 'sell' else 'sell'  # 止损止盈方向统一为相反方向
         
-        # 设置止损（如果提供）
-        if stop_loss_price is not None:
-            # 确定止损方向：做空止损是买入，做多止损是卖出
-            sl_side = 'buy' if side == 'sell' else 'sell'
-            sl_algo = {
-                'slTriggerPx': str(stop_loss_price),
-                'slOrdPx': '-1',  # 市价止损
-                'sz': str(amount),
-                'side': sl_side,
-                'algoOrdType': 'conditional'
-            }
-            algo_ords.append(sl_algo)
-            logger.info(f"🛡️ 设置止损: {stop_loss_price:.2f} (方向: {sl_side})")
+        # 批量处理止损和止盈
+        for ord_type, trigger_price in [
+            ('stop_loss', stop_loss_price),
+            ('take_profit', take_profit_price)
+        ]:
+            if trigger_price is not None:
+                algo = {
+                    f'{ord_type[:2]}TriggerPx': str(trigger_price),  # slTriggerPx/tpTriggerPx
+                    f'{ord_type[:2]}OrdPx': '-1',  # 市价止损止盈
+                    'sz': str(amount),
+                    'side': opposite_side,
+                    'algoOrdType': 'conditional'
+                }
+                algo_ords.append(algo)
+                logger.info(f"{'🛡️ 止损' if ord_type == 'stop_loss' else '🎯 止盈'}: {trigger_price:.2f} (方向: {opposite_side})")
         
-        # 设置止盈（如果提供）
-        if take_profit_price is not None:
-            # 确定止盈方向：做空止盈是买入，做多止盈是卖出
-            tp_side = 'buy' if side == 'sell' else 'sell'
-            tp_algo = {
-                'tpTriggerPx': str(take_profit_price),
-                'tpOrdPx': '-1',  # 市价止盈
-                'sz': str(amount),
-                'side': tp_side,
-                'algoOrdType': 'conditional'
-            }
-            algo_ords.append(tp_algo)
-            logger.info(f"🎯 设置止盈: {take_profit_price:.2f} (方向: {tp_side})")
-        
-        # 添加止损止盈参数到主订单
+        # 添加止损止盈到主订单参数
         if algo_ords:
             params['attachAlgoOrds'] = algo_ords
         
-        # 记录订单参数
+        # 日志与订单执行
         action_name = f"{'做多' if side == 'buy' else '做空'}{'市价' if ord_type == 'market' else '限价'}单"
         log_order_params(action_name, params, "create_universal_order")
-        
-        # 执行订单
         logger.info(f"🎯 执行{action_name}: {amount} 张")
-        if stop_loss_price or take_profit_price:
-            logger.info("📋 附带条件单: " + 
-                       ("止损 " if stop_loss_price else "") + 
-                       ("止盈" if take_profit_price else ""))
+        if algo_ords:
+            logger.info(f"📋 附带条件单: {'、'.join(['止损' if 'slTriggerPx' in a else '止盈' for a in algo_ords])}")
         
+        # 发送订单并处理响应
         response = exchange.private_post_trade_order(params)
         log_api_response(response, "create_universal_order")
         
-        result = {
-            'order_id': None,
-            'response': response,
-            'algo_ids': [],
-            'success': False
-        }
+        result = {'order_id': None, 'response': response, 'algo_ids': [], 'success': False}
         
         if response and response.get('code') == '0':
-            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
-            result['order_id'] = order_id
             result['success'] = True
+            result['order_id'] = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ {action_name}创建成功: {result['order_id']}")
             
-            logger.info(f"✅ {action_name}创建成功: {order_id}")
+            # 提取算法订单ID
+            for data in response.get('data', [1:]):  # 跳过主订单数据
+                if 'algoId' in data:
+                    result['algo_ids'].append(data['algoId'])
+                    logger.info(f"✅ 条件单创建成功: {data['algoId']}")
             
-            # 提取算法订单ID（如果有）
-            if len(response.get('data', [])) > 1:
-                for i in range(1, len(response['data'])):
-                    algo_data = response['data'][i]
-                    if 'algoId' in algo_data:
-                        algo_id = algo_data['algoId']
-                        result['algo_ids'].append(algo_id)
-                        logger.info(f"✅ 条件单创建成功: {algo_id}")
-            
-            # 验证止损止盈设置（如果需要）
+            # 验证止损止盈设置
             if verify_sl_tp and algo_ords:
                 logger.info("🔍 验证止损止盈设置...")
-                time.sleep(2)  # 给系统一些时间处理
-                
-                if check_sl_tp_from_main_order(order_id):
+                time.sleep(2)
+                if check_sl_tp_from_main_order(result['order_id']):
                     logger.info("✅ 止损止盈设置验证成功")
                 else:
                     logger.warning("⚠️ 止损止盈设置验证失败，建议手动确认")
-                    
         else:
             logger.error(f"❌ {action_name}创建失败: {response}")
-            
+        
         return result
             
     except Exception as e:
         logger.error(f"创建全能订单失败: {str(e)}")
-        import traceback
         logger.error(f"详细错误信息: {traceback.format_exc()}")
-        return {
-            'order_id': None,
-            'response': None,
-            'algo_ids': [],
-            'success': False
-        }
-
+        return {'order_id': None, 'response': None, 'algo_ids': [], 'success': False}
 
 def create_short_with_sl_tp_fixed(amount: float, stop_loss_price: float, take_profit_price: float):
     """
