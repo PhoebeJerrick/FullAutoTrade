@@ -6,7 +6,7 @@ import os
 import time
 import sys
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import ccxt
 from dotenv import load_dotenv
 
@@ -119,6 +119,105 @@ def enforce_lot_size_requirement(position_size: float) -> float:
     except Exception as e:
         logger.error(f"强制调整仓位大小失败: {str(e)}")
         return position_size
+
+def check_oco_orders() -> bool:
+    """
+    专门检查OCO订单（通过attachAlgoOrds创建的止损止盈订单）
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 尝试使用不同的查询方式查找OCO订单
+        logger.info("🔍 专门检查OCO止损止盈订单...")
+        
+        # 方法1: 查询所有待处理的条件单，不限制类型
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+            # 不指定ordType，查询所有类型
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if orders:
+                logger.info(f"✅ 发现算法订单: {len(orders)}个")
+                
+                # 查找包含止损止盈的订单
+                sl_tp_orders = []
+                for order in orders:
+                    has_tp = order.get('tpTriggerPx') not in [None, '']
+                    has_sl = order.get('slTriggerPx') not in [None, '']
+                    
+                    if has_tp or has_sl:
+                        sl_tp_orders.append(order)
+                
+                if sl_tp_orders:
+                    logger.info(f"✅ 发现止损止盈订单: {len(sl_tp_orders)}个")
+                    for order in sl_tp_orders:
+                        algo_id = order.get('algoId', 'Unknown')
+                        order_type = "OCO" if (order.get('tpTriggerPx') and order.get('slTriggerPx')) else "止盈/止损"
+                        logger.info(f"   ID: {algo_id}, 类型: {order_type}")
+                        if order.get('slTriggerPx'):
+                            logger.info(f"      止损触发: {order.get('slTriggerPx')}")
+                        if order.get('tpTriggerPx'):
+                            logger.info(f"      止盈触发: {order.get('tpTriggerPx')}")
+                    return True
+                else:
+                    logger.info("📋 未发现包含止损止盈的算法订单")
+            else:
+                logger.info("📋 没有找到任何算法订单")
+        
+        # 方法2: 尝试查询特定类型的OCO订单
+        logger.info("🔍 尝试查询OCO订单类型...")
+        try:
+            oco_params = {
+                'instType': 'SWAP', 
+                'instId': inst_id,
+                'ordType': 'oco'  # 专门查询OCO类型
+            }
+            oco_response = exchange.private_get_trade_orders_algo_pending(oco_params)
+            
+            if oco_response and oco_response.get('code') == '0':
+                oco_orders = oco_response.get('data', [])
+                if oco_orders:
+                    logger.info(f"✅ 发现OCO订单: {len(oco_orders)}个")
+                    for order in oco_orders:
+                        logger.info(f"   OCO订单ID: {order.get('algoId')}")
+                    return True
+        except Exception as e:
+            logger.info(f"OCO订单查询失败（可能不支持此类型）: {str(e)}")
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"检查OCO订单失败: {str(e)}")
+        return False
+
+def get_all_algo_orders() -> List[Dict]:
+    """
+    获取所有算法订单，用于调试
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 查询所有算法订单类型
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            return response.get('data', [])
+        return []
+        
+    except Exception as e:
+        logger.error(f"获取所有算法订单失败: {str(e)}")
+        return []
 
 def create_short_with_sl_tp_fixed(amount: float, stop_loss_price: float, take_profit_price: float):
     """
@@ -319,8 +418,27 @@ def run_short_sl_tp_test():
     logger.info("📋 检查止盈止损订单...")
     time.sleep(3)  # 给系统一些时间处理止损止盈订单
     
+    # 首先尝试常规查询
     has_sl_tp = check_sl_tp_orders()
+    
     if not has_sl_tp:
+        logger.info("🔍 常规查询未找到，尝试OCO专用查询...")
+        # 尝试OCO专用查询
+        has_sl_tp = check_oco_orders()
+    
+    if not has_sl_tp:
+        # 调试：获取所有算法订单查看
+        logger.info("🔍 调试：获取所有算法订单...")
+        all_orders = get_all_algo_orders()
+        if all_orders:
+            logger.info(f"📊 所有算法订单 ({len(all_orders)}个):")
+            for order in all_orders:
+                logger.info(f"   订单: {order.get('algoId')}, 类型: {order.get('ordType')}, 状态: {order.get('state')}")
+                if order.get('tpTriggerPx'):
+                    logger.info(f"       止盈触发: {order.get('tpTriggerPx')}")
+                if order.get('slTriggerPx'):
+                    logger.info(f"       止损触发: {order.get('slTriggerPx')}")
+        
         logger.warning("⚠️ 未发现止损止盈订单，尝试分开设置...")
         
         # 备选方案：分开设置止损止盈
@@ -399,7 +517,7 @@ def run_short_sl_tp_test():
     logger.info("-" * 40)
     
     logger.info("📋 检查平仓后止盈止损订单状态...")
-    has_remaining_orders = check_sl_tp_orders()
+    has_remaining_orders = check_sl_tp_orders() or check_oco_orders()
     
     if has_remaining_orders:
         logger.warning("⚠️ 发现平仓后仍有止盈止损订单存在")
@@ -425,7 +543,7 @@ def run_short_sl_tp_test():
         return False
     
     # 最终检查无止损止盈订单
-    final_sl_tp = check_sl_tp_orders()
+    final_sl_tp = check_sl_tp_orders() or check_oco_orders()
     if final_sl_tp:
         logger.error("❌ 最终检查发现仍有止盈止损订单")
         return False
