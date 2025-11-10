@@ -429,9 +429,9 @@ def create_order_without_sl_tp(side: str, amount: float, order_type: str = 'mark
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
-def close_position(side: str, amount: float):
+def close_position(side: str, amount: float, cancel_sl_tp=True):
     """
-    平仓函数
+    平仓函数 - 增强版本，可选撤销止损止盈
     """
     try:
         inst_id = get_correct_inst_id()
@@ -457,7 +457,16 @@ def close_position(side: str, amount: float):
         if response and response.get('code') == '0':
             order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
             logger.info(f"✅ 平仓订单创建成功: {order_id}")
-            return response
+            
+            # 等待平仓成交
+            if wait_for_order_fill(order_id, 30):
+                # 平仓成交后再次确认撤销所有止损止盈
+                logger.info("🔄 平仓成交后确认撤销止损止盈订单...")
+                cancel_all_sl_tp_orders()
+                return response
+            else:
+                logger.error(f"❌ 平仓订单未在30秒内成交")
+                return None
         else:
             logger.error(f"❌ 平仓订单创建失败: {response}")
             return response
@@ -767,6 +776,84 @@ def create_oco_order(side: str, amount: float, stop_loss_price: float, take_prof
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
+def cancel_all_sl_tp_orders():
+    """撤销所有止损止盈订单"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        logger.info(f"🔄 撤销 {inst_id} 的所有止损止盈订单...")
+        
+        # 获取所有待处理的条件单
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+            'ordType': 'conditional',
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if not orders:
+                logger.info(f"✅ 没有找到需要撤销的止损止盈订单")
+                return True
+            
+            cancel_count = 0
+            for order in orders:
+                algo_id = order.get('algoId')
+                if algo_id:
+                    # 撤销单个条件单
+                    cancel_params = {
+                        'instId': inst_id,
+                        'algoId': algo_id,
+                    }
+                    
+                    cancel_response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+                    
+                    if cancel_response and cancel_response.get('code') == '0':
+                        logger.info(f"✅ 已撤销条件单: {algo_id}")
+                        cancel_count += 1
+                    else:
+                        logger.error(f"❌ 撤销条件单失败: {algo_id} - {cancel_response}")
+            
+            logger.info(f"📊 总计撤销 {cancel_count}/{len(orders)} 个条件单")
+            return cancel_count > 0
+        else:
+            logger.error(f"❌ 获取待撤销订单失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"撤销止损止盈订单失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return False
+
+def cancel_specific_algo_order(algo_id: str):
+    """撤销特定的条件单"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        cancel_params = {
+            'instId': inst_id,
+            'algoId': algo_id,
+        }
+        
+        logger.info(f"🔄 撤销特定条件单: {algo_id}")
+        
+        response = exchange.private_post_trade_cancel_algo_order(cancel_params)
+        
+        if response and response.get('code') == '0':
+            logger.info(f"✅ 条件单撤销成功: {algo_id}")
+            return True
+        else:
+            logger.error(f"❌ 条件单撤销失败: {algo_id} - {response}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"撤销特定条件单失败: {str(e)}")
+        return False
+
 def cancel_existing_orders():
     """取消现有的订单"""
     try:
@@ -983,6 +1070,127 @@ def test_minimum_order():
     except Exception as e:
         logger.error(f"最小订单测试失败: {str(e)}")
 
+def manage_sl_tp_orders():
+    """止损止盈订单管理函数"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 获取当前持仓
+        position = get_current_position()
+        if not position:
+            logger.info("📊 当前无持仓，检查是否需要清理止损止盈订单...")
+            # 无持仓时撤销所有止损止盈订单
+            return cancel_all_sl_tp_orders()
+        
+        # 有持仓时，检查止损止盈订单是否匹配
+        logger.info(f"📊 当前持仓: {position['side']} {position['size']}张")
+        
+        # 获取所有止损止盈订单
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+            'ordType': 'conditional',
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if not orders:
+                logger.info("✅ 当前无止损止盈订单")
+                return True
+            
+            # 检查订单是否与持仓匹配
+            valid_orders = []
+            invalid_orders = []
+            
+            for order in orders:
+                order_side = order.get('side', '')
+                order_size = float(order.get('sz', 0))
+                
+                # 判断订单方向是否与持仓匹配
+                # 多头持仓：止损止盈应该是卖出
+                # 空头持仓：止损止盈应该是买入
+                if position['side'] == 'long' and order_side == 'sell':
+                    valid_orders.append(order)
+                elif position['side'] == 'short' and order_side == 'buy':
+                    valid_orders.append(order)
+                else:
+                    invalid_orders.append(order)
+            
+            # 撤销不匹配的订单
+            for order in invalid_orders:
+                algo_id = order.get('algoId')
+                logger.warning(f"⚠️ 发现不匹配的止损止盈订单，将撤销: {algo_id}")
+                cancel_specific_algo_order(algo_id)
+            
+            logger.info(f"📊 止损止盈订单状态: {len(valid_orders)}个有效, {len(invalid_orders)}个无效")
+            return True
+            
+        else:
+            logger.error("❌ 获取止损止盈订单失败")
+            return False
+            
+    except Exception as e:
+        logger.error(f"止损止盈订单管理失败: {str(e)}")
+        return False
+
+def safe_close_position(side: str, amount: float):
+    """
+    安全平仓函数 - 确保平仓后止损止盈被撤销
+    """
+    logger.info(f"🔒 安全平仓: {side} {amount}张")
+    
+    # 步骤1: 撤销止损止盈订单
+    logger.info("步骤1: 撤销止损止盈订单...")
+    cancel_all_sl_tp_orders()
+    
+    # 步骤2: 执行平仓
+    logger.info("步骤2: 执行平仓...")
+    close_result = close_position(side, amount, cancel_sl_tp=False)  # 这里设为False因为我们已经撤销过了
+    
+    # 步骤3: 确认平仓后再次检查
+    logger.info("步骤3: 确认平仓状态...")
+    time.sleep(3)
+    position_after = get_current_position()
+    if position_after:
+        logger.error(f"❌ 平仓后仍有持仓: {position_after}")
+        return False
+    
+    # 步骤4: 最终确认无止损止盈订单
+    logger.info("步骤4: 最终确认无止损止盈订单...")
+    cancel_all_sl_tp_orders()
+    
+    return close_result is not None
+
+def cleanup_after_test():
+    """测试结束后的清理工作"""
+    try:
+        logger.info("🧹 测试结束，执行清理...")
+        
+        # 1. 检查并平掉所有持仓
+        position = get_current_position()
+        if position:
+            logger.warning(f"⚠️ 测试结束发现未平持仓: {position}")
+            logger.info("🔄 自动平仓...")
+            safe_close_position(position['side'], position['size'])
+        
+        # 2. 撤销所有止损止盈订单
+        logger.info("🔄 撤销所有止损止盈订单...")
+        cancel_all_sl_tp_orders()
+        
+        # 3. 取消所有待处理订单
+        logger.info("🔄 取消所有待处理订单...")
+        cancel_existing_orders()
+        
+        logger.info("✅ 清理完成")
+        return True
+        
+    except Exception as e:
+        logger.error(f"清理失败: {str(e)}")
+        return False
+
 def run_enhanced_test():
     """运行增强测试流程"""
     logger.info("🚀 开始增强测试流程")
@@ -1066,19 +1274,12 @@ def run_enhanced_test():
         logger.info(f"   {i}秒后平仓...")
         time.sleep(1)
     
-    # 平空单
-    logger.info("🔄 执行空单平仓...")
-    close_result = close_position('short', short_position['size'])
+    # 平空单（自动撤销止损止盈）
+    logger.info("🔄 执行空单平仓（将自动撤销止损止盈）...")
+    close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
     
-    if not close_result or close_result.get('code') != '0':
+    if not close_result:
         logger.error("❌ 空单平仓失败")
-        return False
-    
-    close_order_id = close_result['data'][0]['ordId']
-    
-    # 等待平仓成交
-    if not wait_for_order_fill(close_order_id, 30):
-        logger.error("❌ 平仓订单未在30秒内成交")
         return False
     
     # 确认持仓已平
@@ -1238,6 +1439,11 @@ def main():
         # 运行测试
         success = run_enhanced_test()
         
+        # 无论测试成功与否，都执行清理
+        logger.info("")
+        logger.info("🧹 执行测试后清理...")
+        cleanup_after_test()
+        
         if success:
             logger.info("🎊 所有测试完成!")
         else:
@@ -1245,10 +1451,13 @@ def main():
             
     except KeyboardInterrupt:
         logger.info("🛑 用户中断测试")
+        cleanup_after_test()
     except Exception as e:
         logger.error(f"💥 测试程序异常: {str(e)}")
+        cleanup_after_test()
         import traceback
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
