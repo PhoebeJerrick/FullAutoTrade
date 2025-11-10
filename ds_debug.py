@@ -590,6 +590,32 @@ def get_current_position():
         logger.error(f"获取持仓失败: {str(e)}")
         return None
 
+def analyze_algo_order_type(order):
+    """智能分析条件单类型"""
+    algo_id = order.get('algoId', 'Unknown')
+    
+    # 判断订单类型（通过字段存在性判断）
+    has_tp = order.get('tpTriggerPx') not in [None, '']
+    has_sl = order.get('slTriggerPx') not in [None, '']
+    
+    if has_tp and has_sl:
+        return "OCO"
+    elif has_sl:
+        return "止损"
+    elif has_tp:
+        return "止盈"
+    else:
+        # 进一步检查其他条件单类型
+        ord_type = order.get('ordType', '')
+        if ord_type == 'move_order_stop':
+            return "移动止损"
+        elif ord_type == 'iceberg':
+            return "冰山订单"
+        elif ord_type == 'twap':
+            return "TWAP"
+        else:
+            return "其他条件单"
+
 def check_sl_tp_orders():
     """检查止损止盈订单状态 - 修复版本，支持OCO和特定品种过滤"""
     try:
@@ -620,16 +646,15 @@ def check_sl_tp_orders():
                 other_orders = []
                 
                 for order in orders:
-                    algo_id = order.get('algoId', 'Unknown')
-                    algo_type = order.get('algoOrdType', 'Unknown')  # 条件单类型
-                    state = order.get('state', 'Unknown')
+                    # 判断订单类型（通过字段存在性判断）
+                    has_tp = order.get('tpTriggerPx') not in [None, '']
+                    has_sl = order.get('slTriggerPx') not in [None, '']
                     
-                    # 根据订单类型分类
-                    if 'sl' in algo_type.lower() and 'tp' in algo_type.lower():
+                    if has_tp and has_sl:
                         oco_orders.append(order)
-                    elif 'sl' in algo_type.lower():
+                    elif has_sl:
                         sl_orders.append(order)
-                    elif 'tp' in algo_type.lower():
+                    elif has_tp:
                         tp_orders.append(order)
                     else:
                         other_orders.append(order)
@@ -638,25 +663,25 @@ def check_sl_tp_orders():
                 if sl_orders:
                     logger.info(f"   🛡️ 止损订单 ({len(sl_orders)}个):")
                     for order in sl_orders:
-                        self._log_algo_order_detail(order)
+                        _log_algo_order_detail(order)
                 
                 # 显示止盈订单
                 if tp_orders:
                     logger.info(f"   🎯 止盈订单 ({len(tp_orders)}个):")
                     for order in tp_orders:
-                        self._log_algo_order_detail(order)
+                        _log_algo_order_detail(order)
                 
                 # 显示OCO订单
                 if oco_orders:
                     logger.info(f"   🔄 OCO订单 ({len(oco_orders)}个):")
                     for order in oco_orders:
-                        self._log_algo_order_detail(order)
+                        _log_algo_order_detail(order)
                 
                 # 显示其他类型订单
                 if other_orders:
                     logger.info(f"   ❓ 其他条件单 ({len(other_orders)}个):")
                     for order in other_orders:
-                        self._log_algo_order_detail(order)
+                        _log_algo_order_detail(order)
                 
                 return True
             else:
@@ -672,70 +697,34 @@ def check_sl_tp_orders():
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return False
 
-def _log_algo_order_detail(self, order):
-    """记录条件单详细信息"""
+def _log_algo_order_detail(order):
+    """记录条件单详细信息 - 改进版本"""
     algo_id = order.get('algoId', 'Unknown')
-    algo_type = order.get('algoOrdType', 'Unknown')
+    order_type = analyze_algo_order_type(order)
     state = order.get('state', 'Unknown')
     side = order.get('side', 'Unknown')
     pos_side = order.get('posSide', 'Unknown')
     sz = order.get('sz', 'Unknown')
     
-    # 根据不同订单类型显示不同信息
-    if 'oco' in algo_type.lower() or ('sl' in algo_type.lower() and 'tp' in algo_type.lower()):
-        # OCO订单
-        sl_trigger_px = order.get('slTriggerPx', 'Unknown')
-        sl_ord_px = order.get('slOrdPx', 'Unknown')
-        tp_trigger_px = order.get('tpTriggerPx', 'Unknown')
-        tp_ord_px = order.get('tpOrdPx', 'Unknown')
-        
-        logger.info(f"      ID: {algo_id}")
-        logger.info(f"       类型: {algo_type} (OCO)")
-        logger.info(f"       状态: {state}")
-        logger.info(f"       方向: {side}/{pos_side}")
-        logger.info(f"       数量: {sz}")
-        logger.info(f"       止损触发: {sl_trigger_px}, 委托: {sl_ord_px}")
-        logger.info(f"       止盈触发: {tp_trigger_px}, 委托: {tp_ord_px}")
-        
-    elif 'sl' in algo_type.lower():
-        # 止损订单
-        trigger_px = order.get('slTriggerPx', order.get('triggerPx', 'Unknown'))
-        ord_px = order.get('slOrdPx', order.get('ordPx', 'Unknown'))
-        
-        logger.info(f"      ID: {algo_id}")
-        logger.info(f"       类型: {algo_type} (止损)")
-        logger.info(f"       状态: {state}")
-        logger.info(f"       方向: {side}/{pos_side}")
-        logger.info(f"       数量: {sz}")
-        logger.info(f"       触发价: {trigger_px}")
-        logger.info(f"       委托价: {ord_px}")
-        
-    elif 'tp' in algo_type.lower():
-        # 止盈订单
-        trigger_px = order.get('tpTriggerPx', order.get('triggerPx', 'Unknown'))
-        ord_px = order.get('tpOrdPx', order.get('ordPx', 'Unknown'))
-        
-        logger.info(f"      ID: {algo_id}")
-        logger.info(f"       类型: {algo_type} (止盈)")
-        logger.info(f"       状态: {state}")
-        logger.info(f"       方向: {side}/{pos_side}")
-        logger.info(f"       数量: {sz}")
-        logger.info(f"       触发价: {trigger_px}")
-        logger.info(f"       委托价: {ord_px}")
-        
+    logger.info(f"      ID: {algo_id}")
+    logger.info(f"       类型: {order_type}")
+    logger.info(f"       状态: {state}")
+    logger.info(f"       方向: {side}/{pos_side}")
+    logger.info(f"       数量: {sz}")
+    
+    # 根据类型显示不同的价格信息
+    if order_type == "OCO":
+        logger.info(f"       止损触发: {order.get('slTriggerPx', 'Unknown')}, 委托: {order.get('slOrdPx', 'Unknown')}")
+        logger.info(f"       止盈触发: {order.get('tpTriggerPx', 'Unknown')}, 委托: {order.get('tpOrdPx', 'Unknown')}")
+    elif order_type == "止损":
+        logger.info(f"       触发价: {order.get('slTriggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('slOrdPx', 'Unknown')}")
+    elif order_type == "止盈":
+        logger.info(f"       触发价: {order.get('tpTriggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('tpOrdPx', 'Unknown')}")
     else:
-        # 其他类型条件单
-        trigger_px = order.get('triggerPx', 'Unknown')
-        ord_px = order.get('ordPx', 'Unknown')
-        
-        logger.info(f"      ID: {algo_id}")
-        logger.info(f"       类型: {algo_type}")
-        logger.info(f"       状态: {state}")
-        logger.info(f"       方向: {side}/{pos_side}")
-        logger.info(f"       数量: {sz}")
-        logger.info(f"       触发价: {trigger_px}")
-        logger.info(f"       委托价: {ord_px}")
-
+        logger.info(f"       触发价: {order.get('triggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('ordPx', 'Unknown')}")
 
 def create_oco_order(side: str, amount: float, stop_loss_price: float, take_profit_price: float):
     """
