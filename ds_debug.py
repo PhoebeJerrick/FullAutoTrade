@@ -591,24 +591,194 @@ def get_current_position():
         return None
 
 def check_sl_tp_orders():
-    """检查止损止盈订单状态"""
+    """检查止损止盈订单状态 - 修复版本，支持OCO和特定品种过滤"""
     try:
-        # 获取待处理订单
-        pending_orders = exchange.fetch_open_orders(config.symbol)
-        sl_tp_orders = [o for o in pending_orders if o.get('type') in ['stop', 'stop_limit', 'take_profit', 'take_profit_limit']]
+        inst_id = get_correct_inst_id()
         
-        if sl_tp_orders:
-            logger.info(f"📋 发现止损止盈订单: {len(sl_tp_orders)}个")
-            for order in sl_tp_orders:
-                logger.info(f"   - {order['id']}: {order['side']} {order['amount']} @ {order.get('price', '市价')}")
-            return True
+        # 使用条件单查询API来检查止损止盈订单
+        params = {
+            'instType': 'SWAP',  # 永续合约
+            'instId': inst_id,   # 只查询特定品种
+            'ordType': 'conditional',  # 条件单类型
+        }
+        
+        logger.info(f"📋 查询 {inst_id} 的止损止盈条件单...")
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        log_api_response(response, "check_sl_tp_orders")
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if orders:
+                logger.info(f"✅ 发现止损止盈条件单: {len(orders)}个")
+                
+                # 分类显示订单
+                sl_orders = []
+                tp_orders = [] 
+                oco_orders = []
+                other_orders = []
+                
+                for order in orders:
+                    algo_id = order.get('algoId', 'Unknown')
+                    algo_type = order.get('algoOrdType', 'Unknown')  # 条件单类型
+                    state = order.get('state', 'Unknown')
+                    
+                    # 根据订单类型分类
+                    if 'sl' in algo_type.lower() and 'tp' in algo_type.lower():
+                        oco_orders.append(order)
+                    elif 'sl' in algo_type.lower():
+                        sl_orders.append(order)
+                    elif 'tp' in algo_type.lower():
+                        tp_orders.append(order)
+                    else:
+                        other_orders.append(order)
+                
+                # 显示止损订单
+                if sl_orders:
+                    logger.info(f"   🛡️ 止损订单 ({len(sl_orders)}个):")
+                    for order in sl_orders:
+                        self._log_algo_order_detail(order)
+                
+                # 显示止盈订单
+                if tp_orders:
+                    logger.info(f"   🎯 止盈订单 ({len(tp_orders)}个):")
+                    for order in tp_orders:
+                        self._log_algo_order_detail(order)
+                
+                # 显示OCO订单
+                if oco_orders:
+                    logger.info(f"   🔄 OCO订单 ({len(oco_orders)}个):")
+                    for order in oco_orders:
+                        self._log_algo_order_detail(order)
+                
+                # 显示其他类型订单
+                if other_orders:
+                    logger.info(f"   ❓ 其他条件单 ({len(other_orders)}个):")
+                    for order in other_orders:
+                        self._log_algo_order_detail(order)
+                
+                return True
+            else:
+                logger.info(f"📋 未发现 {inst_id} 的止损止盈条件单")
+                return False
         else:
-            logger.info("📋 未发现止损止盈订单")
+            logger.warning(f"⚠️ 查询 {inst_id} 的止损止盈订单失败")
             return False
             
     except Exception as e:
         logger.error(f"检查止损止盈订单失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return False
+
+def _log_algo_order_detail(self, order):
+    """记录条件单详细信息"""
+    algo_id = order.get('algoId', 'Unknown')
+    algo_type = order.get('algoOrdType', 'Unknown')
+    state = order.get('state', 'Unknown')
+    side = order.get('side', 'Unknown')
+    pos_side = order.get('posSide', 'Unknown')
+    sz = order.get('sz', 'Unknown')
+    
+    # 根据不同订单类型显示不同信息
+    if 'oco' in algo_type.lower() or ('sl' in algo_type.lower() and 'tp' in algo_type.lower()):
+        # OCO订单
+        sl_trigger_px = order.get('slTriggerPx', 'Unknown')
+        sl_ord_px = order.get('slOrdPx', 'Unknown')
+        tp_trigger_px = order.get('tpTriggerPx', 'Unknown')
+        tp_ord_px = order.get('tpOrdPx', 'Unknown')
+        
+        logger.info(f"      ID: {algo_id}")
+        logger.info(f"       类型: {algo_type} (OCO)")
+        logger.info(f"       状态: {state}")
+        logger.info(f"       方向: {side}/{pos_side}")
+        logger.info(f"       数量: {sz}")
+        logger.info(f"       止损触发: {sl_trigger_px}, 委托: {sl_ord_px}")
+        logger.info(f"       止盈触发: {tp_trigger_px}, 委托: {tp_ord_px}")
+        
+    elif 'sl' in algo_type.lower():
+        # 止损订单
+        trigger_px = order.get('slTriggerPx', order.get('triggerPx', 'Unknown'))
+        ord_px = order.get('slOrdPx', order.get('ordPx', 'Unknown'))
+        
+        logger.info(f"      ID: {algo_id}")
+        logger.info(f"       类型: {algo_type} (止损)")
+        logger.info(f"       状态: {state}")
+        logger.info(f"       方向: {side}/{pos_side}")
+        logger.info(f"       数量: {sz}")
+        logger.info(f"       触发价: {trigger_px}")
+        logger.info(f"       委托价: {ord_px}")
+        
+    elif 'tp' in algo_type.lower():
+        # 止盈订单
+        trigger_px = order.get('tpTriggerPx', order.get('triggerPx', 'Unknown'))
+        ord_px = order.get('tpOrdPx', order.get('ordPx', 'Unknown'))
+        
+        logger.info(f"      ID: {algo_id}")
+        logger.info(f"       类型: {algo_type} (止盈)")
+        logger.info(f"       状态: {state}")
+        logger.info(f"       方向: {side}/{pos_side}")
+        logger.info(f"       数量: {sz}")
+        logger.info(f"       触发价: {trigger_px}")
+        logger.info(f"       委托价: {ord_px}")
+        
+    else:
+        # 其他类型条件单
+        trigger_px = order.get('triggerPx', 'Unknown')
+        ord_px = order.get('ordPx', 'Unknown')
+        
+        logger.info(f"      ID: {algo_id}")
+        logger.info(f"       类型: {algo_type}")
+        logger.info(f"       状态: {state}")
+        logger.info(f"       方向: {side}/{pos_side}")
+        logger.info(f"       数量: {sz}")
+        logger.info(f"       触发价: {trigger_px}")
+        logger.info(f"       委托价: {ord_px}")
+
+
+def create_oco_order(side: str, amount: float, stop_loss_price: float, take_profit_price: float):
+    """
+    创建OCO订单（一个订单同时设置止损和止盈）
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # OCO订单参数
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': 'buy' if side == 'short' else 'sell',  # 平仓方向
+            'ordType': 'oco',  # OCO订单类型
+            'sz': str(amount),
+            'tpTriggerPx': str(take_profit_price),
+            'tpOrdPx': '-1',  # 市价止盈
+            'slTriggerPx': str(stop_loss_price),
+            'slOrdPx': '-1',  # 市价止损
+        }
+        
+        log_order_params("OCO订单", params, "create_oco_order")
+        logger.info(f"🔄 创建OCO订单: {side} {amount}张")
+        logger.info(f"   止损: {stop_loss_price:.2f}")
+        logger.info(f"   止盈: {take_profit_price:.2f}")
+        
+        response = exchange.private_post_trade_order_algo(params)
+        
+        log_api_response(response, "create_oco_order")
+        
+        if response and response.get('code') == '0':
+            algo_id = response['data'][0]['algoId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ OCO订单创建成功: {algo_id}")
+            return response
+        else:
+            logger.error(f"❌ OCO订单创建失败: {response}")
+            return response
+            
+    except Exception as e:
+        logger.error(f"创建OCO订单失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return None
 
 def cancel_existing_orders():
     """取消现有的订单"""
@@ -677,6 +847,83 @@ def wait_for_position(side: str, timeout: int = 30) -> Dict[str, Any]:
     
     logger.error(f"❌ {side}持仓未在{timeout}秒内出现")
     return None
+
+
+def verify_sl_tp_setup(expected_sl_tp_count=2):
+    """验证止损止盈设置是否正确 - 支持OCO和独立订单"""
+    try:
+        logger.info("🔍 验证止损止盈设置...")
+        
+        # 检查持仓
+        position = get_current_position()
+        if not position:
+            logger.warning("⚠️ 无持仓，无法验证止损止盈")
+            return False
+        
+        # 检查止损止盈订单
+        has_sl_tp = check_sl_tp_orders()
+        
+        if has_sl_tp:
+            logger.info("✅ 止损止盈验证通过 - 发现止损止盈订单")
+            
+            # 进一步验证订单数量（如果是独立订单）
+            # 注意：如果是OCO订单，可能只有一个订单包含止损止盈
+            return True
+        else:
+            logger.error("❌ 止损止盈验证失败 - 未发现止损止盈订单")
+            return False
+            
+    except Exception as e:
+        logger.error(f"验证止损止盈设置失败: {str(e)}")
+        return False
+
+def get_specific_algo_order(algo_id: str):
+    """获取特定的条件单信息"""
+    try:
+        params = {
+            'algoId': algo_id,
+        }
+        
+        response = exchange.private_get_trade_order_algo(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            if orders:
+                return orders[0]
+        return None
+        
+    except Exception as e:
+        logger.error(f"获取特定条件单失败: {str(e)}")
+        return None
+
+
+
+def verify_by_algo_history():
+    """通过条件单历史记录验证"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        params = {
+            'instType': 'SWAP',
+            'ordType': 'conditional',
+            'state': 'live',  # 存活状态
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            target_orders = [o for o in orders if o.get('instId') == inst_id]
+            
+            if target_orders:
+                logger.info(f"📊 通过条件单历史找到 {len(target_orders)} 个活跃订单")
+                for order in target_orders:
+                    logger.info(f"   条件单: {order.get('algoId')} - {order.get('ordType')}")
+            else:
+                logger.info("📊 条件单历史中未找到相关订单")
+                
+    except Exception as e:
+        logger.error(f"通过条件单历史验证失败: {str(e)}")
 
 def get_market_info():
     """获取市场信息，包括最小交易量"""
@@ -922,6 +1169,14 @@ def run_enhanced_test():
     
     logger.info("✅ 止盈设置成功")
     
+    # 立即验证止盈设置
+    logger.info("🔍 验证止盈设置...")
+    time.sleep(2)  # 等待系统处理
+    has_tp = check_sl_tp_orders()
+    if not has_tp:
+        logger.error("❌ 止盈设置验证失败 - 未发现止盈订单")
+        return False
+    
     # 阶段6: 设置止损
     logger.info("")
     logger.info("🔹 阶段6: 设置止损(1%距离)")
@@ -941,6 +1196,14 @@ def run_enhanced_test():
     
     logger.info("✅ 止损设置成功")
     
+    # 立即验证止损设置
+    logger.info("🔍 验证止损设置...")
+    time.sleep(2)  # 等待系统处理
+    has_sl_tp = check_sl_tp_orders()
+    if not has_sl_tp:
+        logger.error("❌ 止损设置验证失败 - 未发现止损止盈订单")
+        return False
+    
     # 最终检查
     logger.info("")
     logger.info("🔹 最终状态检查")
@@ -953,9 +1216,13 @@ def run_enhanced_test():
     else:
         logger.info("📊 无持仓")
     
-    # 检查最终止损止盈订单
+    # 最终验证止损止盈设置
     logger.info("📋 最终止损止盈订单状态:")
-    check_sl_tp_orders()
+    final_verification = verify_sl_tp_setup()
+    
+    if not final_verification:
+        logger.error("❌ 最终验证失败 - 止损止盈设置有问题")
+        return False
     
     logger.info("")
     logger.info("🎉 增强测试流程完成!")
