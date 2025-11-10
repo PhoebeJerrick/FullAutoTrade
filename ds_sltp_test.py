@@ -303,15 +303,19 @@ def create_universal_order(
         algo_ords = []
         opposite_side = 'buy' if side == 'sell' else 'sell'  # 止损止盈方向统一为相反方向
         
-        # 批量处理止损和止盈
+        # 批量处理止损和止盈（修正后）
         for ord_type, trigger_price in [
             ('stop_loss', stop_loss_price),
             ('take_profit', take_profit_price)
         ]:
             if trigger_price is not None:
+                # 正确的参数名映射
+                trigger_key = 'slTriggerPx' if ord_type == 'stop_loss' else 'tpTriggerPx'
+                ord_key = 'slOrdPx' if ord_type == 'stop_loss' else 'tpOrdPx'
+                
                 algo = {
-                    f'{ord_type[:2]}TriggerPx': str(trigger_price),  # slTriggerPx/tpTriggerPx
-                    f'{ord_type[:2]}OrdPx': '-1',  # 市价止损止盈
+                    trigger_key: str(trigger_price),  # 使用正确的触发价参数名
+                    ord_key: '-1',  # 使用正确的委托价参数名
                     'sz': str(amount),
                     'side': opposite_side,
                     'algoOrdType': 'conditional'
