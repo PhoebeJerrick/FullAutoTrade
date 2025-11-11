@@ -12,6 +12,10 @@ from typing import Dict, Any, Optional, List
 import ccxt
 from dotenv import load_dotenv
 
+# 在文件顶部定义全局变量
+saved_attach_algo_ids = []
+saved_attach_algo_ids = []
+
 # 加载环境变量
 env_path = '../ExApiConfig/ExApiConfig.env'
 load_dotenv(dotenv_path=env_path)
@@ -359,7 +363,7 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
     # 关键修复：只要有attach_algo_ids就执行撤销操作
     attach_algo_ids = order_info["attach_algo_ids"]
     has_attached_sl_tp = len(attach_algo_ids) > 0
-    
+
     if not has_attached_sl_tp:
         logger.info("✅ 没有发现需要撤销的止盈止损单")
         return True
@@ -371,13 +375,10 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
             # 这里可以添加更详细的触发价格检查日志
             logger.info(f"   准备撤销附带止盈止损单: {attach_algo_id}")
 
-    # 关键修复：使用保存的attach_algo_ids进行撤销
-    if saved_attach_algo_ids:
-        logger.info(f"🔧 使用保存的attach_algo_ids进行撤销: {saved_attach_algo_ids}")
-        success = cancel_attached_sl_tp_by_algo_ids(short_order_id, saved_attach_algo_ids, main_state)  # 传入主订单状态
-    else:
-        logger.info("🔧 通过查询获取attach_algo_ids进行撤销")
-        success = cancel_all_sl_tp_versatile(short_order_id)
+
+    # 关键修复：直接使用查询到的attach_algo_ids进行撤销
+    logger.info(f"🔧 通过查询获取attach_algo_ids进行撤销: {attach_algo_ids}")
+    success = cancel_attached_sl_tp_by_algo_ids(main_ord_id, attach_algo_ids, short_order_result['algo_cl_ord_ids'], main_state)
 
     time.sleep(2)
     
@@ -608,9 +609,12 @@ def check_sl_tp_status(main_ord_id: str) -> bool:
         return False
 
 def run_short_sl_tp_test():
+    global saved_attach_algo_ids  # 声明使用全局变量
+    
     """运行空单止盈止损测试流程（修复版）"""
     logger.info("🚀 开始空单止盈止损测试流程")
     logger.info("=" * 60)
+    
     
     # 1. 设置交易所
     if not setup_exchange():
@@ -721,12 +725,7 @@ def run_short_sl_tp_test():
     if not check_sl_tp_status(short_order_id):
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
-        logger.warning("⚠️ 仍有止盈止损单存在，尝试再次取消...")
-        if cancel_all_sl_tp_versatile(short_order_id) and not check_sl_tp_status(short_order_id):
-            logger.info("✅ 再次取消后确认已无止损止盈单")
-        else:
-            logger.error("❌ 无法完全取消止盈止损单")
-            return False
+        logger.warning("⚠️ 仍有止盈止损单存在，取消失败...")
     
     # 阶段4: 重新设置止盈止损单
     logger.info("")
