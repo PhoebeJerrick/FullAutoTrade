@@ -108,6 +108,111 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         logger.error(f"创建限价平仓订单失败: {str(e)}")
         return None
 
+"""通过修改触发价为0的方式撤销止损止盈订单 - OKX客服推荐方法"""
+def amend_sl_tp_to_zero(algo_id: Optional[str] = None, cl_ord_id: Optional[str] = None) -> bool:
+    """
+    通过OKX的amend-order接口将止损止盈触发价改为0来实现撤销
+    参考文档: https://www.okx.com/docs-v5/en/#order-trading-amend-order-algo
+    """
+    if not algo_id and not cl_ord_id:
+        logger.warning("⚠️ 没有提供algoId或自定义ID，无法修改订单")
+        return False
+        
+    try:
+        inst_id = get_correct_inst_id()
+        params = {
+            "instId": inst_id,
+            # 必须提供其中一个ID
+            **({"algoId": algo_id} if algo_id else {}),
+            **({"algoClOrdId": cl_ord_id} if cl_ord_id else {})
+        }
+        
+        # 设置新的触发价为0，实际上是撤销订单
+        if algo_id:  # 条件单修改参数
+            params.update({
+                "slTriggerPx": "0",
+                "tpTriggerPx": "0"
+            })
+        else:  # OCO订单修改参数
+            params.update({
+                "newSlTriggerPx": "0",
+                "newTpTriggerPx": "0"
+            })
+            
+        logger.info(f"🔄 尝试通过修改触发价为0撤销订单: {algo_id or cl_ord_id}")
+        response = exchange.private_post_trade_amend_order_algo(params)
+        
+        if response and response.get("code") == "0":
+            logger.info(f"✅ 成功通过修改触发价撤销订单: {algo_id or cl_ord_id}")
+            return True
+        else:
+            logger.error(f"❌ 修改触发价撤销订单失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"修改触发价撤销订单出错: {str(e)}")
+        return False
+
+
+"""全能撤销当前币种的所有止损止盈订单"""
+def cancel_all_sl_tp_orders_versatile() -> bool:
+    """
+    全能撤销函数，尝试多种方法确保止损止盈订单被撤销
+    1. 先尝试常规方法撤销已知订单
+    2. 再通过修改触发价为0的方式撤销
+    3. 最后检查是否还有剩余订单
+    """
+    inst_id = get_correct_inst_id()
+    success = True
+    
+    # 步骤1: 尝试常规方法撤销
+    logger.info("🔄 第一步: 尝试常规方法撤销止损止盈订单")
+    cancel_result = cancel_all_sl_tp_orders()
+    if not cancel_result:
+        logger.warning("common cancel failed.")
+
+    # 等待系统处理
+    time.sleep(2)
+    
+    # 步骤2: 查询所有未撤销的止损止盈订单
+    logger.info("🔍 检查是否有剩余未撤销的止损止盈订单")
+    params = {
+        'instType': 'SWAP',
+        'instId': inst_id,
+        'ordType': 'conditional,oco',
+    }
+    response = exchange.private_get_trade_orders_algo_pending(params)
+    
+    remaining_orders = []
+    if response and response.get('code') == '0':
+        remaining_orders = response.get('data', [])
+    
+    if not remaining_orders:
+        logger.info("✅ 没有发现剩余的止损止盈订单")
+        return True
+        
+    logger.warning(f"⚠️ 发现{len(remaining_orders)}个未撤销的止损止盈订单，尝试通过修改触发价撤销")
+    
+    # 步骤3: 对每个剩余订单尝试通过修改触发价为0来撤销
+    for order in remaining_orders:
+        algo_id = order.get('algoId')
+        cl_ord_id = order.get('algoClOrdId')
+        
+        if not amend_sl_tp_to_zero(algo_id, cl_ord_id):
+            logger.error(f"❌ 无法撤销订单: {algo_id or cl_ord_id}")
+            success = False
+    
+    # 等待系统处理
+    time.sleep(2)
+    
+    # 最终检查
+    final_check = check_sl_tp_orders()
+    if not final_check:
+        logger.info("✅ 所有止损止盈订单已成功撤销")
+        return True
+    else:
+        logger.warning("⚠️ 仍有止损止盈订单存在，可能需要手动检查")
+        return success
 
 def get_safe_position_size() -> float:
     """
@@ -317,33 +422,38 @@ def cancel_sl_tp_orders(algo_ids: List[str], algo_cl_ord_ids: List[str]) -> bool
     
     return success
 
-def get_algo_orders_from_main_order(order_id: str, retry=3, delay=2) -> Dict[str, List[str]]:
-    """
-    从主订单获取算法订单ID，返回包含algo_ids和algo_cl_ord_ids的字典
-    """
+def get_algo_orders_from_main_order(order_id: str) -> Dict[str, List[str]]:
+    """从主订单获取关联的算法订单ID"""
+    result = {
+        'algo_ids': [],
+        'algo_cl_ord_ids': []
+    }
+    
     try:
-        result = {'algo_ids': [], 'algo_cl_ord_ids': []}
-        for _ in range(retry):
-            params = {'instId': get_correct_inst_id(), 'ordId': order_id}
-            response = exchange.private_get_trade_order(params)
-            
-            if response and response.get('code') == '0' and response.get('data'):
-                order_info = response['data'][0]
-                attach_algo_ords = order_info.get('attachAlgoOrds', [])
-                for algo_ord in attach_algo_ords:
-                    # 收集algoId
-                    if 'algoId' in algo_ord:
-                        result['algo_ids'].append(algo_ord['algoId'])
-                    # 收集algoClOrdId（即我们设置的attachAlgoClOrdId）
-                    if 'algoClOrdId' in algo_ord:
-                        result['algo_cl_ord_ids'].append(algo_ord['algoClOrdId'])
-                if result['algo_ids'] or result['algo_cl_ord_ids']:
-                    break  # 任一ID存在即退出重试
-            time.sleep(delay)
+        params = {
+            'instId': get_correct_inst_id(),
+            'ordId': order_id,
+        }
+        
+        response = exchange.private_get_trade_order(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            if orders:
+                attach_algo_ords = orders[0].get('attachAlgoOrds', [])
+                for algo in attach_algo_ords:
+                    algo_id = algo.get('algoId')
+                    cl_ord_id = algo.get('algoClOrdId')
+                    if algo_id and algo_id != 'Unknown':
+                        result['algo_ids'].append(algo_id)
+                    if cl_ord_id and cl_ord_id != 'Unknown':
+                        result['algo_cl_ord_ids'].append(cl_ord_id)
         
         if not result['algo_ids'] and not result['algo_cl_ord_ids']:
             logger.warning(f"⚠️ 未获取到algoId或algoClOrdId，主订单ID: {order_id}")
+            
         return result
+        
     except Exception as e:
         logger.error(f"获取算法订单ID失败: {str(e)}")
         return result
@@ -784,32 +894,17 @@ def run_short_sl_tp_test():
     logger.info("")
     logger.info("🔹 阶段3: 取消现有止盈止损单")
     logger.info("-" * 40)
-    
+
     logger.info("⏳ 等待5秒后取消止盈止损单...")
     time.sleep(5)
 
-    # 取消当前止盈止损单
-    # 获取主订单关联的算法订单ID（包含algoId和自定义ID）
-    algo_info = get_algo_orders_from_main_order(short_order_id)
-    algo_ids = algo_info['algo_ids']
-    algo_cl_ord_ids = algo_info['algo_cl_ord_ids']
-
-    # 执行撤销
-    if algo_ids or algo_cl_ord_ids:
-        if cancel_sl_tp_orders(algo_ids, algo_cl_ord_ids):
-            logger.info("✅ 止盈止损单取消成功")
-        else:
-            logger.error("❌ 止盈止损单取消失败")
-            return False
+    # 使用新的全能撤销函数
+    if cancel_all_sl_tp_orders_versatile():
+        logger.info("✅ 止盈止损单取消成功")
     else:
-        # 兜底方案：查询所有未成交算法订单，通过自定义ID匹配并撤销
-        logger.warning("⚠️ 尝试通过全局查询撤销止损止盈单...")
-        if cancel_sl_tp_by_custom_id(algo_cl_ord_ids):  # 新增兜底函数
-            logger.info("✅ 兜底方案：通过自定义ID撤销成功")
-        else:
-            logger.error("❌ 所有撤销方案均失败")
-            return False
-    
+        logger.error("❌ 止盈止损单取消失败")
+        return False
+
     # 确认止盈止损单已取消
     logger.info("🔍 确认止盈止损单已取消...")
     time.sleep(2)  # 等待系统处理取消操作
@@ -818,12 +913,12 @@ def run_short_sl_tp_test():
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
         logger.warning("⚠️ 仍有止盈止损单存在，尝试再次取消...")
-        if cancel_all_sl_tp_orders() and not check_sl_tp_orders():
+        if cancel_all_sl_tp_orders_versatile() and not check_sl_tp_orders():
             logger.info("✅ 再次取消后确认已无止损止盈单")
         else:
             logger.error("❌ 无法完全取消止盈止损单，测试中止")
             return False
-
+    
     # 阶段4: 重新设置止盈止损单
     logger.info("")
     logger.info("🔹 阶段4: 重新设置止盈止损单")
