@@ -148,7 +148,7 @@ def get_sl_tp_related_info(main_ord_id: str, inst_id: str) -> Dict[str, any]:
         pending_params = {
             "instType": "SWAP",
             "instId": inst_id,
-            "ordType": "conditional,oco",
+            #"ordType": "market",
             "state": "live"
         }
         
