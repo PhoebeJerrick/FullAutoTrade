@@ -127,6 +127,18 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
         
         main_order_resp = exchange.private_get_trade_order(main_order_params)
         
+        # 打印完整的API响应信息
+        logger.info("📋 主订单API完整响应:")
+        logger.info(f"   响应码: {main_order_resp.get('code')}")
+        logger.info(f"   响应消息: {main_order_resp.get('msg')}")
+        logger.info(f"   数据条数: {len(main_order_resp.get('data', []))}")
+        
+        if main_order_resp.get('data'):
+            data = main_order_resp['data'][0]
+            logger.info("📋 主订单数据详情:")
+            for key, value in data.items():
+                logger.info(f"   {key}: {value}")
+        
         if not main_order_resp or main_order_resp.get("code") != "0" or not main_order_resp.get("data"):
             logger.error("❌ 主订单查询失败")
             return result
@@ -139,6 +151,7 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
         attach_algo_ords = main_order_data.get("attachAlgoOrds", [])
         valid_attach_ids = [ord.get("attachAlgoId") for ord in attach_algo_ords if ord.get("attachAlgoId")]
         result["attach_algo_ids"] = valid_attach_ids
+        
         # 详细打印附带止盈止损信息
         if valid_attach_ids:
             logger.info(f"📋 主订单附带止盈止损详细信息:")
@@ -152,6 +165,8 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
                 logger.info(f"     止损委托价: {algo_ord.get('slOrdPx', '未设置')}")
                 logger.info(f"     止盈触发价: {algo_ord.get('tpTriggerPx', '未设置')}")
                 logger.info(f"     止盈委托价: {algo_ord.get('tpOrdPx', '未设置')}")
+        else:
+            logger.info("ℹ️ 未发现附带止盈止损单")
 
         # 关键修复：只要有attach_algo_ids就认为有有效的止损止盈设置
         if valid_attach_ids:
@@ -173,7 +188,7 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
             else:
                 logger.info(f"ℹ️ 发现附带止盈止损单但触发价格无效: {valid_attach_ids}")
         else:
-            logger.info("ℹ️ 未发现附带止盈止损单")
+            logger.info("ℹ️ 未发现有效的止损止盈设置")
             result["has_valid_sl_tp"] = False
         
         # 2. 只有当主订单已成交时，才查询已委托的止盈止损单（作为补充信息）
@@ -186,6 +201,13 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
             }
             
             pending_resp = exchange.private_get_trade_orders_pending(pending_params)
+            
+            # 打印已委托订单查询的完整响应
+            if pending_resp:
+                logger.info("📋 已委托订单API完整响应:")
+                logger.info(f"   响应码: {pending_resp.get('code')}")
+                logger.info(f"   响应消息: {pending_resp.get('msg')}")
+                logger.info(f"   数据条数: {len(pending_resp.get('data', []))}")
             
             if pending_resp and pending_resp.get("code") == "0":
                 # 筛选与当前主订单关联的已委托订单
@@ -202,6 +224,12 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
                 result["algo_orders_details"] = related_algos
                 if related_algos:
                     logger.info(f"   已委托止盈止损单: {len(related_algos)}个")
+                    for idx, algo in enumerate(related_algos):
+                        logger.info(f"     止盈止损单 #{idx+1}:")
+                        logger.info(f"       algoId: {algo.get('algoId')}")
+                        logger.info(f"       ordType: {algo.get('ordType')}")
+                        logger.info(f"       止损触发价: {algo.get('slTriggerPx')}")
+                        logger.info(f"       止盈触发价: {algo.get('tpTriggerPx')}")
                 else:
                     logger.info("   未发现已委托的止盈止损单（可能在algo订单中）")
         
