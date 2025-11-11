@@ -108,29 +108,68 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         logger.error(f"创建限价平仓订单失败: {str(e)}")
         return None
 
-def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[dict]:
+"""查询订单相关原始信息（整合3个核心接口）"""
+def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[Dict[str, dict]]:
     """
-    调用OKX的获取订单信息接口，返回原始响应数据
-    用于撤销失败时诊断订单状态
+    同时调用3个接口查询订单相关信息：
+    1. GET /api/v5/trade/order：查询单个订单详情（主订单）
+    2. GET /api/v5/trade/orders-pending：查询未成交订单（可能包含关联的条件单）
+    3. GET /api/v5/trade/orders-history：查询历史订单（含已成交/已撤销）
+    返回所有接口的原始响应数据，用于撤销失败时的全面诊断
     """
     if not ord_id or not inst_id:
-        logger.warning("⚠️ 查询订单信息失败：缺少ordId或instId")
+        logger.warning("⚠️ 查询订单信息失败：缺少ordId（主订单ID）或instId（产品ID）")
         return None
         
+    # 存储所有接口的响应结果
+    all_responses = {}
+    
     try:
-        params = {
+        # --------------------------
+        # 1. 查询单个主订单详情（核心接口）
+        # --------------------------
+        single_order_params = {
             "instId": inst_id,
             "ordId": ord_id
         }
-        logger.info(f"🔍 调用GET /trade/order查询订单信息：ordId={ord_id}, instId={inst_id}")
-        response = exchange.private_get_trade_order(params)
+        logger.info(f"\n🔍 [1/3] 调用GET /trade/order（单个订单详情）：ordId={ord_id}, instId={inst_id}")
+        single_order_response = exchange.private_get_trade_order(single_order_params)
+        all_responses["single_order"] = single_order_response
+        logger.info(f"📋 单个订单原始响应：{single_order_response}")
         
-        # 打印完整原始接口信息（包含所有字段）
-        logger.info(f"📋 原始订单信息响应：{response}")
-        return response
+        # --------------------------
+        # 2. 查询未成交订单（含条件单/止盈止损单）
+        # --------------------------
+        pending_orders_params = {
+            "instType": "SWAP",  # 现货/合约类型，根据实际场景调整
+            "instId": inst_id,   # 限定当前产品
+            "ordType": "conditional,oco",  # 重点查询条件单和OCO单（止盈止损常用类型）
+            "state": "live"      # 只查活跃的未成交订单
+        }
+        logger.info(f"\n🔍 [2/3] 调用GET /trade/orders-pending（未成交订单）：instId={inst_id}")
+        pending_orders_response = exchange.private_get_trade_orders_pending(pending_orders_params)
+        all_responses["pending_orders"] = pending_orders_response
+        logger.info(f"📋 未成交订单原始响应：{pending_orders_response}")
+        
+        # --------------------------
+        # 3. 查询历史订单（含已成交/已撤销）
+        # --------------------------
+        history_orders_params = {
+            "instType": "SWAP",
+            "instId": inst_id,
+            "ordId": ord_id,     # 限定查询当前主订单的历史记录
+            "state": "filled,canceled"  # 重点查已成交和已撤销状态
+        }
+        logger.info(f"\n🔍 [3/3] 调用GET /trade/orders-history（历史订单）：ordId={ord_id}, instId={inst_id}")
+        history_orders_response = exchange.private_get_trade_orders_history(history_orders_params)
+        all_responses["history_orders"] = history_orders_response
+        logger.info(f"📋 历史订单原始响应：{history_orders_response}")
+        
+        return all_responses
+        
     except Exception as e:
-        logger.error(f"❌ 查询订单信息出错：{str(e)}")
-        return None
+        logger.error(f"❌ 订单信息查询出错：{str(e)}")
+        return all_responses  # 即使部分接口失败，也返回已获取的响应
 
 
 """通过修改触发价为0撤销附带的止盈止损单（严格遵循OKX文档）"""
@@ -142,8 +181,8 @@ def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str, order_id: st
     3. 设置触发价为0表示删除止盈止损（文档说明）
     参考文档：POST /修改订单 中attachAlgoOrds参数说明
     """
-    if not attach_algo_id:
-        logger.warning("⚠️ 缺少必填参数attachAlgoId，无法修改附带止盈止损单")
+    if not attach_algo_id or not order_id:
+        logger.warning("⚠️ 缺少必填参数attachAlgoId / order_id，无法修改附带止盈止损单")
         return False
         
     try:
