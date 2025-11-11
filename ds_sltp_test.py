@@ -759,28 +759,9 @@ def run_short_sl_tp_test():
     
     logger.info(f"✅ 空单持仓建立: {short_position['size']}张")
     
-    # 阶段2: 使用优化查询确认止盈止损设置
+    # 阶段2: 取消现有止盈止损单
     logger.info("")
-    logger.info("🔹 阶段2: 确认止盈止损设置")
-    logger.info("-" * 40)
-    
-    time.sleep(3)
-    has_sl_tp = check_sl_tp_status(short_order_id)
-    
-    if not has_sl_tp:
-        logger.warning("⚠️ 未发现止损止盈信息，尝试分开设置...")
-        recalculated_sl, recalculated_tp = calculate_stop_loss_take_profit_prices('short', short_position['entry_price'])
-        set_sl_tp_separately('short', short_position['size'], recalculated_sl, recalculated_tp)
-        time.sleep(2)
-        has_sl_tp = check_sl_tp_status(short_order_id)
-        
-        if not has_sl_tp:
-            logger.error("❌ 止损止盈设置失败")
-            return False
-
-    # 阶段3: 取消现有止盈止损单
-    logger.info("")
-    logger.info("🔹 阶段3: 取消现有止盈止损单")
+    logger.info("🔹 阶段2: 取消现有止盈止损单")
     logger.info("-" * 40)
 
     logger.info("⏳ 等待5秒后取消止盈止损单...")
@@ -814,10 +795,11 @@ def run_short_sl_tp_test():
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
         logger.warning("⚠️ 仍有止盈止损单存在，取消失败...")
+        return False
     
-    # 阶段4: 重新设置止盈止损单
+    # 阶段3: 重新设置止盈止损单
     logger.info("")
-    logger.info("🔹 阶段4: 重新设置止盈止损单")
+    logger.info("🔹 阶段3: 重新设置止盈止损单")
     logger.info("-" * 40)
     
     new_sl, new_tp = calculate_stop_loss_take_profit_prices('short', short_position['entry_price'])
@@ -831,17 +813,17 @@ def run_short_sl_tp_test():
     else:
         logger.warning("⚠️ 重新设置的止盈止损单未查询到")
 
-    # 阶段5: 等待后平仓
+    # 阶段4: 等待后平仓
     logger.info("")
-    logger.info("🔹 阶段5: 等待后平仓")
+    logger.info("🔹 阶段4: 等待后平仓")
     logger.info("-" * 40)
     
     logger.info("⏳ 等待5秒...")
     time.sleep(5)
 
-    # 阶段6: 平仓
+    # 阶段5: 平仓
     logger.info("")
-    logger.info("🔹 阶段6: 平仓")
+    logger.info("🔹 阶段5: 平仓")
     logger.info("-" * 40)
     
     close_order_id = create_limit_close_order('short', short_position['size'])
@@ -864,18 +846,18 @@ def run_short_sl_tp_test():
             logger.error("❌ 市价平仓失败")
             return False
 
-    # 阶段7: 确认仓位已平
+    # 阶段6: 确认仓位已平
     logger.info("")
-    logger.info("🔹 阶段7: 确认仓位已平")
+    logger.info("🔹 阶段6: 确认仓位已平")
     logger.info("-" * 40)
     
     if not verify_position_closed():
         logger.error("❌ 仓位未完全平掉")
         return False
 
-    # 阶段8: 清理剩余止盈止损单
+    # 阶段7: 清理剩余止盈止损单
     logger.info("")
-    logger.info("🔹 阶段8: 清理剩余止盈止损单")
+    logger.info("🔹 阶段7: 清理剩余止盈止损单")
     logger.info("-" * 40)
     
     if check_sl_tp_orders():
@@ -927,7 +909,7 @@ def main():
         
         logger.info("🧹 执行测试后清理...")
         cleanup_after_test()
-        
+
         if success:
             logger.info("🎊 测试成功完成!")
         else:
