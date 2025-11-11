@@ -923,7 +923,7 @@ def run_short_sl_tp_test():
     time.sleep(5)
 
     # 使用新的全能撤销函数
-    if cancel_all_sl_tp_orders_versatile():
+    if cancel_all_attached_sl_tp_versatile(short_order_id):
         logger.info("✅ 止盈止损单取消成功")
     else:
         logger.error("❌ 止盈止损单取消失败")
@@ -937,7 +937,7 @@ def run_short_sl_tp_test():
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
         logger.warning("⚠️ 仍有止盈止损单存在，尝试再次取消...")
-        if cancel_all_sl_tp_orders_versatile() and not check_sl_tp_orders():
+        if cancel_all_attached_sl_tp_versatile(short_order_id) and not check_sl_tp_orders():
             logger.info("✅ 再次取消后确认已无止损止盈单")
         else:
             logger.error("❌ 无法完全取消止盈止损单，测试中止")
