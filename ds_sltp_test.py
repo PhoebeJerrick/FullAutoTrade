@@ -234,6 +234,159 @@ def get_main_order_state(ord_id: str, inst_id: str) -> Optional[str]:
         logger.error(f"查询主订单状态出错：{str(e)}")
         return None
 
+
+def get_sl_tp_related_info(main_ord_id: str, inst_id: str) -> Dict[str, any]:
+    """
+    全能订单信息查询接口（增强版）：
+    1. 详细记录每一步查询过程、参数和结果
+    2. 针对关键节点（如主订单状态获取、ID提取）提供明确提示
+    3. 错误场景附带可能原因分析，辅助快速定位问题
+    返回数据结构保持不变，但日志更丰富
+    """
+    # 初始化返回结果（带默认值，避免后续KeyError）
+    result = {
+        "main_order_state": None,
+        "attach_algo_ids": [],
+        "algo_orders_details": [],
+        "raw_main_order": None,
+        "raw_pending_orders": None
+    }
+    
+    logger.info("\n" + "="*60)
+    logger.info(f"🚀 开始执行全能订单信息查询：主订单ID={main_ord_id}，产品ID={inst_id}")
+    logger.info("="*60)
+    
+    try:
+        # --------------------------
+        # 1. 查询主订单详情（核心步骤）
+        # --------------------------
+        logger.info("\n🔍 步骤1/2：查询主订单详情（GET /trade/order）")
+        main_order_params = {
+            "instId": inst_id,
+            "ordId": main_ord_id
+        }
+        logger.info(f"   请求参数：{main_order_params}")
+        
+        # 执行查询
+        main_order_resp = exchange.private_get_trade_order(main_order_params)
+        result["raw_main_order"] = main_order_resp
+        logger.info(f"   接口返回状态：{'成功' if main_order_resp.get('code') == '0' else '失败'}")
+        logger.info(f"   原始响应（简版）：code={main_order_resp.get('code')}, msg={main_order_resp.get('msg')}")
+        
+        # 校验主订单响应有效性
+        if not main_order_resp:
+            logger.error("   ❌ 主订单查询失败：接口未返回任何数据（可能网络超时）")
+            return result
+        if main_order_resp.get("code") != "0":
+            logger.error(f"   ❌ 主订单查询失败：接口返回错误，code={main_order_resp.get('code')}, msg={main_order_resp.get('msg')}")
+            logger.error("   可能原因：主订单ID错误、产品ID不匹配或权限不足")
+            return result
+        if not main_order_resp.get("data"):
+            logger.error("   ❌ 主订单查询失败：响应中无data字段（可能订单已被删除）")
+            return result
+        
+        # 解析主订单核心数据
+        main_order_data = main_order_resp["data"][0]
+        logger.info(f"   主订单数据解析成功：ordId={main_order_data.get('ordId')}, state={main_order_data.get('state')}")
+        
+        # 提取主订单状态
+        result["main_order_state"] = main_order_data.get("state")
+        if result["main_order_state"]:
+            logger.info(f"   ✅ 提取主订单状态：{result['main_order_state']}")
+        else:
+            logger.warning("   ⚠️ 未提取到主订单状态（state字段为空），可能接口响应格式变更")
+        
+        # 提取未成交时的附带止盈止损ID（attachAlgoId）
+        logger.info("   开始提取未成交阶段的附带止盈止损ID（attachAlgoId）")
+        attach_algo_ords = main_order_data.get("attachAlgoOrds", [])
+        logger.info(f"   主订单关联的attachAlgoOrds数量：{len(attach_algo_ords)}")
+        
+        # 过滤有效ID
+        valid_attach_ids = []
+        for idx, ord_info in enumerate(attach_algo_ords):
+            attach_id = ord_info.get("attachAlgoId")
+            if attach_id and attach_id != "Unknown":
+                valid_attach_ids.append(attach_id)
+                logger.info(f"   第{idx+1}个附带订单：attachAlgoId={attach_id}（有效）")
+            else:
+                logger.info(f"   第{idx+1}个附带订单：attachAlgoId={attach_id}（无效，跳过）")
+        
+        result["attach_algo_ids"] = valid_attach_ids
+        logger.info(f"   ✅ 提取到有效attachAlgoId数量：{len(valid_attach_ids)}")
+        
+        # --------------------------
+        # 2. 查询已委托的止盈止损单（针对主订单成交后场景）
+        # --------------------------
+        logger.info("\n🔍 步骤2/2：查询已委托的止盈止损单（GET /trade/orders-pending）")
+        pending_params = {
+            "instType": "SWAP",
+            "instId": inst_id,
+            "ordType": "conditional,oco",  # 仅查条件单和OCO单
+            "state": "live"                 # 仅查活跃订单
+        }
+        logger.info(f"   请求参数：{pending_params}")
+        
+        # 执行查询
+        pending_resp = exchange.private_get_trade_orders_pending(pending_params)
+        result["raw_pending_orders"] = pending_resp
+        logger.info(f"   接口返回状态：{'成功' if pending_resp.get('code') == '0' else '失败'}")
+        logger.info(f"   原始响应（简版）：code={pending_resp.get('code')}, 订单数量={len(pending_resp.get('data', []))}")
+        
+        # 校验未成交订单响应有效性
+        if not pending_resp:
+            logger.error("   ❌ 未成交订单查询失败：接口未返回任何数据（可能网络超时）")
+            return result
+        if pending_resp.get("code") != "0":
+            logger.error(f"   ❌ 未成交订单查询失败：code={pending_resp.get('code')}, msg={pending_resp.get('msg')}")
+            logger.error("   可能原因：产品类型错误（非SWAP）、权限不足或参数格式错误")
+            return result
+        
+        # 筛选与当前主订单关联的已委托订单（通过attachOrdId匹配）
+        logger.info("   开始筛选与主订单关联的已委托止盈止损单（匹配attachOrdId）")
+        related_algos = []
+        all_pending_orders = pending_resp.get("data", [])
+        logger.info(f"   接口返回的未成交订单总数：{len(all_pending_orders)}")
+        
+        for idx, order in enumerate(all_pending_orders):
+            order_attach_ord_id = order.get("attachOrdId")  # 关联的主订单ID
+            algo_id = order.get("algoId")
+            ord_type = order.get("ordType")
+            
+            # 匹配主订单ID
+            if order_attach_ord_id == main_ord_id:
+                related_algos.append({
+                    "algoId": algo_id,
+                    "ordType": ord_type,
+                    "slTriggerPx": order.get("slTriggerPx", ""),
+                    "tpTriggerPx": order.get("tpTriggerPx", "")
+                })
+                logger.info(f"   第{idx+1}个订单：匹配主订单！algoId={algo_id}, ordType={ord_type}")
+            else:
+                # 不匹配的订单仅简要记录（避免日志冗余）
+                logger.debug(f"   第{idx+1}个订单：attachOrdId={order_attach_ord_id}（不匹配当前主订单，跳过）")
+        
+        result["algo_orders_details"] = related_algos
+        logger.info(f"   ✅ 筛选到与主订单关联的已委托止盈止损单数量：{len(related_algos)}")
+        
+        # --------------------------
+        # 查询完成总结
+        # --------------------------
+        logger.info("\n" + "="*60)
+        logger.info("📊 全能订单信息查询完成，关键结果总结：")
+        logger.info(f"   主订单状态：{result['main_order_state']}")
+        logger.info(f"   未成交附带止盈止损ID数量：{len(result['attach_algo_ids'])}")
+        logger.info(f"   已成交已委托止盈止损单数量：{len(result['algo_orders_details'])}")
+        logger.info("="*60 + "\n")
+        
+        return result
+        
+    except Exception as e:
+        logger.error("\n" + "="*60, exc_info=True)  # 打印完整堆栈信息
+        logger.error(f"💥 全能订单信息查询异常终止：{str(e)}")
+        logger.error("   可能原因：网络中断、接口版本变更或参数格式错误")
+        logger.error("="*60 + "\n")
+        return result
+
 """获取主订单关联的所有附带止盈止损单的attachAlgoId"""
 def get_attach_algo_ids_from_main_order(main_ord_id: str) -> List[str]:
     """从主订单详情中提取附带止盈止损单的attachAlgoId（文档中attachAlgoOrds字段）"""
@@ -984,6 +1137,11 @@ def cancel_sl_tp_by_custom_id(target_cl_ord_ids: List[str]) -> bool:
     except Exception as e:
         logger.error(f"兜底撤销失败: {str(e)}")
         return False
+
+
+
+
+
 
 def run_short_sl_tp_test():
     """运行空单止盈止损测试流程"""
