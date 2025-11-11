@@ -102,32 +102,29 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         logger.error(f"创建限价平仓订单失败: {str(e)}")
         return None
 
-def get_sl_tp_related_info(main_ord_id: str, inst_id: str) -> Dict[str, any]:
+def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, any]:
     """
-    全能订单信息查询接口（增强版）
+    获取订单综合信息（优化版）
+    只调用必要的接口，避免重复查询
     """
     result = {
         "main_order_state": None,
         "attach_algo_ids": [],
         "algo_orders_details": [],
-        "raw_main_order": None,
-        "raw_pending_orders": None
+        "success": False
     }
     
-    logger.info("\n" + "="*60)
-    logger.info(f"🚀 开始执行全能订单信息查询：主订单ID={main_ord_id}，产品ID={inst_id}")
-    logger.info("="*60)
-    
     try:
-        # 1. 查询主订单详情
-        logger.info("\n🔍 步骤1/2：查询主订单详情（GET /trade/order）")
+        inst_id = get_correct_inst_id()
+        
+        # 1. 查询主订单详情（核心信息源）
+        logger.info(f"🔍 查询主订单详情: {main_ord_id}")
         main_order_params = {
             "instId": inst_id,
             "ordId": main_ord_id
         }
         
         main_order_resp = exchange.private_get_trade_order(main_order_params)
-        result["raw_main_order"] = main_order_resp
         
         if not main_order_resp or main_order_resp.get("code") != "0" or not main_order_resp.get("data"):
             logger.error("❌ 主订单查询失败")
@@ -137,64 +134,44 @@ def get_sl_tp_related_info(main_ord_id: str, inst_id: str) -> Dict[str, any]:
         result["main_order_state"] = main_order_data.get("state")
         logger.info(f"   主订单状态: {result['main_order_state']}")
         
-        # 提取附带止盈止损ID
+        # 从主订单中提取attach_algo_ids（唯一可靠来源）
         attach_algo_ords = main_order_data.get("attachAlgoOrds", [])
         valid_attach_ids = [ord.get("attachAlgoId") for ord in attach_algo_ords if ord.get("attachAlgoId")]
         result["attach_algo_ids"] = valid_attach_ids
-        logger.info(f"   附带止盈止损ID数量: {len(valid_attach_ids)}")
+        logger.info(f"   附带止盈止损ID: {valid_attach_ids}")
         
-        # 2. 查询已委托的止盈止损单
-        logger.info("\n🔍 步骤2/2：查询已委托的止盈止损单（GET /trade/orders-pending）")
-        pending_params = {
-            "instType": "SWAP",
-            "instId": inst_id,
-            #"ordType": "market",
-            "state": "live"
-        }
+        # 2. 只有当主订单已成交时，才查询已委托的止盈止损单
+        if result["main_order_state"] == "filled":
+            logger.info("🔍 查询已委托的止盈止损单")
+            pending_params = {
+                "instType": "SWAP",
+                "instId": inst_id,
+                # 移除ordType参数，因为conditional/oco不在这个接口中
+            }
+            
+            pending_resp = exchange.private_get_trade_orders_pending(pending_params)
+            
+            if pending_resp and pending_resp.get("code") == "0":
+                # 筛选与当前主订单关联的已委托订单
+                related_algos = []
+                for order in pending_resp.get("data", []):
+                    if order.get("attachOrdId") == main_ord_id:
+                        related_algos.append({
+                            "algoId": order.get("algoId"),
+                            "ordType": order.get("ordType"),
+                            "slTriggerPx": order.get("slTriggerPx", ""),
+                            "tpTriggerPx": order.get("tpTriggerPx", "")
+                        })
+                
+                result["algo_orders_details"] = related_algos
+                logger.info(f"   已委托止盈止损单: {len(related_algos)}个")
         
-        pending_resp = exchange.private_get_trade_orders_pending(pending_params)
-        result["raw_pending_orders"] = pending_resp
-        
-        if not pending_resp or pending_resp.get("code") != "0":
-            logger.error("❌ 未成交订单查询失败")
-            return result
-        
-        # 筛选与当前主订单关联的已委托订单
-        related_algos = []
-        for order in pending_resp.get("data", []):
-            if order.get("attachOrdId") == main_ord_id:
-                related_algos.append({
-                    "algoId": order.get("algoId"),
-                    "ordType": order.get("ordType"),
-                    "slTriggerPx": order.get("slTriggerPx", ""),
-                    "tpTriggerPx": order.get("tpTriggerPx", "")
-                })
-        
-        result["algo_orders_details"] = related_algos
-        logger.info(f"   已委托止盈止损单数量: {len(related_algos)}")
-        
-        logger.info("\n📊 查询完成总结:")
-        logger.info(f"   主订单状态: {result['main_order_state']}")
-        logger.info(f"   附带止盈止损ID: {result['attach_algo_ids']}")
-        logger.info(f"   已委托止盈止损单: {len(result['algo_orders_details'])}个")
-        
+        result["success"] = True
         return result
         
     except Exception as e:
-        logger.error(f"全能订单信息查询异常: {str(e)}")
+        logger.error(f"订单综合信息查询异常: {str(e)}")
         return result
-
-def get_main_order_state(ord_id: str, inst_id: str) -> Optional[str]:
-    """返回主订单状态"""
-    try:
-        params = {"instId": inst_id, "ordId": ord_id}
-        response = exchange.private_get_trade_order(params)
-        if response and response.get("code") == "0" and response.get("data"):
-            return response["data"][0].get("state")
-        return None
-    except Exception as e:
-        logger.error(f"查询主订单状态出错: {str(e)}")
-        return None
 
 def amend_untraded_sl_tp(main_ord_id: str, attach_algo_id: str, inst_id: str) -> bool:
     """适用于主订单未完全成交，止盈止损未委托的场景"""
@@ -247,58 +224,28 @@ def amend_traded_sl_tp(algo_id: str, inst_id: str) -> bool:
         logger.error(f"修改出错: {str(e)}")
         return False
 
-def get_attach_algo_ids_from_main_order(main_ord_id: str) -> List[str]:
-    """从主订单详情中提取附带止盈止损单的attachAlgoId"""
-    try:
-        inst_id = get_correct_inst_id()
-        params = {
-            "instId": inst_id,
-            "ordId": main_ord_id
-        }
-        
-        response = exchange.private_get_trade_order(params)
-        
-        if response and response.get("code") == "0":
-            main_order_data = response.get("data", [])[0] if response.get("data") else {}
-            attach_algo_ords = main_order_data.get("attachAlgoOrds", [])
-            attach_algo_ids = [ord.get("attachAlgoId") for ord in attach_algo_ords if ord.get("attachAlgoId")]
-            
-            if attach_algo_ids:
-                logger.info(f"📌 获取到{len(attach_algo_ids)}个attachAlgoId")
-                return attach_algo_ids
-            else:
-                logger.warning("⚠️ 未关联任何附带止盈止损单")
-                return []
-        else:
-            logger.error(f"❌ 查询主订单详情失败: {response}")
-            return []
-            
-    except Exception as e:
-        logger.error(f"获取attachAlgoId出错: {str(e)}")
-        return []
-
 def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
     """全能撤销函数（区分主订单状态，调用对应接口）"""
     if not main_ord_id:
         logger.error("❌ 必须提供主订单ID")
         return False
         
-    inst_id = get_correct_inst_id()
-    main_state = get_main_order_state(main_ord_id, inst_id)
-    if not main_state:
-        logger.error("❌ 无法获取主订单状态，撤销中止")
+    # 获取订单综合信息（一次性查询）
+    order_info = get_order_comprehensive_info(main_ord_id)
+    if not order_info["success"]:
+        logger.error("❌ 无法获取订单信息，撤销中止")
         return False
         
+    main_state = order_info["main_order_state"]
     logger.info(f"📊 主订单{main_ord_id}当前状态: {main_state}")
-    success = True
     
-    # 使用增强查询获取详细信息
-    sl_tp_info = get_sl_tp_related_info(main_ord_id, inst_id)
+    inst_id = get_correct_inst_id()
+    success = True
     
     # 分支1：主订单未完全成交
     if main_state in ["live", "partially_filled"]:
         logger.info("🔹 处理未完全成交场景")
-        attach_algo_ids = sl_tp_info["attach_algo_ids"]
+        attach_algo_ids = order_info["attach_algo_ids"]
         if not attach_algo_ids:
             logger.info("✅ 未发现未委托的止盈止损单")
             return True
@@ -312,7 +259,7 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
     # 分支2：主订单已完全成交
     elif main_state == "filled":
         logger.info("🔹 处理已完全成交场景")
-        algo_orders = sl_tp_info["algo_orders_details"]
+        algo_orders = order_info["algo_orders_details"]
         if not algo_orders:
             logger.info("✅ 未发现已委托的止盈止损单")
             return True
@@ -328,7 +275,7 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
         logger.info(f"ℹ️ 主订单状态为{main_state}，无需处理")
         return True
     
-    time.sleep(3)
+    time.sleep(2)
     if success:
         logger.info("✅ 所有止盈止损单撤销成功")
         return True
@@ -527,12 +474,11 @@ def set_sl_tp_separately(side: str, amount: float, stop_loss_price: float, take_
         return result
 
 def check_sl_tp_status(main_ord_id: str) -> bool:
-    """使用增强查询检查止损止盈状态"""
-    inst_id = get_correct_inst_id()
-    sl_tp_info = get_sl_tp_related_info(main_ord_id, inst_id)
+    """使用优化查询检查止损止盈状态"""
+    order_info = get_order_comprehensive_info(main_ord_id)
     
-    has_attach_ids = len(sl_tp_info["attach_algo_ids"]) > 0
-    has_algo_orders = len(sl_tp_info["algo_orders_details"]) > 0
+    has_attach_ids = len(order_info["attach_algo_ids"]) > 0
+    has_algo_orders = len(order_info["algo_orders_details"]) > 0
     
     if has_attach_ids or has_algo_orders:
         logger.info("✅ 发现有效的止损止盈设置")
@@ -598,7 +544,7 @@ def run_short_sl_tp_test():
     
     logger.info(f"✅ 空单持仓建立: {short_position['size']}张")
     
-    # 阶段2: 使用增强查询确认止盈止损设置
+    # 阶段2: 使用优化查询确认止盈止损设置
     logger.info("")
     logger.info("🔹 阶段2: 确认止盈止损设置")
     logger.info("-" * 40)
