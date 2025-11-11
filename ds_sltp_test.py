@@ -123,12 +123,14 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, Any]:
         inst_id = get_correct_inst_id()
         
         # 1. 查询主订单详情（核心信息源）
-        logger.info(f"🔍 查询主订单详情: {main_ord_id}")
+        logger.info(f"🔍 get_order_comprehensive_info: {main_ord_id}")
+        logger.info(f"🔍private_get_trade_order 查询主订单请求详情: {main_ord_id}")
         main_order_params = {
             "instId": inst_id,
-            "ordId": main_ord_id
+            "ordId": main_ord_id,
         }
-        
+        logger.info(json.dumps(main_order_params, indent=2, ensure_ascii=False))
+
         main_order_resp = exchange.private_get_trade_order(main_order_params)
         
         # 打印完整的API响应信息
@@ -155,14 +157,14 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, Any]:
         valid_attach_ids = [ord.get("attachAlgoId") for ord in attach_algo_ords if ord.get("attachAlgoId")]
         result["attach_algo_ids"] = valid_attach_ids
         
-        # 详细打印附带止盈止损信息
-        if valid_attach_ids:
-            logger.info(f"📋 主订单附带止盈止损详细信息:")
-            for idx, algo_ord in enumerate(attach_algo_ords):
-                logger.info(f"   止盈止损单 #{idx+1}:")
-                logger.info(json.dumps(algo_ord, indent=2, ensure_ascii=False))
-        else:
-            logger.info("ℹ️ 未发现附带止盈止损单")
+        # # 详细打印附带止盈止损信息
+        # if valid_attach_ids:
+        #     logger.info(f"📋 主订单附带止盈止损详细信息:")
+        #     for idx, algo_ord in enumerate(attach_algo_ords):
+        #         logger.info(f"   止盈止损单 #{idx+1}:")
+        #         logger.info(json.dumps(algo_ord, indent=2, ensure_ascii=False))
+        # else:
+        #     logger.info("ℹ️ 未发现附带止盈止损单")
 
         # 关键修复：只要有attach_algo_ids就认为有有效的止损止盈设置
         if valid_attach_ids:
@@ -187,7 +189,7 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, Any]:
             logger.info("ℹ️ 未发现有效的止损止盈设置")
             result["has_valid_sl_tp"] = False
         
-        # 2. 只有当主订单已成交时，才查询已委托的止盈止损单（作为补充信息）
+        # 2. 查询已委托的分离止盈止损单
         if result["main_order_state"] == "filled":
             logger.info("🔍 查询已委托的止盈止损单（补充信息）")
             pending_params = {
@@ -300,10 +302,10 @@ def amend_traded_sl_tp(algo_id: str, algo_cl_ord_id: str, inst_id: str) -> bool:
         logger.error(f"修改出错: {str(e)}")
         return False
 
-def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], algo_cl_ord_ids: List[str], main_order_state: str) -> bool:
+def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], algo_cl_ord_ids: List[str], main_order_state: str, has_activated_sl_tp: bool = False) -> bool:
     """
     专门处理附带止盈止损单的撤销
-    根据主订单状态选择正确的撤销方式
+    根据主订单状态和止盈止损单激活状态选择正确的撤销方式
     """
     if not attach_algo_ids and not algo_cl_ord_ids:
         logger.info("✅ 没有需要撤销的附带止盈止损单")
@@ -312,11 +314,21 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
     inst_id = get_correct_inst_id()
     success = True
     
-    logger.info(f"🔧 开始撤销附带止盈止损单, 主订单状态: {main_order_state}")
+    logger.info(f"🔧 开始撤销附带止盈止损单, 主订单状态: {main_order_state}, 止盈止损激活状态: {has_activated_sl_tp}")
     
-    # 根据主订单状态选择撤销方式
-    if main_order_state in ["live", "partially_filled"]:
-        # 主订单未完全成交，使用amend-order接口和attach_algo_ids
+    # 关键修复：根据止盈止损单是否激活选择撤销方式
+    if not has_activated_sl_tp:
+        # 止盈止损单未激活，使用amend-order接口
+        logger.info("🔄 止盈止损单未激活，使用amend-order接口撤销")
+        for attach_algo_id in attach_algo_ids:
+            if not amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
+                logger.error(f"❌ 未激活止盈止损单撤销失败: {attach_algo_id}")
+                success = False
+            else:
+                logger.info(f"✅ 未激活止盈止损单撤销成功: {attach_algo_id}")
+            time.sleep(1)
+    elif main_order_state in ["live", "partially_filled"]:
+        # 主订单未完全成交，止盈止损单未激活
         logger.info("🔄 使用amend-order接口撤销未成交止盈止损")
         for attach_algo_id in attach_algo_ids:
             if not amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
@@ -325,8 +337,8 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
             else:
                 logger.info(f"✅ 附带止盈止损单撤销成功: {attach_algo_id}")
             time.sleep(1)
-    elif main_order_state == "filled":
-        # 主订单已完全成交，使用amend-algos接口和algo_cl_ord_ids
+    elif main_order_state == "filled" and has_activated_sl_tp:
+        # 主订单已完全成交，止盈止损单已激活
         logger.info("🔄 使用amend-algos接口撤销已委托止盈止损")
         for algo_cl_ord_id in algo_cl_ord_ids:
             if not amend_traded_sl_tp(None, algo_cl_ord_id, inst_id):
@@ -336,7 +348,7 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
                 logger.info(f"✅ 已委托止盈止损单撤销成功: {algo_cl_ord_id}")
             time.sleep(1)
     else:
-        logger.warning(f"⚠️ 主订单状态为 {main_order_state}，无法确定撤销方式")
+        logger.warning(f"⚠️ 无法确定撤销方式: 主订单状态={main_order_state}, 止盈止损激活状态={has_activated_sl_tp}")
         success = False
     
     return success
@@ -737,7 +749,6 @@ def run_short_sl_tp_test():
         if sl_tp_order:
             logger.info(f"✅ 找到止盈止损订单: {sl_tp_order.get('algoId')}")
 
-            
     short_order_id = short_order_result['order_id']
     # 保存附带止盈止损ID
     saved_attach_algo_ids = short_order_result.get('attach_algo_ids', [])
@@ -764,10 +775,14 @@ def run_short_sl_tp_test():
     logger.info("⏳ 等待5秒后取消止盈止损单...")
     time.sleep(5)
 
+
     # 获取当前订单状态信息
     current_order_info = get_order_comprehensive_info(short_order_id)
     current_main_state = current_order_info["main_order_state"]
     current_attach_algo_ids = current_order_info["attach_algo_ids"]
+
+    # 关键修复：检查止盈止损单是否已激活
+    has_activated_sl_tp = len(current_order_info.get("algo_orders_details", [])) > 0
 
     # 使用当前查询到的信息进行撤销
     if current_attach_algo_ids:
@@ -775,8 +790,9 @@ def run_short_sl_tp_test():
         success = cancel_attached_sl_tp_by_algo_ids(
             short_order_id, 
             current_attach_algo_ids, 
-            short_order_result['algo_cl_ord_ids'],  # 传递我们自定义的algoClOrdId
-            current_main_state
+            short_order_result['algo_cl_ord_ids'],
+            current_main_state,
+            has_activated_sl_tp  # 传递止盈止损激活状态
         )
     else:
         logger.info("🔧 未发现需要撤销的止盈止损单")
