@@ -109,120 +109,117 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         return None
 
 """通过修改触发价为0的方式撤销止损止盈订单 - OKX客服推荐方法"""
-def amend_sl_tp_to_zero(algo_id: Optional[str] = None, cl_ord_id: Optional[str] = None) -> bool:
+def amend_sl_tp_to_zero(ord_id: Optional[str] = None, cl_ord_id: Optional[str] = None, ord_type: str = "") -> bool:
     """
-    通过OKX的amend-order接口（而非algo接口）将止损止盈触发价改为0来实现撤销
-    参考文档: https://www.okx.com/docs-v5/en/#order-trading-amend-order
+    修正点：
+    1. 使用ordId（订单ID）作为标识，而非algoId
+    2. 区分OCO和条件单的参数格式
+    3. 严格遵循接口要求：必须传递ordId或clOrdId
+    参考文档：https://www.okx.com/docs-v5/en/#order-trading-amend-order
     """
-    if not algo_id and not cl_ord_id:
-        logger.warning("⚠️ 没有提供algoId或自定义ID，无法修改订单")
+    # 校验必要参数
+    if not ord_id and not cl_ord_id:
+        logger.warning("⚠️ 必须提供ordId（订单ID）或clOrdId（自定义ID），无法修改订单")
         return False
         
     try:
         inst_id = get_correct_inst_id()
-        # 基础参数：必须包含产品ID和订单标识（algoId或自定义ID）
-        params = {
-            "instId": inst_id,
-            **({"algoId": algo_id} if algo_id else {}),  # 算法订单ID
-            **({"clOrdId": cl_ord_id} if cl_ord_id else {})  # 自定义订单ID（注意这里是clOrdId而非algoClOrdId）
-        }
+        # 基础参数：必须包含产品ID和订单标识（ordId或clOrdId）
+        if ord_id:
+            params = {
+                "instId": inst_id,
+                **({"ordId": ord_id} if ord_id else {}),  # 核心修正：使用ordId而非algoId
+            }
+        else:
+            params = {
+                "instId": inst_id,
+                **({"clOrdId": cl_ord_id} if cl_ord_id else {})
+            }
         
-        # 设置触发价为0（核心撤销逻辑）
-        # 针对止损止盈订单，需要同时修改止损和止盈的触发价
-        params.update({
-            "slTriggerPx": "0",    # 止损触发价设为0
-            "tpTriggerPx": "0",    # 止盈触发价设为0
-            "ordType": "conditional"  # 明确指定为条件单类型（止损止盈属于条件单范畴）
-        })
+        # 区分订单类型，使用正确的触发价参数名
+        if ord_type == "oco":
+            # OCO订单的触发价参数是newSlTriggerPx和newTpTriggerPx
+            params.update({
+                "newSlTriggerPx": "0",  # OCO止损触发价修改参数
+                "newTpTriggerPx": "0",  # OCO止盈触发价修改参数
+                "ordType": "oco"        # 明确订单类型为OCO
+            })
+        else:
+            # 条件单的触发价参数是slTriggerPx和tpTriggerPx
+            params.update({
+                "slTriggerPx": "0",     # 条件单止损触发价修改参数
+                "tpTriggerPx": "0",     # 条件单止盈触发价修改参数
+                "ordType": "conditional"
+            })
             
-        logger.info(f"🔄 尝试通过amend-order修改触发价为0撤销订单: {algo_id or cl_ord_id}")
-        # 关键修正：使用amend-order接口而非algo接口
+        logger.info(f"🔄 尝试修改触发价为0撤销订单: ordId={ord_id}, clOrdId={cl_ord_id}, 类型={ord_type}")
         response = exchange.private_post_trade_amend_order(params)
         
         if response and response.get("code") == "0":
-            logger.info(f"✅ 成功通过修改触发价撤销订单: {algo_id or cl_ord_id}")
+            logger.info(f"✅ 成功撤销订单: ordId={ord_id or cl_ord_id}")
             return True
         else:
-            logger.error(f"❌ 修改触发价撤销订单失败: 响应={response}，参数={params}")
+            logger.error(f"❌ 撤销失败: 响应={response}，参数={params}")
             return False
             
     except Exception as e:
-        logger.error(f"修改触发价撤销订单出错: {str(e)}，参数={params}")
+        logger.error(f"修改订单出错: {str(e)}，参数={params}")
         return False
 
 """全能撤销当前币种的所有止损止盈订单"""
 def cancel_all_sl_tp_orders_versatile() -> bool:
-    """
-    增强版全能撤销函数：
-    1. 常规撤销 -> 2. 触发价改0撤销 -> 3. 二次检查 -> 4. 极端情况重试
-    """
     inst_id = get_correct_inst_id()
     success = True
     
-    # 步骤1: 尝试常规方法撤销已知订单
+    # 步骤1: 常规撤销
     logger.info("🔄 第一步: 尝试常规方法撤销止损止盈订单")
-    regular_cancel_result = cancel_all_sl_tp_orders()  # 假设此函数已存在
-    if not regular_cancel_result:
-        logger.warning("common cancel failed.")
-    time.sleep(2)  # 等待系统同步
+    regular_cancel_result = cancel_all_sl_tp_orders()
+    time.sleep(2)
     
-    # 步骤2: 查询所有未撤销的止损止盈订单（重点获取algoId）
-    logger.info("🔍 第二步: 查询剩余未撤销的止损止盈订单")
+    # 步骤2: 查询活跃的止损止盈订单（获取ordId和类型）
+    logger.info("🔍 第二步: 查询剩余活跃的止损止盈订单")
     params = {
         'instType': 'SWAP',
         'instId': inst_id,
-        'ordType': 'conditional,oco',  # 明确查询条件单（止损止盈属于此类）
-        'state': 'live'  # 只查活跃状态的订单
+        'ordType': 'conditional,oco',  # 同时查询条件单和OCO单
+        'state': 'live'  # 只查未触发的活跃订单
     }
     response = exchange.private_get_trade_orders_algo_pending(params)
     remaining_orders = []
     if response and response.get('code') == '0':
         remaining_orders = response.get('data', [])
-        logger.info(f"📌 查找到{len(remaining_orders)}个活跃的止损止盈订单")
+        logger.info(f"📌 查找到{len(remaining_orders)}个活跃订单")
     else:
-        logger.error(f"❌ 查询剩余订单失败: {response}")
+        logger.error(f"❌ 查询订单失败: {response}")
         return False
     
     if not remaining_orders:
-        logger.info("✅ 没有剩余止损止盈订单，撤销完成")
+        logger.info("✅ 没有剩余订单，撤销完成")
         return True
         
-    # 步骤3: 对每个剩余订单用"触发价改0"方法撤销
+    # 步骤3: 逐个处理订单（核心修正：使用ordId和订单类型）
     logger.warning(f"⚠️ 开始处理{len(remaining_orders)}个未撤销订单...")
     for order in remaining_orders:
-        algo_id = order.get('algoId')
-        cl_ord_id = order.get('clOrdId')  # 注意这里是clOrdId而非algoClOrdId
-        ord_type = order.get('ordType', 'unknown')
+        ord_id = order.get('ordId')  # 关键：获取ordId而非algoId
+        cl_ord_id = order.get('clOrdId')
+        ord_type = order.get('ordType', 'conditional')  # 获取订单类型（oco或conditional）
         
-        logger.info(f"处理订单: algoId={algo_id}, clOrdId={cl_ord_id}, 类型={ord_type}")
-        if not amend_sl_tp_to_zero(algo_id, cl_ord_id):
-            logger.error(f"❌ 订单{algo_id or cl_ord_id}撤销失败")
+        if not amend_sl_tp_to_zero(ord_id, cl_ord_id, ord_type):
+            logger.error(f"❌ 订单{ord_id or cl_ord_id}（类型{ord_type}）撤销失败")
             success = False
         time.sleep(1)  # 避免接口限流
     
-    # 步骤4: 最终检查并二次重试
-    time.sleep(3)  # 等待修改生效
+    # 步骤4: 最终检查
+    time.sleep(3)
     final_response = exchange.private_get_trade_orders_algo_pending(params)
     final_remaining = final_response.get('data', []) if (final_response and final_response.get('code') == '0') else []
     
     if not final_remaining:
-        logger.info("✅ 所有止损止盈订单已成功撤销")
+        logger.info("✅ 所有订单已成功撤销")
         return True
     else:
-        logger.warning(f"⚠️ 仍有{len(final_remaining)}个订单未撤销，尝试二次处理...")
-        # 二次重试未成功的订单
-        for order in final_remaining:
-            amend_sl_tp_to_zero(order.get('algoId'), order.get('clOrdId'))
-        time.sleep(2)
-        # 最终确认
-        last_check = exchange.private_get_trade_orders_algo_pending(params)
-        last_remaining = last_check.get('data', []) if (last_check and last_check.get('code') == '0') else []
-        if not last_remaining:
-            logger.info("✅ 二次处理后所有订单已撤销")
-            return True
-        else:
-            logger.error(f"❌ 仍有{len(last_remaining)}个订单无法撤销，建议手动检查")
-            return False
+        logger.error(f"❌ 仍有{len(final_remaining)}个订单无法撤销，建议手动检查")
+        return False
 
 def get_safe_position_size() -> float:
     """
