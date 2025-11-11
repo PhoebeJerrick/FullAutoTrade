@@ -220,6 +220,19 @@ def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str, order_id: st
         get_raw_order_info(order_id, inst_id)  # 打印完整原始接口信息
         return False
 
+"""查询主订单状态（判断是否完全成交）"""
+def get_main_order_state(ord_id: str, inst_id: str) -> Optional[str]:
+    """返回主订单状态：filled（完全成交）、partially_filled（部分成交）、live（未成交）等"""
+    try:
+        params = {"instId": inst_id, "ordId": ord_id}
+        response = exchange.private_get_trade_order(params)
+        if response and response.get("code") == "0" and response.get("data"):
+            return response["data"][0].get("state")
+        logger.error(f"❌ 查询主订单状态失败：{response}")
+        return None
+    except Exception as e:
+        logger.error(f"查询主订单状态出错：{str(e)}")
+        return None
 
 """获取主订单关联的所有附带止盈止损单的attachAlgoId"""
 def get_attach_algo_ids_from_main_order(main_ord_id: str) -> List[str]:
@@ -252,21 +265,6 @@ def get_attach_algo_ids_from_main_order(main_ord_id: str) -> List[str]:
     except Exception as e:
         logger.error(f"获取attachAlgoId出错：{str(e)}")
         return []
-
-
-"""查询主订单状态（判断是否完全成交）"""
-def get_main_order_state(ord_id: str, inst_id: str) -> Optional[str]:
-    """返回主订单状态：filled（完全成交）、partially_filled（部分成交）、live（未成交）等"""
-    try:
-        params = {"instId": inst_id, "ordId": ord_id}
-        response = exchange.private_get_trade_order(params)
-        if response and response.get("code") == "0" and response.get("data"):
-            return response["data"][0].get("state")
-        logger.error(f"❌ 查询主订单状态失败：{response}")
-        return None
-    except Exception as e:
-        logger.error(f"查询主订单状态出错：{str(e)}")
-        return None
 
 
 """场景1：主订单未完全成交时，用amend-order修改未委托的止盈止损"""
@@ -391,7 +389,7 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
     elif main_state == "filled":
         logger.info("🔹 处理已完全成交场景：使用amend-algos接口")
         # 获取已委托止盈止损单的algoId
-        algo_ids = get_algo_ids_from_filled_order(main_ord_id, inst_id)
+        algo_ids = get_attach_algo_ids_from_main_order(main_ord_id)
         if not algo_ids:
             logger.info("✅ 未发现已委托的止盈止损单")
             return True
