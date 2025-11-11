@@ -109,7 +109,7 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         return None
 
 """通过修改触发价为0撤销附带的止盈止损单（严格遵循OKX文档）"""
-def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str) -> bool:
+def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str, order_id: str) -> bool:
     """
     关键修正：
     1. 必传`attachAlgoId`（系统生成的附带止盈止损订单ID，文档标注必填）
@@ -125,6 +125,7 @@ def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str) -> bool:
         # 严格按照文档构造参数：attachAlgoId为必填，用于标识要修改的附带止盈止损单
         params = {
             "instId": inst_id,
+            "ordId": order_id,
             "attachAlgoOrds": [  # 数组形式，包含要修改的附带止盈止损信息
                 {
                     "attachAlgoId": attach_algo_id,  # 文档标注的必填项
@@ -223,7 +224,7 @@ def cancel_all_attached_sl_tp_versatile(main_ord_id: Optional[str] = None) -> bo
     # 步骤3：逐个撤销（必传attachAlgoId，严格遵循文档）
     logger.warning(f"⚠️ 开始撤销{len(attach_algo_ids)}个附带止盈止损单...")
     for attach_id in attach_algo_ids:
-        if not amend_attached_sl_tp_to_zero(attach_id, inst_id):
+        if not amend_attached_sl_tp_to_zero(attach_id, inst_id, main_ord_id):
             logger.error(f"❌ 撤销失败：attachAlgoId={attach_id}")
             success = False
         time.sleep(1)  # 避免接口限流
