@@ -133,6 +133,7 @@ def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[Dict[str, dict]]:
             "ordId": ord_id
         }
         logger.info(f"\n🔍 [1/3] 调用GET /trade/order（单个订单详情）：ordId={ord_id}, instId={inst_id}")
+        logger.info(f"📋 单个订单原始请求：{single_order_params}")
         single_order_response = exchange.private_get_trade_order(single_order_params)
         all_responses["single_order"] = single_order_response
         logger.info(f"📋 单个订单原始响应：{single_order_response}")
@@ -143,10 +144,10 @@ def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[Dict[str, dict]]:
         pending_orders_params = {
             "instType": "SWAP",  # 现货/合约类型，根据实际场景调整
             "instId": inst_id,   # 限定当前产品
-            "ordType": "conditional,oco",  # 重点查询条件单和OCO单（止盈止损常用类型）
-            "state": "live"      # 只查活跃的未成交订单
+            "ordType": "market",  # 重点查询条件单和OCO单（止盈止损常用类型）
         }
         logger.info(f"\n🔍 [2/3] 调用GET /trade/orders-pending（未成交订单）：instId={inst_id}")
+        logger.info(f"📋 未成交订单原始请求：{pending_orders_params}")
         pending_orders_response = exchange.private_get_trade_orders_pending(pending_orders_params)
         all_responses["pending_orders"] = pending_orders_response
         logger.info(f"📋 未成交订单原始响应：{pending_orders_response}")
@@ -157,10 +158,10 @@ def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[Dict[str, dict]]:
         history_orders_params = {
             "instType": "SWAP",
             "instId": inst_id,
-            "ordId": ord_id,     # 限定查询当前主订单的历史记录
             "state": "filled,canceled"  # 重点查已成交和已撤销状态
         }
         logger.info(f"\n🔍 [3/3] 调用GET /trade/orders-history（历史订单）：ordId={ord_id}, instId={inst_id}")
+        logger.info(f"📋 历史订单原始请求：{history_orders_params}")
         history_orders_response = exchange.private_get_trade_orders_history(history_orders_params)
         all_responses["history_orders"] = history_orders_response
         logger.info(f"📋 历史订单原始响应：{history_orders_response}")
