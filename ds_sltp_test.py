@@ -250,15 +250,23 @@ def amend_traded_sl_tp(algo_id: str, algo_cl_ord_id: str, inst_id: str) -> bool:
             else:
                 logger.error("❌ algo_cl_ord_id 列表为空")
                 return False
-        
+            
         params = {
             "instId": inst_id,
-            "algoId": algo_id,
-            "algoClOrdId": algo_cl_ord_id,  # 现在确保是字符串
             "slTriggerPx": "0",
             "tpTriggerPx": "0"
         }
-        
+
+        if not algo_id:
+            params.update({
+                "algoId": algo_id
+           })
+            
+        if not algo_cl_ord_id:
+            params.update({
+                "algoClOrdId": algo_cl_ord_id  # 现在确保是字符串
+           })
+            
         logger.info(f"🔄 [已成交阶段] 修改已委托止盈止损: algoId={algo_id}, algoClOrdId={algo_cl_ord_id}")
         response = exchange.private_post_trade_amend_algos(params)
         
