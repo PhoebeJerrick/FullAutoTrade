@@ -108,6 +108,31 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
         logger.error(f"创建限价平仓订单失败: {str(e)}")
         return None
 
+def get_raw_order_info(ord_id: str, inst_id: str) -> Optional[dict]:
+    """
+    调用OKX的获取订单信息接口，返回原始响应数据
+    用于撤销失败时诊断订单状态
+    """
+    if not ord_id or not inst_id:
+        logger.warning("⚠️ 查询订单信息失败：缺少ordId或instId")
+        return None
+        
+    try:
+        params = {
+            "instId": inst_id,
+            "ordId": ord_id
+        }
+        logger.info(f"🔍 调用GET /trade/order查询订单信息：ordId={ord_id}, instId={inst_id}")
+        response = exchange.private_get_trade_order(params)
+        
+        # 打印完整原始接口信息（包含所有字段）
+        logger.info(f"📋 原始订单信息响应：{response}")
+        return response
+    except Exception as e:
+        logger.error(f"❌ 查询订单信息出错：{str(e)}")
+        return None
+
+
 """通过修改触发价为0撤销附带的止盈止损单（严格遵循OKX文档）"""
 def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str, order_id: str) -> bool:
     """
@@ -143,10 +168,16 @@ def amend_attached_sl_tp_to_zero(attach_algo_id: str, inst_id: str, order_id: st
             return True
         else:
             logger.error(f"❌ 修改失败：响应={response}，参数={params}")
+            # 撤销失败时，立即查询主订单原始信息
+            logger.info("📌 撤销失败，查询主订单详细信息：")
+            get_raw_order_info(order_id, inst_id)  # 打印完整原始接口信息
             return False
             
     except Exception as e:
         logger.error(f"修改附带止盈止损单出错：{str(e)}，参数={params}")
+        # 撤销失败时，立即查询主订单原始信息
+        logger.info("📌 撤销失败，查询主订单详细信息：")
+        get_raw_order_info(order_id, inst_id)  # 打印完整原始接口信息
         return False
 
 
