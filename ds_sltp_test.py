@@ -250,10 +250,10 @@ def amend_traded_sl_tp(algo_id: str, inst_id: str) -> bool:
         logger.error(f"修改出错: {str(e)}")
         return False
 
-def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str]) -> bool:
+def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], main_order_state: str) -> bool:
     """
     专门处理附带止盈止损单的撤销
-    使用amend-order接口撤销attachAlgoId标识的止盈止损单
+    根据主订单状态选择正确的撤销方式
     """
     if not attach_algo_ids:
         logger.info("✅ 没有需要撤销的附带止盈止损单")
@@ -262,17 +262,50 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
     inst_id = get_correct_inst_id()
     success = True
     
-    logger.info(f"🔧 开始撤销附带止盈止损单: {attach_algo_ids}")
+    logger.info(f"🔧 开始撤销附带止盈止损单: {attach_algo_ids}, 主订单状态: {main_order_state}")
     
-    for attach_algo_id in attach_algo_ids:
-        if not amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
-            logger.error(f"❌ 附带止盈止损单撤销失败: {attach_algo_id}")
-            success = False
+    # 根据主订单状态选择撤销方式
+    if main_order_state in ["live", "partially_filled"]:
+        # 主订单未完全成交，使用amend-order接口
+        for attach_algo_id in attach_algo_ids:
+            if not amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
+                logger.error(f"❌ 附带止盈止损单撤销失败: {attach_algo_id}")
+                success = False
+            else:
+                logger.info(f"✅ 附带止盈止损单撤销成功: {attach_algo_id}")
+            time.sleep(1)
+    elif main_order_state == "filled":
+        # 主订单已完全成交，使用amend-algos接口
+        # 需要先获取algoId
+        order_info = get_order_comprehensive_info(main_ord_id)
+        algo_orders = order_info["algo_orders_details"]
+        
+        if not algo_orders:
+            logger.warning("⚠️ 主订单已成交但未找到对应的algo订单，尝试通过其他方式撤销")
+            # 备选方案：尝试使用amend-untraded方式
+            for attach_algo_id in attach_algo_ids:
+                if not amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
+                    logger.error(f"❌ 附带止盈止损单撤销失败: {attach_algo_id}")
+                    success = False
+                else:
+                    logger.info(f"✅ 附带止盈止损单撤销成功: {attach_algo_id}")
+                time.sleep(1)
         else:
-            logger.info(f"✅ 附带止盈止损单撤销成功: {attach_algo_id}")
-        time.sleep(1)
+            # 使用algoId撤销
+            for algo_order in algo_orders:
+                algo_id = algo_order.get("algoId")
+                if algo_id and not amend_traded_sl_tp(algo_id, inst_id):
+                    logger.error(f"❌ 已委托止盈止损单撤销失败: {algo_id}")
+                    success = False
+                else:
+                    logger.info(f"✅ 已委托止盈止损单撤销成功: {algo_id}")
+                time.sleep(1)
+    else:
+        logger.warning(f"⚠️ 主订单状态为 {main_order_state}，无法确定撤销方式")
+        success = False
     
     return success
+
 
 def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
     """全能撤销函数（修复版）- 正确处理附带止盈止损单"""
@@ -304,10 +337,14 @@ def cancel_all_sl_tp_versatile(main_ord_id: str) -> bool:
             # 这里可以添加更详细的触发价格检查日志
             logger.info(f"   准备撤销附带止盈止损单: {attach_algo_id}")
 
-    # 执行撤销操作
-    logger.info("🔧 开始执行止盈止损撤销操作...")
-    success = cancel_attached_sl_tp_by_algo_ids(main_ord_id, attach_algo_ids)
-    
+    # 关键修复：使用保存的attach_algo_ids进行撤销
+    if saved_attach_algo_ids:
+        logger.info(f"🔧 使用保存的attach_algo_ids进行撤销: {saved_attach_algo_ids}")
+        success = cancel_attached_sl_tp_by_algo_ids(short_order_id, saved_attach_algo_ids, main_state)  # 传入主订单状态
+    else:
+        logger.info("🔧 通过查询获取attach_algo_ids进行撤销")
+        success = cancel_all_sl_tp_versatile(short_order_id)
+
     time.sleep(2)
     
     # 验证撤销结果
@@ -624,7 +661,10 @@ def run_short_sl_tp_test():
     # 关键修复：使用保存的attach_algo_ids进行撤销
     if saved_attach_algo_ids:
         logger.info(f"🔧 使用保存的attach_algo_ids进行撤销: {saved_attach_algo_ids}")
-        success = cancel_attached_sl_tp_by_algo_ids(short_order_id, saved_attach_algo_ids)
+        # 获取当前主订单状态
+        current_order_info = get_order_comprehensive_info(short_order_id)
+        current_main_state = current_order_info["main_order_state"]
+        success = cancel_attached_sl_tp_by_algo_ids(short_order_id, saved_attach_algo_ids, current_main_state)
     else:
         logger.info("🔧 通过查询获取attach_algo_ids进行撤销")
         success = cancel_all_sl_tp_versatile(short_order_id)
