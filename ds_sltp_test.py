@@ -304,12 +304,12 @@ def amend_traded_sl_tp(algo_id: str, algo_cl_ord_id: str, inst_id: str) -> bool:
         logger.error(f"修改出错: {str(e)}")
         return False
 
-def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], algo_cl_ord_ids: List[str], main_order_state: str, has_activated_sl_tp: bool = False) -> bool:
+def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], algo_cl_ord_ids: List[str], attach_algo_cl_ord_ids: List[str], main_order_state: str, has_activated_sl_tp: bool = False) -> bool:
     """
     专门处理附带止盈止损单的撤销
     根据主订单状态和止盈止损单激活状态选择正确的撤销方式
     """
-    if not attach_algo_ids and not algo_cl_ord_ids:
+    if not attach_algo_ids and not algo_cl_ord_ids and not attach_algo_cl_ord_ids:
         logger.info("✅ 没有需要撤销的附带止盈止损单")
         return True
         
@@ -318,7 +318,19 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
     
     logger.info(f"🔧 开始撤销附带止盈止损单, 主订单状态: {main_order_state}, 止盈止损激活状态: {has_activated_sl_tp}")
     
-    # 关键修复：根据止盈止损单是否激活选择撤销方式
+    # 关键修复：优先使用我们自定义的止盈止损ID
+    if attach_algo_cl_ord_ids:
+        logger.info("🔄 优先使用自定义止盈止损ID进行撤销")
+        for algo_cl_ord_id in attach_algo_cl_ord_ids:
+            if not amend_traded_sl_tp(None, algo_cl_ord_id, inst_id):
+                logger.error(f"❌ 使用自定义ID撤销止盈止损单失败: {algo_cl_ord_id}")
+                success = False
+            else:
+                logger.info(f"✅ 使用自定义ID撤销止盈止损单成功: {algo_cl_ord_id}")
+                return True
+            time.sleep(1)
+    
+    # 如果自定义ID撤销失败，尝试其他方式
     if not has_activated_sl_tp:
         # 止盈止损单未激活，使用amend-order接口
         logger.info("🔄 止盈止损单未激活，使用amend-order接口撤销")
@@ -809,15 +821,17 @@ def run_short_sl_tp_test():
     has_activated_sl_tp = len(current_order_info.get("algo_orders_details", [])) > 0
 
     # 使用保存的信息和当前查询的信息进行撤销
-    if current_attach_algo_ids or saved_algo_cl_ord_ids:
+    if current_attach_algo_ids or saved_attach_algo_cl_ord_ids or saved_algo_cl_ord_ids:
         logger.info(f"🔧 进行止盈止损撤销操作")
         logger.info(f"   当前attach_algo_ids: {current_attach_algo_ids}")
+        logger.info(f"   保存的attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_ids}")
         logger.info(f"   保存的algo_cl_ord_ids: {saved_algo_cl_ord_ids}")
         
         success = cancel_attached_sl_tp_by_algo_ids(
             short_order_id, 
             current_attach_algo_ids, 
-            saved_algo_cl_ord_ids,  # 使用保存的algo_cl_ord_ids
+            saved_algo_cl_ord_ids,
+            saved_attach_algo_cl_ord_ids,  # 新增：传递我们自定义的止盈止损ID
             current_main_state,
             has_activated_sl_tp
         )
