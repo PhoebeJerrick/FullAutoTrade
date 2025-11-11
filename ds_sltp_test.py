@@ -111,8 +111,8 @@ def create_limit_close_order(side: str, amount: float) -> Optional[str]:
 """通过修改触发价为0的方式撤销止损止盈订单 - OKX客服推荐方法"""
 def amend_sl_tp_to_zero(algo_id: Optional[str] = None, cl_ord_id: Optional[str] = None) -> bool:
     """
-    通过OKX的amend-order接口将止损止盈触发价改为0来实现撤销
-    参考文档: https://www.okx.com/docs-v5/en/#order-trading-amend-order-algo
+    通过OKX的amend-order接口（而非algo接口）将止损止盈触发价改为0来实现撤销
+    参考文档: https://www.okx.com/docs-v5/en/#order-trading-amend-order
     """
     if not algo_id and not cl_ord_id:
         logger.warning("⚠️ 没有提供algoId或自定义ID，无法修改订单")
@@ -120,99 +120,109 @@ def amend_sl_tp_to_zero(algo_id: Optional[str] = None, cl_ord_id: Optional[str] 
         
     try:
         inst_id = get_correct_inst_id()
+        # 基础参数：必须包含产品ID和订单标识（algoId或自定义ID）
         params = {
             "instId": inst_id,
-            # 必须提供其中一个ID
-            **({"algoId": algo_id} if algo_id else {}),
-            **({"algoClOrdId": cl_ord_id} if cl_ord_id else {})
+            **({"algoId": algo_id} if algo_id else {}),  # 算法订单ID
+            **({"clOrdId": cl_ord_id} if cl_ord_id else {})  # 自定义订单ID（注意这里是clOrdId而非algoClOrdId）
         }
         
-        # 设置新的触发价为0，实际上是撤销订单
-        if algo_id:  # 条件单修改参数
-            params.update({
-                "slTriggerPx": "0",
-                "tpTriggerPx": "0"
-            })
-        else:  # OCO订单修改参数
-            params.update({
-                "newSlTriggerPx": "0",
-                "newTpTriggerPx": "0"
-            })
+        # 设置触发价为0（核心撤销逻辑）
+        # 针对止损止盈订单，需要同时修改止损和止盈的触发价
+        params.update({
+            "slTriggerPx": "0",    # 止损触发价设为0
+            "tpTriggerPx": "0",    # 止盈触发价设为0
+            "ordType": "conditional"  # 明确指定为条件单类型（止损止盈属于条件单范畴）
+        })
             
-        logger.info(f"🔄 尝试通过修改触发价为0撤销订单: {algo_id or cl_ord_id}")
-        response = exchange.private_post_trade_amend_order_algo(params)
+        logger.info(f"🔄 尝试通过amend-order修改触发价为0撤销订单: {algo_id or cl_ord_id}")
+        # 关键修正：使用amend-order接口而非algo接口
+        response = exchange.private_post_trade_amend_order(params)
         
         if response and response.get("code") == "0":
             logger.info(f"✅ 成功通过修改触发价撤销订单: {algo_id or cl_ord_id}")
             return True
         else:
-            logger.error(f"❌ 修改触发价撤销订单失败: {response}")
+            logger.error(f"❌ 修改触发价撤销订单失败: 响应={response}，参数={params}")
             return False
             
     except Exception as e:
-        logger.error(f"修改触发价撤销订单出错: {str(e)}")
+        logger.error(f"修改触发价撤销订单出错: {str(e)}，参数={params}")
         return False
-
 
 """全能撤销当前币种的所有止损止盈订单"""
 def cancel_all_sl_tp_orders_versatile() -> bool:
     """
-    全能撤销函数，尝试多种方法确保止损止盈订单被撤销
-    1. 先尝试常规方法撤销已知订单
-    2. 再通过修改触发价为0的方式撤销
-    3. 最后检查是否还有剩余订单
+    增强版全能撤销函数：
+    1. 常规撤销 -> 2. 触发价改0撤销 -> 3. 二次检查 -> 4. 极端情况重试
     """
     inst_id = get_correct_inst_id()
     success = True
     
-    # 步骤1: 尝试常规方法撤销
+    # 步骤1: 尝试常规方法撤销已知订单
     logger.info("🔄 第一步: 尝试常规方法撤销止损止盈订单")
-    cancel_result = cancel_all_sl_tp_orders()
-    if not cancel_result:
+    regular_cancel_result = cancel_all_sl_tp_orders()  # 假设此函数已存在
+    if not regular_cancel_result:
         logger.warning("common cancel failed.")
-
-    # 等待系统处理
-    time.sleep(2)
+    time.sleep(2)  # 等待系统同步
     
-    # 步骤2: 查询所有未撤销的止损止盈订单
-    logger.info("🔍 检查是否有剩余未撤销的止损止盈订单")
+    # 步骤2: 查询所有未撤销的止损止盈订单（重点获取algoId）
+    logger.info("🔍 第二步: 查询剩余未撤销的止损止盈订单")
     params = {
         'instType': 'SWAP',
         'instId': inst_id,
-        'ordType': 'conditional,oco',
+        'ordType': 'conditional,oco',  # 明确查询条件单（止损止盈属于此类）
+        'state': 'live'  # 只查活跃状态的订单
     }
     response = exchange.private_get_trade_orders_algo_pending(params)
-    
     remaining_orders = []
     if response and response.get('code') == '0':
         remaining_orders = response.get('data', [])
+        logger.info(f"📌 查找到{len(remaining_orders)}个活跃的止损止盈订单")
+    else:
+        logger.error(f"❌ 查询剩余订单失败: {response}")
+        return False
     
     if not remaining_orders:
-        logger.info("✅ 没有发现剩余的止损止盈订单")
+        logger.info("✅ 没有剩余止损止盈订单，撤销完成")
         return True
         
-    logger.warning(f"⚠️ 发现{len(remaining_orders)}个未撤销的止损止盈订单，尝试通过修改触发价撤销")
-    
-    # 步骤3: 对每个剩余订单尝试通过修改触发价为0来撤销
+    # 步骤3: 对每个剩余订单用"触发价改0"方法撤销
+    logger.warning(f"⚠️ 开始处理{len(remaining_orders)}个未撤销订单...")
     for order in remaining_orders:
         algo_id = order.get('algoId')
-        cl_ord_id = order.get('algoClOrdId')
+        cl_ord_id = order.get('clOrdId')  # 注意这里是clOrdId而非algoClOrdId
+        ord_type = order.get('ordType', 'unknown')
         
+        logger.info(f"处理订单: algoId={algo_id}, clOrdId={cl_ord_id}, 类型={ord_type}")
         if not amend_sl_tp_to_zero(algo_id, cl_ord_id):
-            logger.error(f"❌ 无法撤销订单: {algo_id or cl_ord_id}")
+            logger.error(f"❌ 订单{algo_id or cl_ord_id}撤销失败")
             success = False
+        time.sleep(1)  # 避免接口限流
     
-    # 等待系统处理
-    time.sleep(2)
+    # 步骤4: 最终检查并二次重试
+    time.sleep(3)  # 等待修改生效
+    final_response = exchange.private_get_trade_orders_algo_pending(params)
+    final_remaining = final_response.get('data', []) if (final_response and final_response.get('code') == '0') else []
     
-    # 最终检查
-    final_check = check_sl_tp_orders()
-    if not final_check:
+    if not final_remaining:
         logger.info("✅ 所有止损止盈订单已成功撤销")
         return True
     else:
-        logger.warning("⚠️ 仍有止损止盈订单存在，可能需要手动检查")
-        return success
+        logger.warning(f"⚠️ 仍有{len(final_remaining)}个订单未撤销，尝试二次处理...")
+        # 二次重试未成功的订单
+        for order in final_remaining:
+            amend_sl_tp_to_zero(order.get('algoId'), order.get('clOrdId'))
+        time.sleep(2)
+        # 最终确认
+        last_check = exchange.private_get_trade_orders_algo_pending(params)
+        last_remaining = last_check.get('data', []) if (last_check and last_check.get('code') == '0') else []
+        if not last_remaining:
+            logger.info("✅ 二次处理后所有订单已撤销")
+            return True
+        else:
+            logger.error(f"❌ 仍有{len(last_remaining)}个订单无法撤销，建议手动检查")
+            return False
 
 def get_safe_position_size() -> float:
     """
