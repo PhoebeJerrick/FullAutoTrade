@@ -243,15 +243,23 @@ def amend_untraded_sl_tp(main_ord_id: str, attach_algo_id: str, inst_id: str) ->
 def amend_traded_sl_tp(algo_id: str, algo_cl_ord_id: str, inst_id: str) -> bool:
     """适用于主订单完全成交，止盈止损已委托的场景"""
     try:
+        # 确保 algo_cl_ord_id 是字符串，不是列表
+        if isinstance(algo_cl_ord_id, list):
+            if algo_cl_ord_id:
+                algo_cl_ord_id = algo_cl_ord_id[0]  # 取第一个元素
+            else:
+                logger.error("❌ algo_cl_ord_id 列表为空")
+                return False
+        
         params = {
             "instId": inst_id,
             "algoId": algo_id,
-            "algoClOrdId": algo_cl_ord_id, #当是附带的止损止盈单时，只需填这个值即可。
+            "algoClOrdId": algo_cl_ord_id,  # 现在确保是字符串
             "slTriggerPx": "0",
             "tpTriggerPx": "0"
         }
         
-        logger.info(f"🔄 [已成交阶段] 修改已委托止盈止损: algoId={algo_id},algoClOrdId={algo_cl_ord_id}")
+        logger.info(f"🔄 [已成交阶段] 修改已委托止盈止损: algoId={algo_id}, algoClOrdId={algo_cl_ord_id}")
         response = exchange.private_post_trade_amend_algos(params)
         
         if response and response.get("code") == "0":
@@ -292,14 +300,16 @@ def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[st
     elif main_order_state == "filled":
         # 主订单已完全成交，需要先获取algoId
         if attach_algo_ids:
-            # 使用algoId撤销
+            # 使用algoClOrdId撤销
             logger.info("🔄 使用amend-algos接口撤销已委托止盈止损")
-            if attach_algo_ids and not amend_traded_sl_tp(None, attach_algo_ids, inst_id):
-                logger.error(f"❌ 已委托止盈止损单撤销失败: {attach_algo_ids}")
-                success = False
-            else:
-                logger.info(f"✅ 已委托止盈止损单撤销成功: {attach_algo_ids}")
-            time.sleep(1)
+            for attach_algo_id in attach_algo_ids:
+                # 修正：传递单个 attach_algo_id 而不是整个列表
+                if not amend_traded_sl_tp(None, attach_algo_id, inst_id):
+                    logger.error(f"❌ 已委托止盈止损单撤销失败: {attach_algo_id}")
+                    success = False
+                else:
+                    logger.info(f"✅ 已委托止盈止损单撤销成功: {attach_algo_id}")
+                time.sleep(1)
         else:
             # 如果没有找到algo订单，尝试使用amend-order接口
             logger.info("🔄 未找到algo订单，尝试使用amend-order接口")
