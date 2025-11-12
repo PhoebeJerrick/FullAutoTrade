@@ -1146,7 +1146,7 @@ def main():
         success = run_short_sl_tp_test()
         
         logger.info("🧹 执行测试后清理...")
-        cleanup_after_test()
+        # cleanup_after_test()
         
         if success:
             logger.info("🎊 测试成功完成!")
@@ -1155,7 +1155,7 @@ def main():
             
     except KeyboardInterrupt:
         logger.info("🛑 用户中断测试")
-        cleanup_after_test()
+        # cleanup_after_test()
     except Exception as e:
         logger.error(f"💥 测试程序异常: {str(e)}")
         cleanup_after_test()
