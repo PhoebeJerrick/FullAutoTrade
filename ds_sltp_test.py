@@ -382,7 +382,7 @@ def cancel_activated_sl_tp_by_algo_id(algo_id: str, inst_id: str) -> bool:
     try:
         params = [{
             "instId": inst_id,
-            "algoClOrdId": algo_id
+            "algoId": algo_id
         }]
         
         logger.info(f"🔄 通过algoId撤销止盈止损单: {algo_id}")
@@ -454,6 +454,7 @@ def cancel_attached_sl_tp_smart(main_ord_id: str, attach_algo_ids: List[str], at
             for algo_id in sl_tp_status["algo_ids"]:
                 if cancel_activated_sl_tp_by_algo_id(algo_id, inst_id):
                     return True
+                
         # 其次尝试使用我们自定义的ID
         elif attach_algo_cl_ord_ids:
             for algo_cl_ord_id in attach_algo_cl_ord_ids:
@@ -994,10 +995,9 @@ def run_short_sl_tp_test():
         logger.info(f"   保存的attach_algo_ids: {saved_attach_algo_ids}")
         logger.info(f"   保存的attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_ids}")
         
-        if saved_algo_cl_ord_ids:
-            for algo_ord_id in saved_algo_cl_ord_ids:
-                if cancel_activated_sl_tp_by_algo_id(algo_ord_id, get_correct_inst_id()):
-                    return True
+        if main_order_id:
+            if cancel_activated_sl_tp_by_algo_id(main_order_id, get_correct_inst_id()):
+                return True
                 
         # 其次尝试使用我们自定义的ID
         if saved_attach_algo_cl_ord_ids:
