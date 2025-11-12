@@ -1023,7 +1023,7 @@ def run_short_sl_tp_test():
         return False
 
     # 确认止盈止损单已取消
-    time.sleep(1)
+    time.sleep(5)
     
     if not check_sl_tp_status(main_order_id):
         logger.info("✅ 确认所有止盈止损单已取消")
