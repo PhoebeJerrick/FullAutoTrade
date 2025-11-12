@@ -191,16 +191,16 @@ def get_order_comprehensive_info(main_ord_id: str) -> Dict[str, Any]:
             logger.info("ℹ️ 未发现有效的止损止盈设置")
             result["has_valid_sl_tp"] = False
         
-        # 2. 查询已委托的分离止盈止损单
+        # 2. 查询已委托的止盈止损单
         if result["main_order_state"] == "filled":
             logger.info("🔍 查询已委托的止盈止损单（补充信息）")
             pending_params = {
                 "instType": "SWAP",
                 "instId": inst_id,
-                # 移除ordType参数，因为conditional/oco不在这个接口中
+                "ordType": "conditional,oco",
             }
             
-            pending_resp = exchange.private_get_trade_orders_pending(pending_params)
+            pending_resp = exchange.private_get_trade_orders_algo_pending(pending_params)
             
             # 打印已委托订单查询的完整响应
             if pending_resp:
@@ -371,7 +371,7 @@ def check_sl_tp_activation_status(main_ord_id: str) -> Dict[str, Any]:
                 logger.info("ℹ️ 未发现已激活的止盈止损单")
         
         return result
-        
+         
     except Exception as e:
         logger.error(f"检查止盈止损激活状态失败: {str(e)}")
         return result
@@ -563,87 +563,6 @@ def get_safe_position_size() -> float:
     except Exception as e:
         logger.error(f"安全计算仓位大小失败: {str(e)}")
         return 0.01
-
-
-def find_sl_tp_order_by_attach_algo_cl_ord_id(attach_algo_cl_ord_id: str) -> Optional[Dict]:
-    """
-    通过attachAlgoClOrdId查找止盈止损订单
-    """
-    try:
-        inst_id = get_correct_inst_id()
-        
-        # 查询待处理的算法订单
-        params = {
-            "instType": "SWAP",
-            "instId": inst_id,
-            "algoClOrdId": attach_algo_cl_ord_id  # 使用我们设置的attachAlgoClOrdId
-        }
-        
-        logger.info(f"🔍 通过attachAlgoClOrdId查找止盈止损订单: {attach_algo_cl_ord_id}")
-        logger.info(f"   请求参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
-        response = exchange.private_get_trade_orders_algo_pending(params)
-        
-        # 打印完整响应
-        logger.info("📥 止盈止损订单查询响应:")
-        if response:
-            logger.info(f"   响应码: {response.get('code')}")
-            logger.info(f"   响应消息: {response.get('msg')}")
-            logger.info(f"   数据条数: {len(response.get('data', []))}")
-            
-            if response.get('data'):
-                for idx, order in enumerate(response['data']):
-                    logger.info(f"   订单 #{idx+1}:")
-                    logger.info(json.dumps(order, indent=2, ensure_ascii=False))
-        
-        if response and response.get('code') == '0' and response.get('data'):
-            return response['data'][0]  # 返回第一个匹配的订单
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"通过attachAlgoClOrdId查找止盈止损订单失败: {str(e)}")
-        return None
-
-def cancel_sl_tp_by_attach_algo_cl_ord_id(attach_algo_cl_ord_id: str) -> bool:
-    """
-    通过attachAlgoClOrdId取消止盈止损订单
-    """
-    try:
-        # 先查找订单
-        sl_tp_order = find_sl_tp_order_by_attach_algo_cl_ord_id(attach_algo_cl_ord_id)
-        
-        if not sl_tp_order:
-            logger.warning(f"⚠️ 未找到对应的止盈止损订单: {attach_algo_cl_ord_id}")
-            return False
-        
-        algo_id = sl_tp_order.get('algoId')
-        inst_id = sl_tp_order.get('instId')
-        
-        if not algo_id:
-            logger.error(f"❌ 止盈止损订单没有algoId: {sl_tp_order}")
-            return False
-        
-        # 取消订单
-        cancel_params = [{
-            "instId": inst_id,
-            "algoId": algo_id
-        }]
-        
-        logger.info(f"🔄 取消止盈止损订单: algoId={algo_id}")
-        logger.info(f"   请求参数: {json.dumps(cancel_params, indent=2, ensure_ascii=False)}")
-        response = exchange.private_post_trade_cancel_algos(cancel_params)
-        logger.info(f"   响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
-        
-        if response and response.get('code') == '0':
-            logger.info(f"✅ 成功取消止盈止损订单: {algo_id}")
-            return True
-        else:
-            logger.error(f"❌ 取消止盈止损订单失败: {response}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"通过attachAlgoClOrdId取消止盈止损订单失败: {str(e)}")
-        return False
 
 def process_order_result(order_result: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -1146,7 +1065,7 @@ def main():
         success = run_short_sl_tp_test()
         
         logger.info("🧹 执行测试后清理...")
-        # cleanup_after_test()
+        cleanup_after_test()
         
         if success:
             logger.info("🎊 测试成功完成!")
