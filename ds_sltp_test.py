@@ -380,10 +380,10 @@ def check_sl_tp_activation_status(main_ord_id: str) -> Dict[str, Any]:
 def cancel_activated_sl_tp_by_algo_id(algo_id: str, inst_id: str) -> bool:
     """通过algoId撤销已激活的止盈止损单"""
     try:
-        params = {
+        params = [{
             "instId": inst_id,
-            "algoId": algo_id
-        }
+            "algoClOrdId": algo_id
+        }]
         
         logger.info(f"🔄 通过algoId撤销止盈止损单: {algo_id}")
         logger.info(f"   请求参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
@@ -401,14 +401,14 @@ def cancel_activated_sl_tp_by_algo_id(algo_id: str, inst_id: str) -> bool:
     except Exception as e:
         logger.error(f"通过algoId撤销止盈止损单失败: {str(e)}")
         return False
-
+     
 def cancel_activated_sl_tp_by_algo_cl_ord_id(algo_cl_ord_id: str, inst_id: str) -> bool:
     """通过algoClOrdId撤销已激活的止盈止损单"""
     try:
-        params = {
+        params = [{
             "instId": inst_id,
             "algoClOrdId": algo_cl_ord_id
-        }
+        }]
         
         logger.info(f"🔄 通过algoClOrdId撤销止盈止损单: {algo_cl_ord_id}")
         logger.info(f"   请求参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
@@ -623,10 +623,10 @@ def cancel_sl_tp_by_attach_algo_cl_ord_id(attach_algo_cl_ord_id: str) -> bool:
             return False
         
         # 取消订单
-        cancel_params = {
+        cancel_params = [{
             "instId": inst_id,
             "algoId": algo_id
-        }
+        }]
         
         logger.info(f"🔄 取消止盈止损订单: algoId={algo_id}")
         logger.info(f"   请求参数: {json.dumps(cancel_params, indent=2, ensure_ascii=False)}")
@@ -955,15 +955,17 @@ def run_short_sl_tp_test():
 
     # 保存用于后续查找的信息
     main_order_id = processed_order_result['order_id']
+    cl_order_id = processed_order_result['cl_ord_id']
     saved_attach_algo_ids = processed_order_result['attach_algo_ids']
     saved_attach_algo_cl_ord_ids = processed_order_result['attach_algo_cl_ord_ids']
     saved_algo_cl_ord_ids = processed_order_result['algo_cl_ord_ids']
 
     logger.info(f"💾 保存的订单信息:")
-    logger.info(f"   主订单ID: {main_order_id}")
-    logger.info(f"   附带止盈止损ID: {saved_attach_algo_ids}")
-    logger.info(f"   止盈止损自定义ID: {saved_attach_algo_cl_ord_ids}")
-    logger.info(f"   算法订单自定义ID: {saved_algo_cl_ord_ids}")
+    logger.info(f"   main_order_id: {main_order_id}")
+    logger.info(f"   cl_order_id: {cl_order_id}")
+    logger.info(f"   algo_cl_ord_ids: {saved_algo_cl_ord_ids}")
+    logger.info(f"   attach_algo_ids: {saved_attach_algo_ids}")
+    logger.info(f"   attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_ids}")
 
     # 等待空单成交
     if not wait_for_order_fill(main_order_id, 30):
