@@ -335,12 +335,25 @@ def check_sl_tp_activation_status(main_ord_id: str) -> Dict[str, Any]:
         algo_params = {
             "instType": "SWAP",
             "instId": inst_id,
-            "ordType": "conditional"  # 条件单类型
+            "ordType": "conditional,oco"  # 条件单类型
         }
         
-        logger.info("🔍 查询算法订单状态...")
+        logger.info(f"🔍 查询算法订单状态请求:")
+        logger.info(json.dumps(algo_params, indent=2, ensure_ascii=False))
         algo_resp = exchange.private_get_trade_orders_algo_pending(algo_params)
-        
+
+        # 打印完整响应
+        logger.info("📥 止盈止损订单查询响应:")
+        if algo_resp:
+            logger.info(f"   响应码: {algo_resp.get('code')}")
+            logger.info(f"   响应消息: {algo_resp.get('msg')}")
+            logger.info(f"   数据条数: {len(algo_resp.get('data', []))}")
+            
+            if algo_resp.get('data'):
+                for idx, order in enumerate(algo_resp['data']):
+                    logger.info(f"   订单 #{idx+1}:")
+                    logger.info(json.dumps(order, indent=2, ensure_ascii=False))
+
         if algo_resp and algo_resp.get("code") == "0":
             algo_orders = algo_resp.get("data", [])
             # 查找与主订单关联的算法订单
@@ -425,7 +438,7 @@ def cancel_attached_sl_tp_smart(main_ord_id: str, attach_algo_ids: List[str], at
         return True
         
     inst_id = get_correct_inst_id()
-    
+
     # 1. 首先检查止盈止损单的激活状态
     sl_tp_status = check_sl_tp_activation_status(main_ord_id)
     
@@ -934,6 +947,19 @@ def run_short_sl_tp_test():
         logger.error("❌ 空单开仓失败")
         return False
 
+    # 等待空单成交
+    if not wait_for_order_fill(short_order_id, 30):
+        logger.error("❌ 空单未在30秒内成交")
+        return False
+
+    # 等待空单持仓出现
+    short_position = wait_for_position('short', 30)
+    if not short_position:
+        logger.error("❌ 空单持仓未找到")
+        return False
+    
+    logger.info(f"✅ 空单持仓建立: {short_position['size']}张")
+
     # 处理订单结果，获取止盈止损信息
     processed_order_result = process_order_result(short_order_result)
 
@@ -949,19 +975,6 @@ def run_short_sl_tp_test():
     logger.info(f"   止盈止损自定义ID: {saved_attach_algo_cl_ord_ids}")
     logger.info(f"   算法订单自定义ID: {saved_algo_cl_ord_ids}")
 
-    # 等待空单成交
-    if not wait_for_order_fill(short_order_id, 30):
-        logger.error("❌ 空单未在30秒内成交")
-        return False
-
-    # 等待空单持仓出现
-    short_position = wait_for_position('short', 30)
-    if not short_position:
-        logger.error("❌ 空单持仓未找到")
-        return False
-    
-    logger.info(f"✅ 空单持仓建立: {short_position['size']}张")
-
     # 阶段3: 取消现有止盈止损单
     logger.info("")
     logger.info("🔹 阶段3: 取消现有止盈止损单")
@@ -976,11 +989,22 @@ def run_short_sl_tp_test():
         logger.info(f"   保存的attach_algo_ids: {saved_attach_algo_ids}")
         logger.info(f"   保存的attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_ids}")
         
-        success = cancel_attached_sl_tp_smart(
-            short_order_id, 
-            saved_attach_algo_ids,
-            saved_attach_algo_cl_ord_ids
-        )
+        if saved_algo_cl_ord_ids:
+            for algo_ord_id in saved_algo_cl_ord_ids:
+                if cancel_activated_sl_tp_by_algo_id(algo_ord_id, get_correct_inst_id()):
+                    return True
+                
+        # 其次尝试使用我们自定义的ID
+        if saved_attach_algo_cl_ord_ids:
+            for algo_cl_ord_id in saved_attach_algo_cl_ord_ids:
+                if cancel_activated_sl_tp_by_algo_cl_ord_id(algo_cl_ord_id, get_correct_inst_id()):
+                    return True
+                
+        if saved_attach_algo_ids:
+            for attach_algo_id in saved_attach_algo_ids:
+                if amend_untraded_sl_tp(short_order_id, attach_algo_id, get_correct_inst_id()):
+                    return True
+
     else:
         logger.info("🔧 未发现需要撤销的止盈止损单")
         success = True
