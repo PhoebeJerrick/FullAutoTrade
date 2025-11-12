@@ -989,27 +989,31 @@ def run_short_sl_tp_test():
     logger.info("⏳ 等待5秒后取消止盈止损单...")
     time.sleep(5)
 
+    success = False
+
     # 使用智能撤销函数
     if saved_attach_algo_ids or saved_attach_algo_cl_ord_ids:
         logger.info(f"🔧 进行止盈止损撤销操作")
         logger.info(f"   保存的attach_algo_ids: {saved_attach_algo_ids}")
         logger.info(f"   保存的attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_ids}")
         
-        if main_order_id:
-            if cancel_activated_sl_tp_by_algo_id(main_order_id, get_correct_inst_id()):
-                return True
+        # if main_order_id:
+        #     if cancel_activated_sl_tp_by_algo_id(main_order_id, get_correct_inst_id()):
+        #         success = True
+        #     else:
+        #         success = False
                 
         # 其次尝试使用我们自定义的ID
-        if saved_attach_algo_cl_ord_ids:
+        if not success and saved_attach_algo_cl_ord_ids:
             for algo_cl_ord_id in saved_attach_algo_cl_ord_ids:
                 if cancel_activated_sl_tp_by_algo_cl_ord_id(algo_cl_ord_id, get_correct_inst_id()):
-                    return True
+                    success = True
                 
-        if saved_attach_algo_ids:
+        elif saved_attach_algo_ids:
             for attach_algo_id in saved_attach_algo_ids:
                 if amend_untraded_sl_tp(main_order_id, attach_algo_id, get_correct_inst_id()):
                     return True
-
+                
     else:
         logger.info("🔧 未发现需要撤销的止盈止损单")
         success = True
@@ -1019,12 +1023,17 @@ def run_short_sl_tp_test():
         return False
 
     # 确认止盈止损单已取消
-    time.sleep(2)
+    time.sleep(1)
+    
     if not check_sl_tp_status(main_order_id):
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
         logger.warning("⚠️ 仍有止盈止损单存在，取消失败...")
         return False
+    
+    # 确认止盈止损单已取消
+    logger.info("  等待7s重新设置止盈止损单...")
+    time.sleep(7)
     
     # 阶段4: 重新设置止盈止损单
     logger.info("")
