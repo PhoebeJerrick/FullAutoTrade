@@ -947,8 +947,26 @@ def run_short_sl_tp_test():
         logger.error("❌ 空单开仓失败")
         return False
 
+    logger.info("⏳ 等待5秒后获取止盈止损信息...")
+    time.sleep(5)
+
+    # 处理订单结果，获取止盈止损信息
+    processed_order_result = process_order_result(short_order_result)
+
+    # 保存用于后续查找的信息
+    main_order_id = processed_order_result['order_id']
+    saved_attach_algo_ids = processed_order_result['attach_algo_ids']
+    saved_attach_algo_cl_ord_ids = processed_order_result['attach_algo_cl_ord_ids']
+    saved_algo_cl_ord_ids = processed_order_result['algo_cl_ord_ids']
+
+    logger.info(f"💾 保存的订单信息:")
+    logger.info(f"   主订单ID: {main_order_id}")
+    logger.info(f"   附带止盈止损ID: {saved_attach_algo_ids}")
+    logger.info(f"   止盈止损自定义ID: {saved_attach_algo_cl_ord_ids}")
+    logger.info(f"   算法订单自定义ID: {saved_algo_cl_ord_ids}")
+
     # 等待空单成交
-    if not wait_for_order_fill(short_order_id, 30):
+    if not wait_for_order_fill(main_order_id, 30):
         logger.error("❌ 空单未在30秒内成交")
         return False
 
@@ -959,21 +977,6 @@ def run_short_sl_tp_test():
         return False
     
     logger.info(f"✅ 空单持仓建立: {short_position['size']}张")
-
-    # 处理订单结果，获取止盈止损信息
-    processed_order_result = process_order_result(short_order_result)
-
-    # 保存用于后续查找的信息
-    short_order_id = processed_order_result['order_id']
-    saved_attach_algo_ids = processed_order_result['attach_algo_ids']
-    saved_attach_algo_cl_ord_ids = processed_order_result['attach_algo_cl_ord_ids']
-    saved_algo_cl_ord_ids = processed_order_result['algo_cl_ord_ids']
-
-    logger.info(f"💾 保存的订单信息:")
-    logger.info(f"   主订单ID: {short_order_id}")
-    logger.info(f"   附带止盈止损ID: {saved_attach_algo_ids}")
-    logger.info(f"   止盈止损自定义ID: {saved_attach_algo_cl_ord_ids}")
-    logger.info(f"   算法订单自定义ID: {saved_algo_cl_ord_ids}")
 
     # 阶段3: 取消现有止盈止损单
     logger.info("")
@@ -1002,7 +1005,7 @@ def run_short_sl_tp_test():
                 
         if saved_attach_algo_ids:
             for attach_algo_id in saved_attach_algo_ids:
-                if amend_untraded_sl_tp(short_order_id, attach_algo_id, get_correct_inst_id()):
+                if amend_untraded_sl_tp(main_order_id, attach_algo_id, get_correct_inst_id()):
                     return True
 
     else:
@@ -1015,7 +1018,7 @@ def run_short_sl_tp_test():
 
     # 确认止盈止损单已取消
     time.sleep(2)
-    if not check_sl_tp_status(short_order_id):
+    if not check_sl_tp_status(main_order_id):
         logger.info("✅ 确认所有止盈止损单已取消")
     else:
         logger.warning("⚠️ 仍有止盈止损单存在，取消失败...")
@@ -1032,7 +1035,7 @@ def run_short_sl_tp_test():
     set_sl_tp_separately('short', short_position['size'], new_sl, new_tp)
     time.sleep(2)
     
-    if check_sl_tp_status(short_order_id):
+    if check_sl_tp_status(main_order_id):
         logger.info("✅ 重新设置的止盈止损单已确认")
     else:
         logger.warning("⚠️ 重新设置的止盈止损单未查询到")
