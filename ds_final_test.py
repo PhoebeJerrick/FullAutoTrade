@@ -795,6 +795,9 @@ def algo_order_pending_get_comprehensive_info(inst_id: str) -> Dict[str, Any]:
         logger.error(f"异常堆栈: {traceback.format_exc()}")
         result["error"] = error_msg
     
+    logger.info("=" * 80)
+    return result
+
 #未完成的委托订单解析
 def algo_pending_orders_parse(
     algo_result: Dict[str, Any],
@@ -863,9 +866,6 @@ def algo_pending_orders_parse(
         logger.info(f"   🎯 止盈触发价：{order_info['止盈触发价']}")  # 重点标注止盈
         logger.info(f"   关联主订单：{order_info['关联主订单ID']}")
         logger.info("-" * 60)
-
-    logger.info("=" * 80)
-        return result
 
 def get_pending_algo_order_count(
     algo_result: Dict[str, Any],
