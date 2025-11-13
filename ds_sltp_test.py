@@ -872,7 +872,7 @@ def create_universal_order(
     take_profit_price: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    简化版全能交易函数：只负责创建订单，不处理复杂的响应解析
+    简化版全能交易函数：支持一次开单同时附带止损和止盈（通过同一算法参数数组）
     """
     try:
         inst_id = get_correct_inst_id()
@@ -887,42 +887,54 @@ def create_universal_order(
             'ordType': ord_type,
             'sz': str(amount),
             'clOrdId': cl_ord_id,
-            'slOrdPx': '-1',
-            'tpOrdPx': '-1'
         }
-        
-        result = {"success": False, "order_id": None, "algo_ids": []}  # 初始化返回值
         
         if ord_type == 'limit' and price is not None:
             params['px'] = str(price)
-                
-        opposite_side = 'buy' if side == 'sell' else 'sell'
-        # 为每个止盈止损单生成唯一的attachAlgoClOrdId
-        sl_tp_cl_ord_id = generate_cl_ord_id(f"{side}_sl_tp")
-        # 关键：设置attachAlgoClOrdId，用于后续查找
-        params['attachAlgoClOrdId'] = sl_tp_cl_ord_id
         
-        # 设置止盈止损参数
-        sl_tp_cl_ord_id = None
-        if stop_loss_price is not None or take_profit_price is not None:
-            if stop_loss_price is not None:
-                params['slTriggerPx'] = str(stop_loss_price)
-            
-            if take_profit_price is not None:
-                params['tpTriggerPx'] = str(take_profit_price)
+        # 止盈止损的方向与主订单相反（主多则止盈止损为空，主空则相反）
+        opposite_side = 'buy' if side == 'sell' else 'sell'
+        
+        # 核心：整合止损和止盈到同一个算法参数数组（algo_params）
+        algo_params = []  # 存放所有算法订单（可同时包含SL和TP）
+        
+        # 添加止损单（SL）到算法数组
+        if stop_loss_price is not None:
+            algo_params.append({
+                'algoType': 'sl',  # 算法类型：止损
+                'instId': inst_id,  # 与主订单标的一致
+                'side': opposite_side,  # 方向与主订单相反
+                'triggerPx': str(stop_loss_price),  # 止损触发价
+                'ordType': 'market',  # 触发后以市价成交
+                'sz': str(amount),  # 数量与主订单一致
+                'clOrdId': generate_cl_ord_id(f"{side}_sl")  # 止损单唯一标识
+            })
+        
+        # 添加止盈单（TP）到算法数组
+        if take_profit_price is not None:
+            algo_params.append({
+                'algoType': 'tp',  # 算法类型：止盈
+                'instId': inst_id,  # 与主订单标的一致
+                'side': opposite_side,  # 方向与主订单相反
+                'triggerPx': str(take_profit_price),  # 止盈触发价
+                'ordType': 'market',  # 触发后以市价成交
+                'sz': str(amount),  # 数量与主订单一致
+                'clOrdId': generate_cl_ord_id(f"{side}_tp")  # 止盈单唯一标识
+            })
+        
+        # 如果有止损或止盈，将算法数组附加到主订单参数中
+        if algo_params:
+            params['attachAlgoOrds'] = algo_params  # 关键：一次请求附带所有算法订单
         
         action_name = f"{'做多' if side == 'buy' else '做空'}{'市价' if ord_type == 'market' else '限价'}单"
-        
-        # 打印完整的请求信息
         logger.info("📤 完整请求参数:")
         logger.info(json.dumps(params, indent=2, ensure_ascii=False))
+        logger.info(f"🎯 执行{action_name}: {amount} 张（{'含止损止盈' if algo_params else '无止损止盈'}）")
         
-        logger.info(f"🎯 执行{action_name}: {amount} 张")
-        
-        # 执行API调用
+        # 执行API调用（一次请求完成主订单+止损+止盈）
         response = exchange.private_post_trade_order(params)
         
-        # 打印完整的响应信息
+        # 响应处理逻辑（保持不变）
         logger.info("📥 完整响应信息:")
         if response:
             logger.info(json.dumps(response, indent=2, ensure_ascii=False))
@@ -942,14 +954,13 @@ def create_universal_order(
                 'response': None
             }
         
-        # 简化的返回结果
         order_id = response['data'][0]['ordId'] if response.get('data') else None
-        logger.info(f"✅ {action_name}创建成功: {order_id}")
+        logger.info(f"✅ {action_name}创建成功: {order_id}（{'止损止盈已附加' if algo_params else ''}）")
         
         return {
             'success': True,
             'clOrdId': cl_ord_id,
-            'attachAlgoClOrdId': sl_tp_cl_ord_id,  # 保存我们自定义的止盈止损ID
+            'algo_cl_ord_ids': [algo['clOrdId'] for algo in algo_params]  # 返回所有算法订单的ID
         }
             
     except Exception as e:
@@ -960,7 +971,6 @@ def create_universal_order(
             'error': str(e),
             'response': None
         }
-
 
 # # 1. 调用设置止损止盈
 # sl_tp_result = sl_tp_algo_order_set(
