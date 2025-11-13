@@ -252,29 +252,59 @@ def reset_scaling_status(symbol: str):
             'base_position_size': 0
         }
 
+def check_sufficient_margin(symbol: str, position_size: float, current_price: float) -> bool:
+    """检查保证金是否充足"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    try:
+        # 计算所需保证金
+        required_margin = (position_size * current_price * config.contract_size) / config.leverage
+        
+        # 获取账户余额
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        
+        # 安全缓冲：要求保证金不超过余额的70%
+        if required_margin > usdt_balance * 0.7:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 保证金不足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+            return False
+            
+        logger.log_info(f"✅ {get_base_currency(symbol)}: 保证金充足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+        return True
+        
+    except Exception as e:
+        logger.log_error(f"margin_check_{get_base_currency(symbol)}", f"保证金检查失败: {str(e)}")
+        return False
 
 def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
-    """基于账户规模计算动态基础金额"""
+    """基于账户规模计算动态基础金额 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     posMngmt = config.position_management
     
-    # 方法1：固定比例
-    base_ratio = 0.02  # 2% of total balance
-    dynamic_base = usdt_balance * base_ratio
-    
-    # 方法2：分级比例（资金越大，单次投资比例越小）
+    # 分级比例
     if usdt_balance > 10000:
         base_ratio = 0.015
     elif usdt_balance > 5000:
         base_ratio = 0.02
+    elif usdt_balance > 1000:
+        base_ratio = 0.025
     else:
-        base_ratio = 0.03
-        
+        base_ratio = 0.03  # 小资金使用较高比例但确保不超过余额
+    
     dynamic_base = usdt_balance * base_ratio
     
-    # 设置上下限（保持不变）
-    min_base = 10  # 最小10U (<<<<< 修改这里！将 50 修改为 10)
-    max_base = 500 # 最大500U
+    # 🆕 修复：确保不超过账户余额的80%
+    dynamic_base = min(dynamic_base, usdt_balance * 0.8)
+    
+    # 🆕 修复：调整最小基础金额，基于账户规模
+    if usdt_balance < 100:
+        min_base = 5  # 小账户最小5U
+    elif usdt_balance < 500:
+        min_base = 10
+    else:
+        min_base = 20
+    
+    max_base = 500
     
     return max(min_base, min(dynamic_base, max_base))
 
@@ -3818,6 +3848,11 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     # 计算仓位
     position_size = calculate_enhanced_position(symbol, signal_data, price_data, get_current_position(symbol))
 
+    # 🆕 资金充足性检查
+    if not check_sufficient_margin(symbol, position_size, current_price):
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 资金不足，放弃开仓")
+        return
+    
     # 记录交易分析
     trade_analysis = f"""
     🎯 {get_base_currency(symbol)} 改进版交易分析:

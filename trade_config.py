@@ -37,12 +37,12 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
         'max_position_ratio': 5,
     },
-    # BCH 配置 (示例)
-    'BCH/USDT:USDT': {
-        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
+    # # BCH 配置 (示例)
+    # 'BCH/USDT:USDT': {
+    #     'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
+    #     'max_position_ratio': 7,
+    # },
     # # DASH 配置 (示例)
     # 'DASH/USDT:USDT': {
     #     'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
