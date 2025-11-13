@@ -916,6 +916,246 @@ def create_order_with_sl_tp(side: str, amount: float, order_type: str = 'market'
         logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
+def create_order_with_sl_tp(
+    side: str, 
+    amount: float, 
+    order_type: str = 'market', 
+    limit_price: Optional[float] = None, 
+    stop_loss_price: Optional[float] = None, 
+    take_profit_price: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    创建订单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API
+    支持市价单和限价单
+    
+    Args:
+        side: 交易方向 'buy' 或 'sell'
+        amount: 订单数量
+        order_type: 订单类型 'market' 或 'limit'
+        limit_price: 限价单价格（仅限价单需要）
+        stop_loss_price: 止损价格
+        take_profit_price: 止盈价格
+        
+    Returns:
+        标准化响应结果:
+            {
+                'success': bool,
+                'clOrdId': str,  # 主订单自定义ID
+                'algo_cl_ord_id': 止损止盈订单的自定义ID
+                'error': Optional[str],  # 错误信息（失败时存在）
+            }
+    """
+    try:
+        inst_id = get_correct_inst_id()  # 假设已实现获取标的ID的函数
+        order_type_name = "市价单" if order_type == 'market' else "限价单"
+        
+        # 1. 生成主订单的自定义ID（clOrdId）
+        main_cl_ord_id = generate_cl_ord_id(f"{side}")
+        
+        # 基础参数
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,  # 假设config已定义
+            'side': side,
+            'ordType': order_type,
+            'sz': str(amount),
+            'clOrdId': main_cl_ord_id,  # 主订单自定义ID
+        }
+        
+        # 限价单补充价格参数
+        if order_type == 'limit':
+            if limit_price is None:
+                error_msg = "❌ 限价单必须提供limit_price参数"
+                logger.error(error_msg)
+                return None
+            params['px'] = str(limit_price)
+        
+        # 2. 处理止损止盈算法订单（生成attachClOrderId并构建参数）
+        opposite_side = 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与主订单相反
+        sl_tp_cl_ord_id = generate_cl_ord_id(f"{side}")  # 止损止盈单自定义ID
+        
+        # 添加止损止盈参数（如果提供了止损止盈价格）
+        if stop_loss_price is not None and take_profit_price is not None:
+            params['attachAlgoOrds'] = [
+                {
+                    'tpTriggerPx': str(take_profit_price),
+                    'tpOrdPx': '-1',  # 市价止盈
+                    'slTriggerPx': str(stop_loss_price),
+                    'slOrdPx': '-1',  # 市价止损
+                    'algoOrdType': 'conditional',  # 条件单类型
+                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'side': opposite_side,  # 止损止盈方向与开仓方向相反
+                    'attachAlgoClOrdId': sl_tp_cl_ord_id  # 止损止盈方向与开仓方向相反
+                }
+            ]
+        
+        # 日志记录
+        log_order_params(f"{order_type_name}带止损止盈", params, "create_order_with_sl_tp")
+        if order_type == 'market':
+            logger.info(f"🎯 执行市价{side}开仓: {amount} 张 (主订单ID: {main_cl_ord_id})")
+        else:
+            logger.info(f"🎯 执行限价{side}开仓: {amount} 张 @ {limit_price:.2f} (主订单ID: {main_cl_ord_id})")
+        if stop_loss_price is not None:
+            logger.info(f"🛡️ 止损价格: {stop_loss_price:.2f} (止损ID: {sl_tp_cl_ord_id})")
+        if take_profit_price is not None:
+            logger.info(f"🎯 止盈价格: {take_profit_price:.2f} (止盈ID: {sl_tp_cl_ord_id})")
+        
+        # 打印详细请求（仅限价单）
+        if order_type == 'limit':
+            logger.info("🚀 原始请求数据:")
+            logger.info(f"   接口: POST /api/v5/trade/order")
+            logger.info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+        
+        # 调用OKX API
+        response = exchange.private_post_trade_order(params)  # 假设exchange已初始化
+        
+        # 打印详细响应（仅限价单）
+        if order_type == 'limit':
+            logger.info("📥 原始响应数据:")
+            logger.info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
+        
+        log_api_response(response, "create_order_with_sl_tp")  # 假设已实现日志函数
+        
+        # 3. 处理响应并返回标准化结果
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ {order_type_name}创建成功: {order_id}")
+            return {
+                'success': True,
+                'clOrdId': main_cl_ord_id,
+                'algo_cl_ord_id': sl_tp_cl_ord_id,
+                'error': None,
+            }
+        else:
+            error_msg = f"{order_type_name}创建失败: {response.get('msg', 'Unknown error')}" if response else f"{order_type_name}创建失败: 无响应"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'clOrdId': main_cl_ord_id,
+                'algo_cl_ord_id': sl_tp_cl_ord_id,
+                'error': error_msg
+            }
+            
+    except Exception as e:
+        error_msg = f"{order_type_name}开仓失败: {str(e)}"
+        logger.error(error_msg)
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return {
+            'success': False,
+            'clOrdId': main_cl_ord_id if 'main_cl_ord_id' in locals() else None,  # 确保即使生成ID失败也有返回
+            'algo_cl_ord_id': sl_tp_cl_ord_id,
+            'error': error_msg
+        }
+
+def create_universal_order(
+    side: str, 
+    ord_type: str = 'market',
+    amount: Optional[float] = None,
+    price: Optional[float] = None,
+    stop_loss_price: Optional[float] = None,
+    take_profit_price: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    简化版全能交易函数：支持一次开单同时附带止损和止盈（通过同一算法参数数组）
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        amount = amount or get_safe_position_size()
+        cl_ord_id = generate_cl_ord_id(side)
+        
+        # 基础订单参数
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': side,
+            'ordType': ord_type,
+            'sz': str(amount),
+            'clOrdId': cl_ord_id,
+        }
+        
+        if ord_type == 'limit' and price is not None:
+            params['px'] = str(price)
+        
+        # 止盈止损的方向与主订单相反（主多则止盈止损为空，主空则相反）
+        opposite_side = 'buy' if side == 'sell' else 'sell'
+        
+        # 核心：整合止损和止盈到同一个算法参数数组（algo_params）
+        algo_params = []  # 存放所有算法订单（可同时包含SL和TP）
+        
+        # 添加止损单（SL）到算法数组
+        if stop_loss_price is not None:
+            algo_params.append({
+                'algoType': 'sl',  # 算法类型：止损
+                'instId': inst_id,  # 与主订单标的一致
+                'side': opposite_side,  # 方向与主订单相反
+                'triggerPx': str(stop_loss_price),  # 止损触发价
+                'ordType': 'market',  # 触发后以市价成交
+                'sz': str(amount),  # 数量与主订单一致
+                'clOrdId': generate_cl_ord_id(f"{side}_sl")  # 止损单唯一标识
+            })
+        
+        # 添加止盈单（TP）到算法数组
+        if take_profit_price is not None:
+            algo_params.append({
+                'algoType': 'tp',  # 算法类型：止盈
+                'instId': inst_id,  # 与主订单标的一致
+                'side': opposite_side,  # 方向与主订单相反
+                'triggerPx': str(take_profit_price),  # 止盈触发价
+                'ordType': 'market',  # 触发后以市价成交
+                'sz': str(amount),  # 数量与主订单一致
+                'clOrdId': generate_cl_ord_id(f"{side}_tp")  # 止盈单唯一标识
+            })
+        
+        # 如果有止损或止盈，将算法数组附加到主订单参数中
+        if algo_params:
+            params['attachAlgoOrds'] = algo_params  # 关键：一次请求附带所有算法订单
+        
+        action_name = f"{'做多' if side == 'buy' else '做空'}{'市价' if ord_type == 'market' else '限价'}单"
+        logger.info("📤 完整请求参数:")
+        logger.info(json.dumps(params, indent=2, ensure_ascii=False))
+        logger.info(f"🎯 执行{action_name}: {amount} 张（{'含止损止盈' if algo_params else '无止损止盈'}）")
+        
+        # 执行API调用（一次请求完成主订单+止损+止盈）
+        response = exchange.private_post_trade_order(params)
+        
+        # 响应处理逻辑（保持不变）
+        logger.info("📥 完整响应信息:")
+        if response:
+            logger.info(json.dumps(response, indent=2, ensure_ascii=False))
+            
+            if response.get('code') != '0':
+                logger.error(f"❌ API调用失败: {response}")
+                return {
+                    'success': False,
+                    'error': response.get('msg', 'Unknown error'),
+                    'response': response
+                }
+        else:
+            logger.error("❌ 无响应数据")
+            return {
+                'success': False,
+                'error': 'No response data',
+                'response': None
+            }
+        
+        order_id = response['data'][0]['ordId'] if response.get('data') else None
+        logger.info(f"✅ {action_name}创建成功: {order_id}（{'止损止盈已附加' if algo_params else ''}）")
+        
+        return {
+            'success': True,
+            'clOrdId': cl_ord_id,
+            'algo_cl_ord_ids': [algo['clOrdId'] for algo in algo_params]  # 返回所有算法订单的ID
+        }
+            
+    except Exception as e:
+        logger.error(f"创建全能订单失败: {str(e)}")
+        logger.error(f"异常堆栈: {traceback.format_exc()}")
+        return {
+            'success': False,
+            'error': str(e),
+            'response': None
+        }
+
 # # 1. 调用设置止损止盈
 # sl_tp_result = sl_tp_algo_order_set(
 #     side="short",
@@ -1522,7 +1762,6 @@ def run_short_sl_tp_test():
 
     stop_loss_price, take_profit_price = calculate_stop_loss_take_profit_prices('sell', current_price)
     cancel_existing_orders()
-
 
     # 创建订单（简化版）
     short_order_result = create_order_with_sl_tp(
