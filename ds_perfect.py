@@ -1666,7 +1666,7 @@ def cancel_existing_algo_orders(symbol: str):
         params = {
             'instType': 'SWAP',
             'instId': get_correct_inst_id(symbol),
-            'ordType': 'conditional'
+            'ordType': 'conditional,oco'
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
@@ -2485,7 +2485,7 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             conditional_params = {
                 'instType': 'SWAP',
                 'instId': get_correct_inst_id(symbol),
-                'ordType': 'conditional'  # 🆕 修复：使用正确的参数名
+                'ordType': 'conditional,oco'  # 🆕 修复：使用正确的参数名
             }
             
             conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
@@ -4491,42 +4491,6 @@ def close_position_with_reason(symbol: str, position: dict, reason: str) -> bool
         # 🆕 尝试备用方法
         return close_position_fallback(symbol, position, reason)
 
-def debug_algo_orders(symbol: str):
-    """调试函数：查看所有策略委托订单的详细信息"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        logger.log_info(f"🔍 {get_base_currency(symbol)} 策略委托订单调试开始:")
-        
-        # 方法1：使用私有API
-        inst_id = get_correct_inst_id(symbol)
-        params = {
-            'instType': 'SWAP',
-            'instId': inst_id,
-            'ordType': 'oco'
-        }
-        
-        logger.log_info(f"  orders_algo_pending查询参数: {params}")
-        
-        response = exchange.private_get_trade_orders_algo_pending(params)
-        logger.log_info(f"  API响应代码: {response.get('code')}")
-        logger.log_info(f"  API响应消息: {response.get('msg')}")
-        
-        if response['code'] == '0' and response['data']:
-            logger.log_info(f"  找到 {len(response['data'])} 个策略委托订单:")
-            for i, order in enumerate(response['data']):
-                logger.log_info(f"  --- 订单 #{i+1} ---")
-                for key, value in order.items():
-                    if value and key not in ['info']:
-                        logger.log_info(f"    {key}: {value}")
-        else:
-            logger.log_info(f"  ❌ 未找到策略委托订单或查询失败")
-            
-        logger.log_info(f"🔍 {get_base_currency(symbol)} 策略委托订单调试结束")
-        
-    except Exception as e:
-        logger.log_error(f"debug_algo_orders_{get_base_currency(symbol)}", f"调试策略委托订单失败: {str(e)}")
-
-
 def check_existing_positions_on_startup():
     """启动时检查所有交易品种的现有持仓 - 修复版本"""
     logger.log_info("🔍 启动时持仓检查开始...")
@@ -4534,9 +4498,6 @@ def check_existing_positions_on_startup():
     for symbol, config in SYMBOL_CONFIGS.items():
         try:
             logger.log_info(f"📊 检查 {get_base_currency(symbol)} 的持仓状态...")
-            
-            # 🆕 调试：先打印持仓字段信息
-            # debug_algo_orders(symbol)
 
             # 获取当前持仓
             current_position = get_current_position(symbol)
