@@ -927,7 +927,7 @@ def create_order_with_sl_tp(
             return {
                 'success': True,
                 'clOrdId': main_cl_ord_id,
-                'algo_cl_ord_id': sl_tp_cl_ord_id,
+                'attachclOrdId': sl_tp_cl_ord_id,
                 'error': None,
             }
         else:
@@ -936,7 +936,7 @@ def create_order_with_sl_tp(
             return {
                 'success': False,
                 'clOrdId': main_cl_ord_id,
-                'algo_cl_ord_id': sl_tp_cl_ord_id,
+                'attachclOrdId': sl_tp_cl_ord_id,
                 'error': error_msg
             }
             
@@ -947,7 +947,7 @@ def create_order_with_sl_tp(
         return {
             'success': False,
             'clOrdId': main_cl_ord_id if 'main_cl_ord_id' in locals() else None,  # 确保即使生成ID失败也有返回
-            'algo_cl_ord_id': sl_tp_cl_ord_id,
+            'attachclOrdId': sl_tp_cl_ord_id,
             'error': error_msg
         }
 
@@ -1684,12 +1684,12 @@ def run_short_sl_tp_test():
     time.sleep(5)
 
     # 保存用于后续查找的信息
-    cl_order_id = short_order_result['cl_ord_id']
-    saved_attach_algo_cl_ord_id = short_order_result['attach_algo_cl_ord_ids']
+    cl_order_id = short_order_result['clOrdId']
+    saved_attach_algo_cl_ord_id = short_order_result['attachclOrdId']
 
     logger.info(f"💾 保存的订单信息:")
-    logger.info(f"   cl_order_id: {cl_order_id}")
-    logger.info(f"   attach_algo_cl_ord_ids: {saved_attach_algo_cl_ord_id}")
+    logger.info(f"   clOrdId: {cl_order_id}")
+    logger.info(f"   attachclOrdId: {saved_attach_algo_cl_ord_id}")
 
     # 等待空单持仓出现
     short_position = wait_for_position('short', 30)
