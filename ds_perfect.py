@@ -5,7 +5,7 @@ import hmac
 import hashlib
 import sys
 from functools import wraps
-from typing import Optional, Dict, List, Any, Union
+from typing import Dict, Any, Optional, List, Tuple, Any, Union
 import schedule
 from openai import OpenAI
 import ccxt
@@ -1571,16 +1571,34 @@ def get_current_position(symbol: str) -> Optional[dict]:
         logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
         return None
 
-def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price: Optional[float] = None, take_profit_price: Optional[float] = None) -> Dict[str, Optional[str]]:
+def generate_cl_ord_id(side: str) -> str:
     """
-    优化版：合并参数生成逻辑，通过动态添加字段处理OCO/单独止损/止盈订单
+    生成符合OKX规范的clOrdId：
+    - 仅包含字母和数字
+    - 长度 1-32位
+    - 前缀区分买卖方向，确保唯一性
+    """
+    prefix = "SELL" if side == "sell" else "BUY"
+    unique_str = str(uuid.uuid4()).replace('-', '')
+    cl_ord_id = f"{prefix}{unique_str}"[:32]
+    return cl_ord_id
+
+def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price: Optional[float] = None, take_profit_price: Optional[float] = None) -> Dict[str, Any]:
+    """
+    优化版：根据OKX API文档，价格为0表示撤销止盈止损
     返回单个ID而非列表（因每次调用最多生成一个订单）
     """
-    # 初始化返回结果为单个值（None表示未生成订单）
+    # 初始化返回结果
     result = {'success': False, 'algo_id': None, 'algo_cl_ord_id': None}
     config = SYMBOL_CONFIGS[symbol]
-    if not (stop_loss_price or take_profit_price):
-        logger.log_warning("⚠️ 未设置止损或止盈价格，无需创建订单")
+    
+    # 根据OKX API文档，价格为0表示撤销
+    has_stop_loss = stop_loss_price is not None and stop_loss_price != 0
+    has_take_profit = take_profit_price is not None and take_profit_price != 0
+    
+    # 如果都是0或None，则无需创建任何订单
+    if not (has_stop_loss or has_take_profit):
+        logger.log_warning("⚠️ 未设置有效的止损或止盈价格，无需创建订单")
         return result
 
     try:
@@ -1595,8 +1613,8 @@ def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price:
             'sz': str(amount),
         }
 
-        # 1. 同时存在止损止盈：生成OCO订单
-        if stop_loss_price and take_profit_price:
+        # 1. 同时存在有效的止损止盈：生成OCO订单
+        if has_stop_loss and has_take_profit:
             oco_params = {
                 **base_params,
                 'ordType': 'oco',
@@ -1604,7 +1622,7 @@ def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price:
                 'slOrdPx': '-1',
                 'tpTriggerPx': str(take_profit_price),
                 'tpOrdPx': '-1',
-                'algoClOrdId': generate_cl_ord_id(f"{side}_sl_tp")  # OCO单专用ID
+                'algoClOrdId': generate_cl_ord_id(f"{side}")  # OCO单专用ID
             }
             logger.log_info(f"📝 OCO订单参数: {json.dumps(oco_params, indent=2)}")
             response = exchange.private_post_trade_order_algo(oco_params)
@@ -1612,19 +1630,19 @@ def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price:
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
-                result['success'] = True  # 设置成功
-                result['algo_id'] = algo_id  # 赋值单个ID
+                result['success'] = True
+                result['algo_id'] = algo_id
                 result['algo_cl_ord_id'] = oco_params['algoClOrdId']
                 logger.log_info(f"✅ OCO订单创建成功 (algoId: {algo_id})")
 
-        # 2. 仅止损：生成止损单
-        elif stop_loss_price:
+        # 2. 仅止损有效：生成止损单
+        elif has_stop_loss:
             sl_params = {
                 **base_params,
                 'ordType': 'conditional',
                 'slTriggerPx': str(stop_loss_price),
                 'slOrdPx': '-1',
-                'algoClOrdId': generate_cl_ord_id(f"{side}_sl")  # 止损单专用ID
+                'algoClOrdId': generate_cl_ord_id(f"{side}")
             }
             logger.log_info(f"📝 止损订单参数: {json.dumps(sl_params, indent=2)}")
             response = exchange.private_post_trade_order_algo(sl_params)
@@ -1632,19 +1650,19 @@ def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price:
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
-                result['success'] = True  # 设置成功
-                result['algo_id'] = algo_id  # 赋值单个ID
+                result['success'] = True
+                result['algo_id'] = algo_id
                 result['algo_cl_ord_id'] = sl_params['algoClOrdId']
                 logger.log_info(f"✅ 止损订单创建成功 (algoId: {algo_id})")
 
-        # 3. 仅止盈：生成止盈单
-        elif take_profit_price:
+        # 3. 仅止盈有效：生成止盈单
+        elif has_take_profit:
             tp_params = {
                 **base_params,
                 'ordType': 'conditional',
                 'tpTriggerPx': str(take_profit_price),
                 'tpOrdPx': '-1',
-                'algoClOrdId': generate_cl_ord_id(f"{side}_tp")  # 止盈单专用ID
+                'algoClOrdId': generate_cl_ord_id(f"{side}_tp")
             }
             logger.log_info(f"📝 止盈订单参数: {json.dumps(tp_params, indent=2)}")
             response = exchange.private_post_trade_order_algo(tp_params)
@@ -1652,18 +1670,17 @@ def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price:
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
-                result['success'] = True  # 设置成功
-                result['algo_id'] = algo_id  # 赋值单个ID
+                result['success'] = True
+                result['algo_id'] = algo_id
                 result['algo_cl_ord_id'] = tp_params['algoClOrdId']
                 logger.log_info(f"✅ 止盈订单创建成功 (algoId: {algo_id})")
 
         return result
 
     except Exception as e:
-        result['success'] = False  # 设置失败
-        logger.log_error(f"设置止损止盈失败: {str(e)}", exc_info=True)
+        result['success'] = False
+        logger.log_error("sl_tp_algo_order_set", f"设置止损止盈失败: {str(e)}")
         return result
-
 
 def cancel_existing_algo_orders(symbol: str):
     """取消指定品种的现有策略委托订单"""
