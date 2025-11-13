@@ -661,54 +661,6 @@ def cancel_algo_order_by_attach_id(algo_cl_ord_id: str, inst_id: str) -> bool:
         logger.error(f"通过algoClOrdId撤销止盈止损单失败: {str(e)}")
         return False
 
-def cancel_attached_sl_tp_smart(main_ord_id: str, attach_algo_ids: List[str], attach_algo_cl_ord_ids: List[str]) -> bool:
-    """
-    智能撤销止盈止损单
-    根据止盈止损单的实际状态选择正确的撤销方式
-    """
-    if not attach_algo_ids and not attach_algo_cl_ord_ids:
-        logger.info("✅ 没有需要撤销的止盈止损单")
-        return True
-        
-    inst_id = get_correct_inst_id()
-
-    # 1. 首先检查止盈止损单的激活状态
-    sl_tp_status = check_sl_tp_activation_status(main_ord_id)
-    
-    logger.info(f"🔧 止盈止损单状态: 附带={sl_tp_status['has_attached_sl_tp']}, 激活={sl_tp_status['has_activated_sl_tp']}")
-    
-    # 2. 根据状态选择撤销方式
-    if sl_tp_status["has_activated_sl_tp"]:
-        # 止盈止损单已激活，使用算法订单接口
-        logger.info("🔄 止盈止损单已激活，使用算法订单接口撤销")
-        
-        # 优先使用查询到的算法订单ID
-        if sl_tp_status["algo_ids"]:
-            for algo_id in sl_tp_status["algo_ids"]:
-                if cancel_activated_sl_tp_by_algo_id(algo_id, inst_id):
-                    return True
-                
-        # 其次尝试使用我们自定义的ID
-        elif attach_algo_cl_ord_ids:
-            for algo_cl_ord_id in attach_algo_cl_ord_ids:
-                if cancel_algo_order_by_attach_id(algo_cl_ord_id, inst_id):
-                    return True
-        
-        logger.error("❌ 无法撤销已激活的止盈止损单")
-        return False
-        
-    else:
-        # 止盈止损单未激活，使用主订单修改接口
-        logger.info("🔄 止盈止损单未激活，使用主订单修改接口撤销")
-        
-        if attach_algo_ids:
-            for attach_algo_id in attach_algo_ids:
-                if amend_untraded_sl_tp(main_ord_id, attach_algo_id, inst_id):
-                    return True
-        
-        logger.error("❌ 无法撤销未激活的止盈止损单")
-        return False
-
 def cancel_attached_sl_tp_by_algo_ids(main_ord_id: str, attach_algo_ids: List[str], algo_cl_ord_ids: List[str], attach_algo_cl_ord_ids: List[str], main_order_state: str, has_activated_sl_tp: bool = False) -> bool:
     """
     专门处理附带止盈止损单的撤销
@@ -1579,9 +1531,9 @@ def confirm_algo_order_by_clId(
             mismatches.append(
                 f"数量不符（预期: {expected_sz}, 实际: {order_data.get('sz')}）"
             )
-        if order_data.get("ordType") != "conditional":
+        if not (order_data.get("ordType") == "conditional" or order_data.get("ordType") == "coc"):
             mismatches.append(
-                f"订单类型不符（预期: conditional, 实际: {order_data.get('ordType')}）"
+                f"订单类型不符（预期: conditional or oco, 实际: {order_data.get('ordType')}）"
             )
         if order_data.get("state") not in ("live", "effective"):
             mismatches.append(
@@ -1619,7 +1571,6 @@ def confirm_algo_order_by_clId(
             result["order"] = {
                 "algo_cl_ord_id": algo_cl_ord_id,
                 "algo_id": order_data.get("algoId"),
-                "type": "stop_loss" if sl_trigger_px else "take_profit",
                 "details": order_data
             }
             logger.info(f"✅ 订单 {algo_cl_ord_id} 匹配成功")
@@ -1756,7 +1707,7 @@ def run_short_sl_tp_test():
     if sl_tp_set_result["algo_cl_ord_id"] :
         sltp_confirm = confirm_algo_order_by_clId(
         side="short",
-        amount=0.1,
+        amount=short_position['size'],
         take_profit_price=new_tp,
         stop_loss_price=new_sl,
         algo_cl_ord_id=sl_tp_set_result["algo_cl_ord_id"],  # 取止盈单ID

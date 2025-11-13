@@ -821,7 +821,7 @@ def cancel_all_sl_tp_orders():
         params = {
             'instType': 'SWAP',
             'instId': inst_id,
-            'ordType': 'conditional',
+            'ordType': 'conditional,oco',
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
@@ -1131,7 +1131,7 @@ def manage_sl_tp_orders():
         params = {
             'instType': 'SWAP',
             'instId': inst_id,
-            'ordType': 'conditional',
+            'ordType': 'conditional,oco',
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
