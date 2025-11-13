@@ -1753,13 +1753,13 @@ def run_short_sl_tp_test():
     if sl_tp_set_result['algo_id']:
         print(f"sltp订单创建成功，algo_id: {sl_tp_set_result['algo_id']}")
         
-    if sl_tp_set_result["algo_cl_ord_ids"] :
+    if sl_tp_set_result["algo_cl_ord_id"] :
         sltp_confirm = confirm_algo_order_by_clId(
         side="short",
         amount=0.1,
         take_profit_price=new_tp,
         stop_loss_price=new_sl,
-        algo_cl_ord_id=sl_tp_set_result["algo_cl_ord_ids"],  # 取止盈单ID
+        algo_cl_ord_id=sl_tp_set_result["algo_cl_ord_id"],  # 取止盈单ID
         timeout=60
     )
 
