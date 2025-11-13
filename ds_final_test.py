@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# ds_sltp_test.py - BTC空单止盈止损测试程序（基于OKX客服建议优化）
+# ds_sltp_test.py - BTC空单止盈止损测试程序（独立完整版）
 
 import os
 import time
@@ -9,7 +9,7 @@ import traceback
 import uuid
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Tuple,Union
+from typing import Dict, Any, Optional, List, Tuple, Union
 import ccxt
 from dotenv import load_dotenv
 
@@ -21,26 +21,693 @@ saved_attach_algo_ids = []
 env_path = '../ExApiConfig/ExApiConfig.env'
 load_dotenv(dotenv_path=env_path)
 
-# 复用原有的日志系统和配置
-from ds_debug import TestLogger, TestConfig, get_account_config, exchange, config
+# 简单的日志系统
+class TestLogger:
+    def __init__(self, log_dir="../Output/okxSub1", file_name="Enhanced_Test_{timestamp}.log"):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.log_file = f"{log_dir}/{file_name.format(timestamp=timestamp)}"
+        os.makedirs(log_dir, exist_ok=True)
 
-# 复用原有的所有功能函数
-from ds_debug import (
-    log_order_params, log_api_response, get_correct_inst_id, setup_exchange,
-    get_current_price, get_lot_size_info, adjust_position_size, calculate_position_size,
-    calculate_stop_loss_take_profit_prices, create_order_without_sl_tp,
-    close_position, wait_for_order_fill, get_current_position, check_sl_tp_orders,
-    cancel_all_sl_tp_orders, cancel_existing_orders, wait_for_position, cleanup_after_test
-)
+    def log(self, level: str, message: str):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"{timestamp} - {level} - {message}"
+        print(log_entry)
+        
+        with open(self.log_file, 'a', encoding='utf-8') as f:
+            f.write(log_entry + '\n')
+    
+    def info(self, message: str):
+        self.log("INFO", message)
+    
+    def error(self, message: str):
+        self.log("ERROR", message)
+    
+    def warning(self, message: str):
+        self.log("WARNING", message)
+    
+    def debug(self, message: str):
+        self.log("DEBUG", message)
+
+# 交易配置
+class TestConfig:
+    def __init__(self):
+        self.symbol = 'BTC/USDT:USDT'
+        self.leverage = 5
+        self.test_mode = False
+        self.margin_mode = 'isolated'
+        self.base_usdt_amount = 1
+        self.min_contract_size = None  # 将在运行时从市场信息获取
+        self.stop_loss_percent = 0.03
+        self.take_profit_percent = 0.05
+        self.price_offset_percent = 0.001
+        self.wait_time_seconds = 10
+        self.contract_size = 0.01
+
+# 账号配置
+def get_account_config(account_name="default"):
+    """根据账号名称获取对应的配置"""
+    return {
+        'api_key': os.getenv('OKX_API_KEY_2'),
+        'secret': os.getenv('OKX_SECRET_2'),
+        'password': os.getenv('OKX_PASSWORD_2')
+    }
+
+# 初始化交易所
+account_config = get_account_config()
+exchange = ccxt.okx({
+    'options': {
+        'defaultType': 'swap',
+    },
+    'apiKey': account_config['api_key'],
+    'secret': account_config['secret'],
+    'password': account_config['password'],
+})
+
+config = TestConfig()
 
 # 创建专用logger
 logger = TestLogger(log_dir="../Output/short_sl_tp_test", file_name="Short_SL_TP_Test_{timestamp}.log")
+
+
+def log_order_params(order_type: str, params: Dict[str, Any], function_name: str = ""):
+    """记录订单参数到日志"""
+    try:
+        # 隐藏敏感信息
+        safe_params = params.copy()
+        sensitive_keys = ['apiKey', 'secret', 'password', 'signature']
+        for key in sensitive_keys:
+            if key in safe_params:
+                safe_params[key] = '***'
+        
+        logger.info(f"📋 {function_name} - {order_type}订单参数:")
+        for key, value in safe_params.items():
+            logger.info(f"   {key}: {value}")
+            
+    except Exception as e:
+        logger.error(f"记录订单参数失败: {str(e)}")
+
+def log_api_response(response: Any, function_name: str = ""):
+    """记录API响应到日志"""
+    try:
+        logger.info(f"📡 {function_name} - API响应:")
+        if isinstance(response, dict):
+            for key, value in response.items():
+                if key == 'data' and isinstance(value, list) and len(value) > 0:
+                    logger.info(f"   {key}: [列表，共{len(value)}条记录]")
+                    for i, item in enumerate(value[:3]):
+                        logger.info(f"      [{i}]: {item}")
+                else:
+                    logger.info(f"   {key}: {value}")
+        else:
+            logger.info(f"   响应: {response}")
+    except Exception as e:
+        logger.error(f"记录API响应失败: {str(e)}")
+
+def get_correct_inst_id():
+    """获取正确的合约ID"""
+    symbol = config.symbol
+    if symbol == 'BTC/USDT:USDT':
+        return 'BTC-USDT-SWAP'
+    elif symbol == 'ETH/USDT:USDT':
+        return 'ETH-USDT-SWAP'
+    else:
+        return symbol.replace('/', '-').replace(':USDT', '-SWAP')
+
+def setup_exchange():
+    """设置交易所参数"""
+    try:
+        logger.info("🔄 设置交易所参数...")
+
+        # 先获取市场信息
+        market_info = get_lot_size_info()
+        min_amount = market_info['min_amount']
+        logger.info(f"📊 最小交易单位: {min_amount}")
+        
+        # 更新配置
+        config.min_contract_size = min_amount
+
+        # 设置杠杆
+        leverage_params = {
+            'symbol': config.symbol,
+            'leverage': config.leverage
+        }
+        log_order_params("设置杠杆", leverage_params, "setup_exchange")
+        
+        exchange.set_leverage(config.leverage, config.symbol)
+        logger.info(f"✅ 杠杆设置成功: {config.leverage}x")
+        
+        # 获取账户余额
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        logger.info(f"💰 USDT余额: {usdt_balance:.2f}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"交易所设置失败: {str(e)}")
+        return False
+
+def get_current_price():
+    """获取当前价格"""
+    try:
+        ticker = exchange.fetch_ticker(config.symbol)
+        price = ticker['last']
+        logger.info(f"📊 当前价格: {price:.2f}")
+        return price
+    except Exception as e:
+        logger.error(f"获取价格失败: {str(e)}")
+        return 0
+    
+def get_lot_size_info():
+    """获取交易对的最小交易单位信息"""
+    try:
+        markets = exchange.load_markets()
+        symbol = config.symbol
+        
+        if symbol in markets:
+            market = markets[symbol]
+            limits = market.get('limits', {})
+            amount_limits = limits.get('amount', {})
+            
+            min_amount = amount_limits.get('min', config.min_contract_size)
+            precision = market.get('precision', {}).get('amount', 4)
+            
+            logger.info(f"📊 市场交易量信息:")
+            logger.info(f"   最小交易量: {min_amount}")
+            logger.info(f"   数量精度: {precision}")
+            
+            return {
+                'min_amount': min_amount,
+                'precision': precision,
+                'market_info': market
+            }
+        else:
+            logger.warning(f"⚠️ 未找到交易对 {symbol} 的市场信息")
+            return {
+                'min_amount': config.min_contract_size,
+                'precision': 4
+            }
+            
+    except Exception as e:
+        logger.error(f"获取市场信息失败: {str(e)}")
+        return {
+            'min_amount': config.min_contract_size,
+            'precision': 4
+        }
+
+def adjust_position_size(calculated_size: float) -> float:
+    """根据市场规则调整仓位大小"""
+    try:
+        market_info = get_lot_size_info()
+        min_amount = market_info['min_amount']
+        precision = market_info['precision']
+        
+        logger.info(f"📏 调整仓位大小:")
+        logger.info(f"   计算大小: {calculated_size}")
+        logger.info(f"   最小交易量: {min_amount}")
+        logger.info(f"   精度: {precision}")
+        
+        # 确保不低于最小交易量
+        if calculated_size < min_amount:
+            adjusted_size = min_amount
+            logger.info(f"   调整后: {adjusted_size} (使用最小值)")
+        else:
+            # 根据精度调整
+            adjusted_size = round(calculated_size, precision)
+            logger.info(f"   调整后: {adjusted_size}")
+        
+        # 验证是否为最小交易量的整数倍
+        if min_amount > 0:
+            multiple = adjusted_size / min_amount
+            if not multiple.is_integer():
+                # 如果不是整数倍，向下取整到最近的倍数
+                adjusted_size = (int(multiple) * min_amount)
+                logger.info(f"   最终调整: {adjusted_size} (lot size的整数倍)")
+        
+        return adjusted_size
+        
+    except Exception as e:
+        logger.error(f"调整仓位大小失败: {str(e)}")
+        return calculated_size
+
+def calculate_position_size():
+    """计算仓位大小 - 精确计算最小可用仓位"""
+    try:
+        current_price = get_current_price()
+        if current_price == 0:
+            return config.min_contract_size
+            
+        # 计算需要的BTC数量
+        required_btc = (config.base_usdt_amount * config.leverage) / current_price
+        
+        # 转换为合约张数
+        contract_size = required_btc / config.contract_size
+        
+        # 确保不低于最小交易量
+        if contract_size < config.min_contract_size:
+            contract_size = config.min_contract_size
+            
+        # 根据市场规则调整大小
+        contract_size = adjust_position_size(contract_size)
+        
+        actual_btc = contract_size * config.contract_size
+        logger.info(f"📏 仓位计算详情:")
+        logger.info(f"   保证金: {config.base_usdt_amount} USDT")
+        logger.info(f"   杠杆: {config.leverage}x")
+        logger.info(f"   总价值: {config.base_usdt_amount * config.leverage} USDT")
+        logger.info(f"   当前价格: {current_price:.2f} USDT")
+        logger.info(f"   需要BTC: {required_btc:.8f} BTC")
+        logger.info(f"   合约张数: {contract_size} 张")
+        logger.info(f"   实际BTC: {actual_btc:.8f} BTC")
+        
+        return contract_size
+        
+    except Exception as e:
+        logger.error(f"计算仓位大小失败: {str(e)}")
+        return config.min_contract_size
+
+def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tuple[float, float]:
+    """计算止损和止盈价格"""
+    if side == 'long':  # 多头
+        stop_loss_price = entry_price * (1 - config.stop_loss_percent)
+        take_profit_price = entry_price * (1 + config.take_profit_percent)
+    else:  # 空头 (side == 'sell' or 'short')
+        stop_loss_price = entry_price * (1 + config.stop_loss_percent)
+        take_profit_price = entry_price * (1 - config.take_profit_percent)
+    
+    logger.info(f"🎯 价格计算 - 入场: {entry_price:.2f}, 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
+    return stop_loss_price, take_profit_price
+
+def close_position(side: str, amount: float, cancel_sl_tp=True):
+    """
+    平仓函数 - 增强版本，可选撤销止损止盈
+    """
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 平仓方向与开仓方向相反
+        close_side = 'buy' if side == 'short' else 'sell'
+        
+        params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': close_side,
+            'ordType': 'market',  # 市价平仓
+            'sz': str(amount),
+        }
+        
+        log_order_params("市价平仓", params, "close_position")
+        logger.info(f"🔄 执行{side}仓位平仓: {amount} 张")
+        
+        response = exchange.private_post_trade_order(params)
+        
+        log_api_response(response, "close_position")
+        
+        if response and response.get('code') == '0':
+            order_id = response['data'][0]['ordId'] if response.get('data') else 'Unknown'
+            logger.info(f"✅ 平仓订单创建成功: {order_id}")
+            
+            # 等待平仓成交
+            if wait_for_order_fill(order_id, 30):
+                # 平仓成交后再次确认撤销所有止损止盈
+                logger.info("🔄 平仓成交后确认撤销止损止盈订单...")
+                cancel_all_sl_tp_orders()
+                return response
+            else:
+                logger.error(f"❌ 平仓订单未在30秒内成交")
+                return None
+        else:
+            logger.error(f"❌ 平仓订单创建失败: {response}")
+            return response
+            
+    except Exception as e:
+        logger.error(f"平仓失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return None
+
+def get_current_position():
+    """获取当前持仓 - 改进版本"""
+    try:
+        # 使用CCXT的fetch_positions方法获取所有持仓
+        positions = exchange.fetch_positions()
+        
+        if not positions:
+            logger.info("📊 没有找到任何持仓")
+            return None
+        
+        # 查找当前交易对的持仓
+        target_symbol = config.symbol
+        logger.info(f"📊 查找持仓: {target_symbol}")
+        
+        for pos in positions:
+            symbol = pos.get('symbol', '')
+            contracts = float(pos.get('contracts', 0))
+            
+            # 记录所有持仓信息用于调试
+            logger.info(f"📊 持仓信息: 符号={symbol}, 合约数={contracts}, 方向={pos.get('side')}, 入场价={pos.get('entryPrice')}")
+            
+            # 检查是否为目标交易对且有持仓
+            if symbol == target_symbol and contracts > 0:
+                position_info = {
+                    'side': pos.get('side', 'unknown'),
+                    'size': contracts,
+                    'entry_price': float(pos.get('entryPrice', 0)),
+                    'unrealized_pnl': float(pos.get('unrealizedPnl', 0)),
+                    'leverage': float(pos.get('leverage', config.leverage))
+                }
+                logger.info(f"✅ 找到目标持仓: {position_info}")
+                return position_info
+        
+        logger.info("❌ 未找到目标交易对的持仓")
+        return None
+        
+    except Exception as e:
+        logger.error(f"获取持仓失败: {str(e)}")
+        return None
+
+def analyze_algo_order_type(order):
+    """智能分析条件单类型"""
+    algo_id = order.get('algoId', 'Unknown')
+    
+    # 判断订单类型（通过字段存在性判断）
+    has_tp = order.get('tpTriggerPx') not in [None, '']
+    has_sl = order.get('slTriggerPx') not in [None, '']
+    
+    if has_tp and has_sl:
+        return "OCO"
+    elif has_sl:
+        return "止损"
+    elif has_tp:
+        return "止盈"
+    else:
+        # 进一步检查其他条件单类型
+        ord_type = order.get('ordType', '')
+        if ord_type == 'move_order_stop':
+            return "移动止损"
+        elif ord_type == 'iceberg':
+            return "冰山订单"
+        elif ord_type == 'twap':
+            return "TWAP"
+        else:
+            return "其他条件单"
+
+def _log_algo_order_detail(order):
+    """记录条件单详细信息 - 改进版本"""
+    algo_id = order.get('algoId', 'Unknown')
+    order_type = analyze_algo_order_type(order)
+    state = order.get('state', 'Unknown')
+    side = order.get('side', 'Unknown')
+    pos_side = order.get('posSide', 'Unknown')
+    sz = order.get('sz', 'Unknown')
+    
+    logger.info(f"      ID: {algo_id}")
+    logger.info(f"       类型: {order_type}")
+    logger.info(f"       状态: {state}")
+    logger.info(f"       方向: {side}/{pos_side}")
+    logger.info(f"       数量: {sz}")
+    
+    # 根据类型显示不同的价格信息
+    if order_type == "OCO":
+        logger.info(f"       止损触发: {order.get('slTriggerPx', 'Unknown')}, 委托: {order.get('slOrdPx', 'Unknown')}")
+        logger.info(f"       止盈触发: {order.get('tpTriggerPx', 'Unknown')}, 委托: {order.get('tpOrdPx', 'Unknown')}")
+    elif order_type == "止损":
+        logger.info(f"       触发价: {order.get('slTriggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('slOrdPx', 'Unknown')}")
+    elif order_type == "止盈":
+        logger.info(f"       触发价: {order.get('tpTriggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('tpOrdPx', 'Unknown')}")
+    else:
+        logger.info(f"       触发价: {order.get('triggerPx', 'Unknown')}")
+        logger.info(f"       委托价: {order.get('ordPx', 'Unknown')}")
+
+def check_sl_tp_orders():
+    """检查止损止盈订单状态 - 修复版本，支持OCO和特定品种过滤"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        # 使用条件单查询API来检查止损止盈订单
+        params = {
+            'instType': 'SWAP',  # 永续合约
+            'instId': inst_id,   # 只查询特定品种
+            'ordType': 'conditional,oco',  # 条件单类型
+        }
+        
+        logger.info(f"📋 查询 {inst_id} 的止损止盈条件单...")
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if orders:
+                logger.info(f"✅ 发现止损止盈条件单: {len(orders)}个")
+                
+                # 分类显示订单
+                sl_orders = []
+                tp_orders = [] 
+                oco_orders = []
+                other_orders = []
+                
+                for order in orders:
+                    # 判断订单类型（通过字段存在性判断）
+                    has_tp = order.get('tpTriggerPx') not in [None, '']
+                    has_sl = order.get('slTriggerPx') not in [None, '']
+                    
+                    if has_tp and has_sl:
+                        oco_orders.append(order)
+                    elif has_sl:
+                        sl_orders.append(order)
+                    elif has_tp:
+                        tp_orders.append(order)
+                    else:
+                        other_orders.append(order)
+                
+                # 显示止损订单
+                if sl_orders:
+                    logger.info(f"   🛡️ 止损订单 ({len(sl_orders)}个):")
+                    for order in sl_orders:
+                        _log_algo_order_detail(order)
+                
+                # 显示止盈订单
+                if tp_orders:
+                    logger.info(f"   🎯 止盈订单 ({len(tp_orders)}个):")
+                    for order in tp_orders:
+                        _log_algo_order_detail(order)
+                
+                # 显示OCO订单
+                if oco_orders:
+                    logger.info(f"   🔄 OCO订单 ({len(oco_orders)}个):")
+                    for order in oco_orders:
+                        _log_algo_order_detail(order)
+                
+                # 显示其他类型订单
+                if other_orders:
+                    logger.info(f"   ❓ 其他条件单 ({len(other_orders)}个):")
+                    for order in other_orders:
+                        _log_algo_order_detail(order)
+                
+                return True
+            else:
+                logger.info(f"📋 未发现 {inst_id} 的止损止盈条件单")
+                return False
+        else:
+            logger.warning(f"⚠️ 查询 {inst_id} 的止损止盈订单失败")
+            return False
+            
+    except Exception as e:
+        logger.error(f"检查止损止盈订单失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return False
+
+def cancel_all_sl_tp_orders():
+    """撤销所有止损止盈订单"""
+    try:
+        inst_id = get_correct_inst_id()
+        
+        logger.info(f"🔄 撤销 {inst_id} 的所有止损止盈订单...")
+        
+        # 获取所有待处理的条件单
+        params = {
+            'instType': 'SWAP',
+            'instId': inst_id,
+            'ordType': 'conditional,oco',
+        }
+        
+        response = exchange.private_get_trade_orders_algo_pending(params)
+        
+        if response and response.get('code') == '0':
+            orders = response.get('data', [])
+            
+            if not orders:
+                logger.info(f"✅ 没有找到需要撤销的止损止盈订单")
+                return True
+            
+            cancel_count = 0
+            for order in orders:
+                algo_id = order.get('algoId')
+                if algo_id:
+                    # 撤销单个条件单 - 使用正确的CCXT方法
+                    cancel_params = [
+                        {
+                            'algoId': algo_id,
+                            'instId': inst_id,
+                        }
+                    ]
+                    
+                    # 使用批量撤销条件单的API
+                    cancel_response = exchange.private_post_trade_cancel_algos(cancel_params)
+                    
+                    if cancel_response and cancel_response.get('code') == '0':
+                        logger.info(f"✅ 已撤销条件单: {algo_id}")
+                        cancel_count += 1
+                    else:
+                        logger.error(f"❌ 撤销条件单失败: {algo_id} - {cancel_response}")
+            
+            logger.info(f"📊 总计撤销 {cancel_count}/{len(orders)} 个条件单")
+            return cancel_count > 0
+        else:
+            logger.error(f"❌ 获取待撤销订单失败: {response}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"撤销止损止盈订单失败: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return False
+
+def cancel_existing_orders():
+    """取消现有的订单"""
+    try:
+        logger.info("🔄 取消现有订单...")
+        
+        # 获取待处理订单
+        pending_orders = exchange.fetch_open_orders(config.symbol)
+        
+        if pending_orders:
+            for order in pending_orders:
+                order_id = order.get('id')
+                logger.info(f"📋 发现待处理订单: {order_id} - {order.get('side')} {order.get('amount')}")
+                
+                # 取消订单
+                cancel_result = exchange.cancel_order(order_id, config.symbol)
+                if cancel_result:
+                    logger.info(f"✅ 取消订单成功: {order_id}")
+                else:
+                    logger.warning(f"⚠️ 取消订单失败: {order_id}")
+        else:
+            logger.info("✅ 没有找到待取消的订单")
+                    
+    except Exception as e:
+        logger.error(f"取消订单失败: {str(e)}")
+
+def wait_for_order_fill(order_id: str, timeout: int = 60) -> bool:
+    """等待订单成交"""
+    logger.info(f"⏳ 等待订单 {order_id} 成交...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            order = exchange.fetch_order(order_id, config.symbol)
+            status = order['status']
+            
+            if status == 'closed':
+                logger.info(f"✅ 订单已成交: {order_id}")
+                return True
+            elif status == 'canceled':
+                logger.warning(f"❌ 订单已取消: {order_id}")
+                return False
+            else:
+                logger.info(f"📊 订单状态: {status}, 等待中...")
+                
+            time.sleep(3)  # 每3秒检查一次
+            
+        except Exception as e:
+            logger.error(f"检查订单状态失败: {str(e)}")
+            time.sleep(3)
+    
+    logger.warning(f"⏰ 订单等待超时: {order_id}")
+    return False
+
+def wait_for_position(side: str, timeout: int = 30) -> Dict[str, Any]:
+    """等待持仓出现"""
+    logger.info(f"⏳ 等待{side}持仓出现...")
+    
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        position = get_current_position()
+        if position and position['side'] == side:
+            logger.info(f"✅ {side}持仓已建立")
+            return position
+        time.sleep(2)  # 每2秒检查一次
+    
+    logger.error(f"❌ {side}持仓未在{timeout}秒内出现")
+    return None
+
+def safe_close_position(side: str, amount: float):
+    """
+    安全平仓函数 - 确保平仓后止损止盈被撤销
+    """
+    logger.info(f"🔒 安全平仓: {side} {amount}张")
+    
+    # 步骤1: 撤销止损止盈订单
+    logger.info("步骤1: 撤销止损止盈订单...")
+    cancel_all_sl_tp_orders()
+    
+    # 步骤2: 执行平仓
+    logger.info("步骤2: 执行平仓...")
+    close_result = close_position(side, amount, cancel_sl_tp=False)  # 这里设为False因为我们已经撤销过了
+    
+    # 步骤3: 确认平仓后再次检查
+    logger.info("步骤3: 确认平仓状态...")
+    time.sleep(3)
+    position_after = get_current_position()
+    if position_after:
+        logger.error(f"❌ 平仓后仍有持仓: {position_after}")
+        return False
+    
+    # 步骤4: 最终确认无止损止盈订单
+    logger.info("步骤4: 最终确认无止损止盈订单...")
+    cancel_all_sl_tp_orders()
+    
+    return close_result is not None
+
+def cleanup_after_test():
+    """测试结束后的清理工作"""
+    try:
+        logger.info("🧹 测试结束，执行清理...")
+        
+        # 1. 检查并平掉所有持仓
+        position = get_current_position()
+        if position:
+            logger.warning(f"⚠️ 测试结束发现未平持仓: {position}")
+            logger.info("🔄 自动平仓...")
+            safe_close_position(position['side'], position['size'])
+        
+        # 2. 撤销所有止损止盈订单
+        logger.info("🔄 撤销所有止损止盈订单...")
+        cancel_all_sl_tp_orders()
+        
+        # 3. 取消所有待处理订单
+        logger.info("🔄 取消所有待处理订单...")
+        cancel_existing_orders()
+        
+        logger.info("✅ 清理完成")
+        return True
+        
+    except Exception as e:
+        logger.error(f"清理失败: {str(e)}")
+        return False
+
+# ---------------------------------------------------------------------------
+# Code 专属于 ds_sltp_test.py 的函数
+# ---------------------------------------------------------------------------
 
 def generate_cl_ord_id(side: str) -> str:
     """
     生成符合OKX规范的clOrdId：
     - 仅包含字母和数字
-    - 长度1-32位
+    - 长度 1-32位
     - 前缀区分买卖方向，确保唯一性
     """
     prefix = "SELL" if side == "sell" else "BUY"
@@ -127,8 +794,7 @@ def algo_order_pending_get_comprehensive_info(inst_id: str) -> Dict[str, Any]:
         logger.error(error_msg)
         logger.error(f"异常堆栈: {traceback.format_exc()}")
         result["error"] = error_msg
-        return result
-
+    
 #未完成的委托订单解析
 def algo_pending_orders_parse(
     algo_result: Dict[str, Any],
@@ -199,57 +865,7 @@ def algo_pending_orders_parse(
         logger.info("-" * 60)
 
     logger.info("=" * 80)
-
-
-
-def extract_sl_tp_trigger_prices(
-    algo_result: Dict[str, Any],
-    target_inst_id: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    """
-    解析策略委托单返回结果，提取指定交易对的止盈止损触发价格信息
-    
-    :param algo_result: algo_order_pending_get_comprehensive_info 函数的返回结果
-    :param target_inst_id: 可选，指定交易对（如 'BTC-USDT-SWAP'），不指定则返回所有交易对
-    :return: 包含止盈止损信息的列表，每个元素结构：
-        {
-            "inst_id": str,          # 交易对
-            "algo_id": str,          # 策略订单ID
-            "algo_cl_ord_id": str,   # 自定义策略ID
-            "sl_trigger_px": float,  # 止损触发价（None表示未设置）
-            "tp_trigger_px": float   # 止盈触发价（None表示未设置）
-        }
-    """
-    # 验证输入有效性
-    if not algo_result.get("success"):
-        raise ValueError(f"无效的策略委托单数据：{algo_result.get('error', '未知错误')}")
-
-    # 提取核心数据（兼容代码库中 algo_order_pending_get_comprehensive_info 的返回结构）
-    pending_algos = algo_result.get("algo_orders", [])
-    main_order_data = algo_result.get("main_order_data", {})
-    default_inst_id = main_order_data.get("instId") or target_inst_id
-
-    result = []
-    for algo in pending_algos:
-        # 提取交易对（优先从订单数据取，否则用默认值）
-        inst_id = algo.get("instId") or default_inst_id
-        if target_inst_id and inst_id != target_inst_id:
-            continue  # 跳过非目标交易对
-
-        # 解析触发价格（转换为浮点数，未设置则为None）
-        sl_trigger_px = float(algo["slTriggerPx"]) if algo.get("slTriggerPx") else None
-        tp_trigger_px = float(algo["tpTriggerPx"]) if algo.get("tpTriggerPx") else None
-
-        # 整理结果
-        result.append({
-            "inst_id": inst_id,
-            "algo_id": algo.get("algoId", "未知"),
-            "algo_cl_ord_id": algo.get("algoClOrdId", "未设置"),
-            "sl_trigger_px": sl_trigger_px,
-            "tp_trigger_px": tp_trigger_px
-        })
-
-    return result
+        return result
 
 def get_pending_algo_order_count(
     algo_result: Dict[str, Any],
@@ -415,7 +1031,7 @@ def close_position_universal(
             'cl_ord_id': None,
             'response': None
         }
-
+    
 def amend_untraded_sl_tp(main_ord_id: str, attach_algo_id: str, inst_id: str) -> bool:
     """适用于主订单未完全成交，止盈止损未委托的场景"""
     try:
@@ -538,104 +1154,6 @@ def amend_traded_sl_tp(
         logger.error(result["error"], exc_info=True)
         return result
 
-def check_sl_tp_activation_status(main_ord_id: str) -> Dict[str, Any]:
-    """
-    检查止盈止损单的激活状态
-    返回：{
-        "has_attached_sl_tp": bool,  # 是否有附带止盈止损
-        "has_activated_sl_tp": bool,  # 是否已激活
-        "algo_ids": List[str],        # 算法订单ID
-        "algo_cl_ord_ids": List[str]  # 算法订单自定义ID
-    }
-    """
-    result = {
-        "has_attached_sl_tp": False,
-        "has_activated_sl_tp": False,
-        "algo_ids": [],
-        "algo_cl_ord_ids": []
-    }
-    
-    try:
-        inst_id = get_correct_inst_id()
-        
-        # 1. 查询主订单，检查是否有附带止盈止损
-        main_order_info = algo_order_pending_get_comprehensive_info(main_ord_id)
-        if not main_order_info["success"]:
-            return result
-            
-        result["has_attached_sl_tp"] = len(main_order_info["attach_algo_ids"]) > 0
-        
-        # 2. 查询算法订单，检查是否已激活
-        algo_params = {
-            "instType": "SWAP",
-            "instId": inst_id,
-            "ordType": "conditional,oco"  # 条件单类型
-        }
-        
-        logger.info(f"🔍 查询算法订单状态请求:")
-        logger.info(json.dumps(algo_params, indent=2, ensure_ascii=False))
-        algo_resp = exchange.private_get_trade_orders_algo_pending(algo_params)
-
-        # 打印完整响应
-        logger.info("📥 止盈止损订单查询响应:")
-        if algo_resp:
-            logger.info(f"   响应码: {algo_resp.get('code')}")
-            logger.info(f"   响应消息: {algo_resp.get('msg')}")
-            logger.info(f"   数据条数: {len(algo_resp.get('data', []))}")
-            
-            if algo_resp.get('data'):
-                for idx, order in enumerate(algo_resp['data']):
-                    logger.info(f"   订单 #{idx+1}:")
-                    logger.info(json.dumps(order, indent=2, ensure_ascii=False))
-
-        if algo_resp and algo_resp.get("code") == "0":
-            algo_orders = algo_resp.get("data", [])
-            # 查找与主订单关联的算法订单
-            for order in algo_orders:
-                if order.get("attachOrdId") == main_ord_id:
-                    result["has_activated_sl_tp"] = True
-                    if order.get("algoId"):
-                        result["algo_ids"].append(order["algoId"])
-                    if order.get("algoClOrdId"):
-                        result["algo_cl_ord_ids"].append(order["algoClOrdId"])
-            
-            if result["has_activated_sl_tp"]:
-                logger.info(f"✅ 发现已激活的止盈止损单: {result['algo_ids']}")
-            else:
-                logger.info("ℹ️ 未发现已激活的止盈止损单")
-        
-        return result
-         
-    except Exception as e:
-        logger.error(f"检查止盈止损激活状态失败: {str(e)}")
-        return result
-
-
-def cancel_activated_sl_tp_by_algo_id(algo_id: str, inst_id: str) -> bool:
-    """通过algoId撤销已激活的止盈止损单"""
-    try:
-        params = [{
-            "instId": inst_id,
-            "algoId": algo_id
-        }]
-        
-        logger.info(f"🔄 通过algoId撤销止盈止损单: {algo_id}")
-        logger.info(f"   请求参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
-        
-        response = exchange.private_post_trade_cancel_algos(params)
-        logger.info(f"   响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
-        
-        if response and response.get("code") == "0":
-            logger.info(f"✅ 成功撤销止盈止损单: {algo_id}")
-            return True
-        else:
-            logger.error(f"❌ 撤销失败: {response}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"通过algoId撤销止盈止损单失败: {str(e)}")
-        return False
-     
 def cancel_algo_order_by_attach_id(algo_cl_ord_id: str, inst_id: str) -> bool:
     """通过algoClOrdId撤销已激活的止盈止损单"""
     try:
@@ -720,57 +1238,6 @@ def get_safe_position_size() -> float:
     except Exception as e:
         logger.error(f"安全计算仓位大小失败: {str(e)}")
         return 0.01
-
-def process_order_result(order_result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    处理订单结果，提取和补充止盈止损信息
-    """
-    if not order_result.get('success'):
-        return order_result
-    
-    # 基础结果结构
-    processed_result = {
-        'success': True,
-        'order_id': order_result['order_id'],
-        'cl_ord_id': order_result['cl_ord_id'],
-        'custom_sl_tp_id': order_result.get('custom_sl_tp_id'),
-        'stop_loss_price': order_result.get('stop_loss_price'),
-        'take_profit_price': order_result.get('take_profit_price'),
-        'attach_algo_ids': [],
-        'attach_algo_cl_ord_ids': [],
-        'algo_ids': [],
-        'algo_cl_ord_ids': []
-    }
-    
-    # 如果需要获取详细的止盈止损信息，主动查询一次
-    if order_result.get('custom_sl_tp_id'):
-        logger.info("🔍 查询订单详情获取止盈止损信息...")
-        time.sleep(2)  # 等待订单处理
-        
-        order_detail = algo_order_pending_get_comprehensive_info(order_result['order_id'])
-        if order_detail["success"] and order_detail["attach_algo_ids"]:
-            processed_result['attach_algo_ids'] = order_detail["attach_algo_ids"]
-            
-            # 从详细数据中提取其他信息
-            if order_detail.get("main_order_data", {}).get("attachAlgoOrds"):
-                for algo_ord in order_detail["main_order_data"]["attachAlgoOrds"]:
-                    if algo_ord.get("attachAlgoClOrdId"):
-                        processed_result['attach_algo_cl_ord_ids'].append(algo_ord["attachAlgoClOrdId"])
-                    if algo_ord.get("algoId"):
-                        processed_result['algo_ids'].append(algo_ord["algoId"])
-                    if algo_ord.get("algoClOrdId"):
-                        processed_result['algo_cl_ord_ids'].append(algo_ord["algoClOrdId"])
-        
-        logger.info(f"📋 处理后的订单详情:")
-        logger.info(json.dumps({
-            "主订单ID": processed_result['order_id'],
-            "自定义订单ID": processed_result['cl_ord_id'],
-            "止盈止损自定义ID": processed_result['custom_sl_tp_id'],
-            "附带止盈止损ID": processed_result['attach_algo_ids'],
-            "止盈止损算法ID": processed_result['algo_ids']
-        }, indent=2, ensure_ascii=False))
-    
-    return processed_result
 
 def create_order_with_sl_tp(
     side: str, 
@@ -903,122 +1370,6 @@ def create_order_with_sl_tp(
             'error': error_msg
         }
 
-def create_universal_order(
-    side: str, 
-    ord_type: str = 'market',
-    amount: Optional[float] = None,
-    price: Optional[float] = None,
-    stop_loss_price: Optional[float] = None,
-    take_profit_price: Optional[float] = None
-) -> Dict[str, Any]:
-    """
-    简化版全能交易函数：支持一次开单同时附带止损和止盈（通过同一算法参数数组）
-    """
-    try:
-        inst_id = get_correct_inst_id()
-        amount = amount or get_safe_position_size()
-        cl_ord_id = generate_cl_ord_id(side)
-        
-        # 基础订单参数
-        params = {
-            'instId': inst_id,
-            'tdMode': config.margin_mode,
-            'side': side,
-            'ordType': ord_type,
-            'sz': str(amount),
-            'clOrdId': cl_ord_id,
-        }
-        
-        if ord_type == 'limit' and price is not None:
-            params['px'] = str(price)
-        
-        # 止盈止损的方向与主订单相反（主多则止盈止损为空，主空则相反）
-        opposite_side = 'buy' if side == 'sell' else 'sell'
-        
-        # 核心：整合止损和止盈到同一个算法参数数组（algo_params）
-        algo_params = []  # 存放所有算法订单（可同时包含SL和TP）
-        
-        # 添加止损单（SL）到算法数组
-        if stop_loss_price is not None:
-            algo_params.append({
-                'algoType': 'sl',  # 算法类型：止损
-                'instId': inst_id,  # 与主订单标的一致
-                'side': opposite_side,  # 方向与主订单相反
-                'triggerPx': str(stop_loss_price),  # 止损触发价
-                'ordType': 'market',  # 触发后以市价成交
-                'sz': str(amount),  # 数量与主订单一致
-                'clOrdId': generate_cl_ord_id(f"{side}_sl")  # 止损单唯一标识
-            })
-        
-        # 添加止盈单（TP）到算法数组
-        if take_profit_price is not None:
-            algo_params.append({
-                'algoType': 'tp',  # 算法类型：止盈
-                'instId': inst_id,  # 与主订单标的一致
-                'side': opposite_side,  # 方向与主订单相反
-                'triggerPx': str(take_profit_price),  # 止盈触发价
-                'ordType': 'market',  # 触发后以市价成交
-                'sz': str(amount),  # 数量与主订单一致
-                'clOrdId': generate_cl_ord_id(f"{side}_tp")  # 止盈单唯一标识
-            })
-        
-        # 如果有止损或止盈，将算法数组附加到主订单参数中
-        if algo_params:
-            params['attachAlgoOrds'] = algo_params  # 关键：一次请求附带所有算法订单
-        
-        action_name = f"{'做多' if side == 'buy' else '做空'}{'市价' if ord_type == 'market' else '限价'}单"
-        logger.info("📤 完整请求参数:")
-        logger.info(json.dumps(params, indent=2, ensure_ascii=False))
-        logger.info(f"🎯 执行{action_name}: {amount} 张（{'含止损止盈' if algo_params else '无止损止盈'}）")
-        
-        # 执行API调用（一次请求完成主订单+止损+止盈）
-        response = exchange.private_post_trade_order(params)
-        
-        # 响应处理逻辑（保持不变）
-        logger.info("📥 完整响应信息:")
-        if response:
-            logger.info(json.dumps(response, indent=2, ensure_ascii=False))
-            
-            if response.get('code') != '0':
-                logger.error(f"❌ API调用失败: {response}")
-                return {
-                    'success': False,
-                    'error': response.get('msg', 'Unknown error'),
-                    'response': response
-                }
-        else:
-            logger.error("❌ 无响应数据")
-            return {
-                'success': False,
-                'error': 'No response data',
-                'response': None
-            }
-        
-        order_id = response['data'][0]['ordId'] if response.get('data') else None
-        logger.info(f"✅ {action_name}创建成功: {order_id}（{'止损止盈已附加' if algo_params else ''}）")
-        
-        return {
-            'success': True,
-            'clOrdId': cl_ord_id,
-            'algo_cl_ord_ids': [algo['clOrdId'] for algo in algo_params]  # 返回所有算法订单的ID
-        }
-            
-    except Exception as e:
-        logger.error(f"创建全能订单失败: {str(e)}")
-        logger.error(f"异常堆栈: {traceback.format_exc()}")
-        return {
-            'success': False,
-            'error': str(e),
-            'response': None
-        }
-
-# # 1. 调用设置止损止盈
-# sl_tp_result = sl_tp_algo_order_set(
-#     side="short",
-#     amount=0.1,
-#     stop_loss_price=40000.0,
-#     take_profit_price=38000.0
-# )
 def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[float] = None, take_profit_price: Optional[float] = None) -> Dict[str, Optional[str]]:
     """
     优化版：合并参数生成逻辑，通过动态添加字段处理OCO/单独止损/止盈订单
@@ -1117,234 +1468,6 @@ def Is_sl_tp_canceled_with_instId(inst_id: str) -> bool:
     
     return True
 
-# # 2. 调用确认函数验证--以下是示例。
-# confirm_result = confirm_sl_tp_orders_by_params(
-#     side="short",
-#     amount=0.1,
-#     stop_loss_price=40000.0,
-#     take_profit_price=38000.0,
-#     expected_algo_ids=sl_tp_result["algo_ids"],
-#     expected_algo_cl_ord_ids=sl_tp_result["algo_cl_ord_ids"]
-# )
-
-def confirm_sl_tp_orders_by_params(
-    side: str,
-    amount: float,
-    stop_loss_price: Optional[float] = None,
-    take_profit_price: Optional[float] = None,
-    expected_algo_ids: List[str] = None,
-    expected_algo_cl_ord_ids: List[str] = None,
-    timeout: int = 30,
-    interval: int = 3
-) -> Dict[str, Any]:
-    """
-    基于参数原值与实际委托单信息比对，确认止盈止损委托单是否正确设置
-    
-    参数:
-        side: 开仓方向（与set_sl_tp_separately一致）
-        amount: 委托数量（与set_sl_tp_separately一致）
-        stop_loss_price: 止损价格（与set_sl_tp_separately一致）
-        take_profit_price: 止盈价格（与set_sl_tp_separately一致）
-        expected_algo_ids: 预期算法订单ID（来自set_sl_tp_separately返回）
-        expected_algo_cl_ord_ids: 预期自定义算法ID（来自set_sl_tp_separately返回）
-        timeout: 超时时间（秒）
-        interval: 检查间隔（秒）
-    
-    返回:
-        确认结果字典，包含匹配状态、详细比对信息及异常原因
-    """
-    result = {
-        "success": False,
-        "matched_orders": [],  # 完全匹配的订单详情
-        "mismatched_orders": [],  # 存在不匹配的订单详情及原因
-        "missing_orders": [],  # 未找到的预期订单ID
-        "unexpected_orders": []  # 非预期但存在的订单
-    }
-    expected_algo_ids = expected_algo_ids or []
-    expected_algo_cl_ord_ids = expected_algo_cl_ord_ids or []
-    
-    # 1. 定义预期参数模板（与set_sl_tp_separately的设置逻辑一致）
-    inst_id = get_correct_inst_id()
-    opposite_side = "buy" if side in ("sell", "short") else "sell"  # 平仓方向
-    expected_ord_type = "conditional"  # 单独设置时均为条件单
-    expected_sz = str(amount)  # 数量需转为字符串（与API参数一致）
-    
-    # 2. 超时循环检查
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        # 重置本轮状态
-        current_matched = []
-        current_mismatched = []
-        current_unexpected = []
-        checked_ids = set()  # 已检查的订单ID，用于排查重复或多余订单
-        
-        # 3. 获取实际未完成的算法订单（调用综合查询函数）
-        try:
-            # 假设algo_order_pending_get_comprehensive_info的参数与algo_order_pending_get_comprehensive_info类似
-            pending_orders = algo_order_pending_get_comprehensive_info(
-                inst_id=inst_id,
-                ord_types=["conditional"]  # 单独设置的止损止盈均为条件单
-            )
-            # 假设返回格式为：{"success": bool, "data": List[订单详情字典]}
-            if not pending_orders.get("success"):
-                logger.warning("⚠️ 未获取到有效委托单信息，重试中...")
-                time.sleep(interval)
-                continue
-            actual_orders = pending_orders["data"]
-        except Exception as e:
-            logger.error(f"查询委托单信息异常: {str(e)}", exc_info=True)
-            time.sleep(interval)
-            continue
-        
-        # 4. 比对预期订单与实际订单
-        # 4.1 处理预期的止损单
-        if stop_loss_price is not None:
-            expected_sl_trigger = str(stop_loss_price)
-            # 遍历实际订单查找匹配的止损单
-            sl_matched = False
-            for order in actual_orders:
-                # 匹配条件：ID匹配 + 核心参数匹配
-                if (order.get("algoId") in expected_algo_ids or 
-                    order.get("algoClOrdId") in expected_algo_cl_ord_ids):
-                    checked_ids.add(order.get("algoId"))
-                    checked_ids.add(order.get("algoClOrdId"))
-                    
-                    # 核心参数比对
-                    mismatches = []
-                    if order.get("ordType") != expected_ord_type:
-                        mismatches.append(f"订单类型不符（预期: {expected_ord_type}, 实际: {order.get('ordType')}）")
-                    if order.get("side") != opposite_side:
-                        mismatches.append(f"方向不符（预期: {opposite_side}, 实际: {order.get('side')}）")
-                    if order.get("sz") != expected_sz:
-                        mismatches.append(f"数量不符（预期: {expected_sz}, 实际: {order.get('sz')}）")
-                    if order.get("slTriggerPx") != expected_sl_trigger:
-                        mismatches.append(f"止损触发价不符（预期: {expected_sl_trigger}, 实际: {order.get('slTriggerPx')}）")
-                    if order.get("state") not in ("live", "effective"):
-                        mismatches.append(f"状态无效（当前: {order.get('state')}）")
-                    
-                    if not mismatches:
-                        current_matched.append({
-                            "type": "stop_loss",
-                            "algo_id": order.get("algoId"),
-                            "algo_cl_ord_id": order.get("algoClOrdId"),
-                            "details": order
-                        })
-                        sl_matched = True
-                    else:
-                        current_mismatched.append({
-                            "type": "stop_loss",
-                            "algo_id": order.get("algoId"),
-                            "reason": mismatches
-                        })
-            
-            # 若未匹配到预期的止损单
-            if not sl_matched:
-                sl_expected_id = next(
-                    (id for id in expected_algo_ids if "sl" in id.lower()),  # 假设ID含sl标识
-                    None
-                ) or next(
-                    (cl_id for cl_id in expected_algo_cl_ord_ids if "sl" in cl_id.lower()),
-                    "unknown_sl_id"
-                )
-                current_missing = {
-                    "type": "stop_loss",
-                    "expected_id": sl_expected_id,
-                    "expected_trigger_price": stop_loss_price
-                }
-                current_missing.extend(current_missing)
-        
-        # 4.2 处理预期的止盈单
-        if take_profit_price is not None:
-            expected_tp_trigger = str(take_profit_price)
-            # 遍历实际订单查找匹配的止盈单
-            tp_matched = False
-            for order in actual_orders:
-                if (order.get("algoId") in expected_algo_ids or 
-                    order.get("algoClOrdId") in expected_algo_cl_ord_ids):
-                    checked_ids.add(order.get("algoId"))
-                    checked_ids.add(order.get("algoClOrdId"))
-                    
-                    # 核心参数比对
-                    mismatches = []
-                    if order.get("ordType") != expected_ord_type:
-                        mismatches.append(f"订单类型不符（预期: {expected_ord_type}, 实际: {order.get('ordType')}）")
-                    if order.get("side") != opposite_side:
-                        mismatches.append(f"方向不符（预期: {opposite_side}, 实际: {order.get('side')}）")
-                    if order.get("sz") != expected_sz:
-                        mismatches.append(f"数量不符（预期: {expected_sz}, 实际: {order.get('sz')}）")
-                    if order.get("tpTriggerPx") != expected_tp_trigger:
-                        mismatches.append(f"止盈触发价不符（预期: {expected_tp_trigger}, 实际: {order.get('tpTriggerPx')}）")
-                    if order.get("state") not in ("live", "effective"):
-                        mismatches.append(f"状态无效（当前: {order.get('state')}）")
-                    
-                    if not mismatches:
-                        current_matched.append({
-                            "type": "take_profit",
-                            "algo_id": order.get("algoId"),
-                            "algo_cl_ord_id": order.get("algoClOrdId"),
-                            "details": order
-                        })
-                        tp_matched = True
-                    else:
-                        current_mismatched.append({
-                            "type": "take_profit",
-                            "algo_id": order.get("algoId"),
-                            "reason": mismatches
-                        })
-            
-            # 若未匹配到预期的止盈单
-            if not tp_matched:
-                tp_expected_id = next(
-                    (id for id in expected_algo_ids if "tp" in id.lower()),  # 假设ID含tp标识
-                    None
-                ) or next(
-                    (cl_id for cl_id in expected_algo_cl_ord_ids if "tp" in cl_id.lower()),
-                    "unknown_tp_id"
-                )
-                current_missing = {
-                    "type": "take_profit",
-                    "expected_id": tp_expected_id,
-                    "expected_trigger_price": take_profit_price
-                }
-                result["missing_orders"].append(current_missing)
-        
-        # 4.3 检查是否存在非预期订单（未在expected_ids中但属于当前交易对的订单）
-        for order in actual_orders:
-            order_id = order.get("algoId")
-            order_cl_id = order.get("algoClOrdId")
-            if (order_id not in expected_algo_ids and 
-                order_cl_id not in expected_algo_cl_ord_ids and 
-                order.get("instId") == inst_id):
-                current_unexpected.append({
-                    "algo_id": order_id,
-                    "algo_cl_ord_id": order_cl_id,
-                    "type": "stop_loss" if order.get("slTriggerPx") else "take_profit"
-                })
-        
-        # 5. 更新结果并检查是否完成确认
-        result["matched_orders"] = current_matched
-        result["mismatched_orders"] = current_mismatched
-        result["unexpected_orders"] = current_unexpected
-        
-        # 所有预期订单均匹配且无异常时，确认成功
-        total_expected = sum(1 for p in [stop_loss_price, take_profit_price] if p is not None)
-        if len(current_matched) == total_expected and not current_mismatched:
-            result["success"] = True
-            logger.info(f"🎉 所有止盈止损委托单均匹配成功（{len(current_matched)}/{total_expected}）")
-            return result
-        
-        # 未完成确认，继续等待
-        remaining_time = int(timeout - (time.time() - start_time))
-        logger.info(f"⏳ 等待{remaining_time}秒后重试，已匹配{len(current_matched)}/{total_expected}个订单")
-        time.sleep(interval)
-    
-    # 超时处理
-    logger.error("❌ 止盈止损委托单确认超时")
-    return result
-
-
-
-
 def get_algo_order_info_by_clId(
     algo_cl_ord_id: Optional[str] = None,
     algo_id: Optional[str] = None,
@@ -1427,25 +1550,6 @@ def get_algo_order_info_by_clId(
         result["error"] = error_msg
         logger.error(error_msg, exc_info=True)
         return result
-
-
-# 确认策略订单是否正确下发----使用示例如下
-    # 验证止盈单
-    # tp_confirm = confirm_algo_order_by_clId(
-    #     side="short",
-    #     amount=0.1,
-    #     take_profit_price=38000.0,
-    #     algo_cl_ord_id=sl_tp_result["algo_cl_ord_ids"][1],  # 取止盈单ID
-    #     timeout=60
-    # )
-    
-    # if sl_confirm["success"] and tp_confirm["success"]:
-    #     logger.info("所有止损止盈单均正确下发")
-    # else:
-    #     if not sl_confirm["success"]:
-    #         logger.error(f"止损单验证失败: {sl_confirm['error'] or sl_confirm['reason']}")
-    #     if not tp_confirm["success"]:
-    #         logger.error(f"止盈单验证失败: {tp_confirm['error'] or tp_confirm['reason']}")
 
 def confirm_algo_order_by_clId(
     side: str,
@@ -1531,7 +1635,7 @@ def confirm_algo_order_by_clId(
             mismatches.append(
                 f"数量不符（预期: {expected_sz}, 实际: {order_data.get('sz')}）"
             )
-        if not (order_data.get("ordType") == "conditional" or order_data.get("ordType") == "coc"):
+        if not (order_data.get("ordType") == "conditional" or order_data.get("ordType") == "oco"):
             mismatches.append(
                 f"订单类型不符（预期: conditional or oco, 实际: {order_data.get('ordType')}）"
             )
@@ -1546,7 +1650,15 @@ def confirm_algo_order_by_clId(
         expected_sl = str(stop_loss_price) if stop_loss_price else None
         expected_tp = str(take_profit_price) if take_profit_price else None
         
-        if sl_trigger_px:
+        # (修复逻辑：OCO订单会同时包含sl和tp字段)
+        is_oco = order_data.get("ordType") == "oco"
+        
+        if is_oco:
+             if sl_trigger_px != expected_sl:
+                 mismatches.append(f"OCO止损触发价不符（预期: {expected_sl}, 实际: {sl_trigger_px}）")
+             if tp_trigger_px != expected_tp:
+                 mismatches.append(f"OCO止盈触发价不符（预期: {expected_tp}, 实际: {tp_trigger_px}）")
+        elif sl_trigger_px:
             # 校验止损单
             if expected_sl is None:
                 mismatches.append("非预期的止损单（未设置止损价格）")
