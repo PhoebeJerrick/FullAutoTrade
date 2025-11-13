@@ -1025,7 +1025,7 @@ def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[flo
     返回单个ID而非列表（因每次调用最多生成一个订单）
     """
     # 初始化返回结果为单个值（None表示未生成订单）
-    result = {'algo_id': None, 'algo_cl_ord_id': None}
+    result = {'success': False,'algo_id': None, 'algo_cl_ord_id': None}
     
     if not (stop_loss_price or take_profit_price):
         logger.warning("⚠️ 未设置止损或止盈价格，无需创建订单")
@@ -1060,6 +1060,7 @@ def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[flo
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
+                result['success'] = True  # 设置成功
                 result['algo_id'] = algo_id  # 赋值单个ID
                 result['algo_cl_ord_id'] = oco_params['algoClOrdId']
                 logger.info(f"✅ OCO订单创建成功 (algoId: {algo_id})")
@@ -1079,6 +1080,7 @@ def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[flo
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
+                result['success'] = True  # 设置成功
                 result['algo_id'] = algo_id  # 赋值单个ID
                 result['algo_cl_ord_id'] = sl_params['algoClOrdId']
                 logger.info(f"✅ 止损订单创建成功 (algoId: {algo_id})")
@@ -1098,6 +1100,7 @@ def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[flo
             
             if response and response.get('code') == '0':
                 algo_id = response['data'][0]['algoId']
+                result['success'] = True  # 设置成功
                 result['algo_id'] = algo_id  # 赋值单个ID
                 result['algo_cl_ord_id'] = tp_params['algoClOrdId']
                 logger.info(f"✅ 止盈订单创建成功 (algoId: {algo_id})")
@@ -1105,6 +1108,7 @@ def sl_tp_algo_order_set(side: str, amount: float, stop_loss_price: Optional[flo
         return result
 
     except Exception as e:
+        result['success'] = False  # 设置失败
         logger.error(f"设置止损止盈失败: {str(e)}", exc_info=True)
         return result
 
@@ -1701,7 +1705,7 @@ def run_short_sl_tp_test():
     )
 
     time.sleep(2)
-    if sl_tp_set_result['algo_id']:
+    if sl_tp_set_result['algo_id'] and sl_tp_set_result['success']:
         print(f"sltp订单创建成功，algo_id: {sl_tp_set_result['algo_id']}")
         
     if sl_tp_set_result["algo_cl_ord_id"] :
