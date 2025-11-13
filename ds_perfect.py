@@ -266,7 +266,7 @@ def check_sufficient_margin(symbol: str, position_size: float, current_price: fl
         
         # 安全缓冲：要求保证金不超过余额的70%
         if required_margin > usdt_balance * 0.7:
-            logger.log_error(f"❌ {get_base_currency(symbol)}: 保证金不足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+            logger.log_error("保证金不足", f"❌ {get_base_currency(symbol)}:需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
             return False
             
         logger.log_info(f"✅ {get_base_currency(symbol)}: 保证金充足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
@@ -3850,7 +3850,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
     # 🆕 资金充足性检查
     if not check_sufficient_margin(symbol, position_size, current_price):
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 资金不足，放弃开仓")
+        logger.log_error("资金不足",f"❌ {get_base_currency(symbol)}: 放弃开仓")
         return
     
     # 记录交易分析
