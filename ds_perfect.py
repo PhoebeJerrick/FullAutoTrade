@@ -3462,7 +3462,10 @@ def optimize_existing_orders(symbol: str, position: dict, price_data: dict):
         return False
 
 def close_position_safely(symbol: str, position: dict, reason: str = "反向开仓平仓") -> bool:
-    """安全平仓函数，返回是否成功"""
+    """
+    安全平仓函数 - 统一版本，支持市价平仓和限价平仓
+    返回是否成功
+    """
     config = SYMBOL_CONFIGS[symbol]
     try:
         # 🆕 双重验证：重新获取持仓信息
@@ -3482,9 +3485,9 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
             return True
         
-        position_side = current_position['side'] # long or short
-        margin_mode = current_position['margin_mode']
+        position_side = current_position['side']  # 'long' or 'short'
         position_size = current_position['size']
+        
         logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
 
         # 🆕 记录平仓前的持仓信息到历史
@@ -3496,77 +3499,99 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             'close_reason': reason
         })
 
-        # 🆕 修复：根据保证金模式设置正确的posSide
-        close_params = {
-            'tdMode': margin_mode,
-            'reduceOnly': True,
-            'tag': create_order_tag()
-        }
-        
-        # 🆕 修复：只有在逐仓模式下才需要设置posSide，全仓模式使用net
-        if margin_mode == 'isolated':
-            close_params['posSide'] = position_side  # long 或 short
-        else:
-            close_params['posSide'] = 'net'  # 全仓模式使用net
+        # 🆕 取消该品种的所有策略委托订单
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 平仓前取消所有策略委托订单")
+        cancel_existing_algo_orders(symbol)
+        time.sleep(1)  # 等待取消操作完成
 
-        if current_position['side'] == 'long':
-            # 平多仓
-            log_order_params("平多仓", close_params, "close_position_safely")
-            log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
+        # 🆕 使用全能平仓逻辑
+        try:
+            # 1. 确定平仓方向（与原持仓方向相反）
+            close_side = 'sell' if position_side in ('buy', 'long') else 'buy'
+            action_name = f"{'多头' if position_side in ('buy', 'long') else '空头'}市价平仓"
             
+            # 2. 获取必要参数
+            inst_id = get_correct_inst_id(symbol)
+            current_price = get_current_price(symbol)
+            
+            if current_price == 0:
+                error_msg = "无法获取当前价格，无法执行平仓操作"
+                logger.log_error(f"❌ {get_base_currency(symbol)}: {error_msg}")
+                return False
+            
+            # 3. 处理平仓数量
+            if position_size <= 0:
+                error_msg = "持仓数量无效，无法平仓"
+                logger.log_error(f"❌ {get_base_currency(symbol)}: {error_msg}")
+                return False
+
+            # 4. 生成自定义订单ID
+            cl_ord_id = generate_cl_ord_id(close_side)
+            
+            # 5. 构建ccxt标准化订单参数
+            order_params = {
+                'symbol': config.symbol,
+                'type': 'market',
+                'side': close_side,
+                'amount': position_size,
+                'params': {
+                    'tdMode': config.margin_mode,
+                    'reduceOnly': True,
+                    'tag': create_order_tag()
+                }
+            }
+            
+            # 6. 打印订单信息
+            logger.log_info(f"📤 {get_base_currency(symbol)}: {action_name}参数:")
+            logger.log_info(f"  方向: {close_side}, 数量: {position_size}, 类型: market")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行{action_name}: {position_size} 张")
+            
+            # 7. 执行平仓订单（使用ccxt标准化接口）
             if not config.test_mode:
-                # 执行平仓
-                order = exchange.create_order(
-                    symbol=config.symbol,
-                    type='market',
-                    side='sell',
-                    amount=position_size,
+                response = exchange.create_order(
+                    symbol=order_params['symbol'],
+                    type=order_params['type'],
+                    side=order_params['side'],
+                    amount=order_params['amount'],
                     price=None,
-                    params=close_params
+                    params=order_params['params']
                 )
-                # 验证订单是否创建成功
-                if order and order.get('id'):
-                    reset_scaling_status(symbol)
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功，ID: {order['id']},加仓状态重置")
-                    
-                    # 等待并验证平仓结果
-                    return verify_position_closed(symbol, position_size, 'long')
-                else:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平多仓订单提交失败")
-                    return False
-            else:
-                logger.log_info("测试模式 - 模拟平多仓成功")
-                return True
                 
-        else:  # short
-            # 平空仓
-            log_order_params("平空仓", close_params, "close_position_safely")
-            log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
+                # 8. 处理API响应
+                logger.log_info(f"📥 {get_base_currency(symbol)}: {action_name}响应:")
+                logger.log_info(f"  订单ID: {response.get('id', 'Unknown')}, 状态: {response.get('status', 'Unknown')}")
+                
+                # 修复：改进订单状态检查逻辑
+                order_id = response.get('id')
+                if not order_id:
+                    error_msg = f"订单创建失败: {response}"
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: {action_name}失败: {error_msg}")
+                    # 🆕 尝试备用方法
+                    return close_position_fallback(symbol, position, reason)
+                
+                # 对于市价单，只要订单创建成功就认为成功
+                logger.log_info(f"✅ {get_base_currency(symbol)}: {action_name}订单创建成功: {order_id}")
+            else:
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 测试模式 - {action_name}模拟成功")
+                order_id = "test_order_id"
+
+            # 9. 重置加仓状态
+            reset_scaling_status(symbol)
             
-            if not config.test_mode:
-                order = exchange.create_order(
-                    config.symbol,
-                    'market',
-                    'buy',
-                    position_size,
-                    None,
-                    close_params
-                )
-                
-                if order and order.get('id'):
-                    reset_scaling_status(symbol)
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功,ID: {order['id']},加仓状态重置")
-                    return verify_position_closed(symbol, position_size, 'short')
-                else:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平空仓订单提交失败")
-                    return False
-            else:
-                logger.log_info("测试模式 - 模拟平空仓成功")
-                return True
+            # 10. 等待并验证平仓结果
+            return verify_position_closed(symbol, position_size, position_side)
+                    
+        except Exception as inner_e:
+            error_msg = f"{get_base_currency(symbol)}: 平仓异常: {str(inner_e)}"
+            logger.log_error(f"close_position_inner_{get_base_currency(symbol)}", error_msg)
+            logger.log_error(f"close_position_traceback_{get_base_currency(symbol)}", traceback.format_exc())
+            # 🆕 尝试备用方法
+            return close_position_fallback(symbol, position, reason)
                 
     except Exception as e:
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
-        return False
+        # 🆕 尝试备用方法
+        return close_position_fallback(symbol, position, reason)
 
 def verify_position_closed(symbol: str, expected_size: float, side: str) -> bool:
     """验证持仓是否已平"""
