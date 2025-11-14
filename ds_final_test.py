@@ -907,23 +907,7 @@ def close_position_universal(
     price: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    全能平仓函数，支持市价平仓和限价平仓
-    
-    参数:
-        side: 原持仓方向 ('buy' 或 'sell'/'short')，函数会自动计算平仓方向
-        amount: 平仓数量，None则默认平掉全部持仓
-        ord_type: 平仓类型，'market' 市价平仓，'limit' 限价平仓
-        price: 限价平仓时的价格，市价平仓时忽略
-        
-    返回:
-        包含平仓结果的字典，结构如下:
-        {
-            'success': bool,        # 操作是否成功
-            'order_id': str,        # 订单ID，成功时有效
-            'cl_ord_id': str,       # 自定义订单ID，成功时有效
-            'response': Any,        # API响应数据
-            'error': Optional[str]  # 错误信息，失败时有效
-        }
+    全能平仓函数，支持市价平仓和限价平仓（使用ccxt标准化接口，兼容多交易所）
     """
     try:
         # 1. 确定平仓方向（与原持仓方向相反）
@@ -960,56 +944,70 @@ def close_position_universal(
             logger.error(f"❌ {error_msg}")
             return {'success': False, 'error': error_msg, 'order_id': None, 'cl_ord_id': None, 'response': None}
         
-        # 5. 生成自定义订单ID
+        # 5. 生成自定义订单ID（ccxt标准参数为clientOrderId）
         cl_ord_id = generate_cl_ord_id(close_side)
         
-        # 6. 构建订单参数
-        params = {
-            'instId': inst_id,
-            'tdMode': config.margin_mode,
+        # 6. 构建ccxt标准化订单参数
+        # ccxt标准参数：symbol, type, side, amount, price, params
+        order_params = {
+            'symbol': inst_id,
+            'type': ord_type,
             'side': close_side,
-            'ordType': ord_type,
-            'sz': str(amount),
-            'clOrdId': cl_ord_id
+            'amount': amount,
+            'clientOrderId': cl_ord_id,  # 自定义订单ID，部分交易所支持
         }
         
-        # 7. 限价平仓时添加价格参数
+        # 添加价格参数（限价单）
         if ord_type == 'limit':
             if price is None:
-                # 如果未指定限价，基于当前价格设置一个合理的默认值
+                # 自动设置合理的默认限价
                 if close_side == 'buy':  # 平空单（买入）时，限价略高于当前价
                     price = current_price * 1.001
                 else:  # 平多单（卖出）时，限价略低于当前价
                     price = current_price * 0.999
                 logger.warning(f"⚠️ 未指定限价，自动设置为: {price:.2f}")
             
-            params['px'] = str(price)
+            order_params['price'] = price
         
-        # 8. 打印订单信息
+        # 添加交易所特定参数（如保证金模式）
+        # 注意：不同交易所的保证金模式参数可能不同，这里以OKX为例，其他交易所可能需要调整
+        order_params['params'] = {
+            'tdMode': config.margin_mode  # 保证金模式，部分交易所可能不需要
+        }
+        
+        # 7. 打印订单信息
         logger.info(f"📤 {action_name}参数:")
-        logger.info(json.dumps(params, indent=2, ensure_ascii=False))
+        logger.info(json.dumps(order_params, indent=2, ensure_ascii=False))
         logger.info(f"🎯 执行{action_name}: {amount} 张 {'@ ' + str(price) if ord_type == 'limit' else ''}")
         
-        # 9. 执行平仓订单
-        response = exchange.private_post_trade_order(params)
+        # 8. 执行平仓订单（使用ccxt标准化接口）
+        response = exchange.create_order(
+            symbol=order_params['symbol'],
+            type=order_params['type'],
+            side=order_params['side'],
+            amount=order_params['amount'],
+            price=order_params.get('price'),
+            params=order_params['params']
+        )
         
-        # 10. 处理API响应
+        # 9. 处理API响应（ccxt标准化响应格式）
         logger.info(f"📥 {action_name}响应:")
         logger.info(json.dumps(response, indent=2, ensure_ascii=False))
         
-        if not response or response.get('code') != '0':
-            error_msg = response.get('msg', '未知错误') if response else '无响应数据'
+        # 检查ccxt响应是否成功（不同交易所可能有差异）
+        if not response or ('status' in response and response['status'] not in ['open', 'closed']):
+            error_msg = f"订单状态异常: {response.get('info', {}).get('msg', '未知错误')}"
             logger.error(f"❌ {action_name}失败: {error_msg}")
             return {
                 'success': False,
                 'error': error_msg,
-                'order_id': None,
+                'order_id': response.get('id') if response else None,
                 'cl_ord_id': cl_ord_id,
                 'response': response
             }
         
-        # 11. 提取订单ID
-        order_id = response['data'][0]['ordId'] if response.get('data') else None
+        # 10. 提取订单ID（ccxt标准字段为id）
+        order_id = response.get('id')
         logger.info(f"✅ {action_name}成功: {order_id} (自定义ID: {cl_ord_id})")
         
         return {
@@ -1031,7 +1029,8 @@ def close_position_universal(
             'cl_ord_id': None,
             'response': None
         }
-    
+
+
 def amend_untraded_sl_tp(main_ord_id: str, attach_algo_id: str, inst_id: str) -> bool:
     """适用于主订单未完全成交，止盈止损未委托的场景"""
     try:

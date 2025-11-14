@@ -3482,7 +3482,7 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
             return True
         
-        position_side = current_position['side'] #long or short.
+        position_side = current_position['side'] # long or short
         margin_mode = current_position['margin_mode']
         position_size = current_position['size']
         logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
@@ -3496,16 +3496,21 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             'close_reason': reason
         })
 
+        # 🆕 修复：根据保证金模式设置正确的posSide
         close_params = {
-            'instd': get_correct_inst_id(symbol),
-            'tdMode': margin_mode,  # 🆕 保证金模式
-            'posSide': position_side,  # 🆕 保证金模式
-            'reduceOnly': True
+            'tdMode': margin_mode,
+            'reduceOnly': True,
+            'tag': create_order_tag()
         }
+        
+        # 🆕 修复：只有在逐仓模式下才需要设置posSide，全仓模式使用net
+        if margin_mode == 'isolated':
+            close_params['posSide'] = position_side  # long 或 short
+        else:
+            close_params['posSide'] = 'net'  # 全仓模式使用net
 
         if current_position['side'] == 'long':
             # 平多仓
-            # 记录订单参数
             log_order_params("平多仓", close_params, "close_position_safely")
             log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
             
@@ -3539,11 +3544,13 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
-                order = exchange.create_market_order(
+                order = exchange.create_order(
                     config.symbol,
+                    'market',
                     'buy',
                     position_size,
-                    params=close_params
+                    None,
+                    close_params
                 )
                 
                 if order and order.get('id'):
@@ -4213,92 +4220,54 @@ def close_position_fallback(symbol: str, position: dict, reason: str) -> bool:
         
         position_size = position['size']
         position_side = position['side']
+        margin_mode = position.get('margin_mode', config.margin_mode)
         
-        # 🆕 方法1: 使用私有API直接平仓
+        # 🆕 修复：根据保证金模式设置posSide
+        close_params = {
+            'tdMode': margin_mode,
+            'reduceOnly': True,
+            'tag': create_order_tag()
+        }
+        
+        if margin_mode == 'isolated':
+            close_params['posSide'] = position_side
+        else:
+            close_params['posSide'] = 'net'
+        
+        # 🆕 方法1: 使用标准CCXT平仓
         try:
-            inst_id = get_correct_inst_id(symbol)
+            if position_side == 'long':
+                order = exchange.create_order(
+                    config.symbol,
+                    'market',
+                    'sell',
+                    position_size,
+                    None,
+                    close_params
+                )
+            else:
+                order = exchange.create_order(
+                    config.symbol,
+                    'market', 
+                    'buy',
+                    position_size,
+                    None,
+                    close_params
+                )
             
-            params = {
-                'instId': inst_id,
-                'tdMode': config.margin_mode,
-                'side': 'sell' if position_side == 'long' else 'buy',
-                'posSide': position_side,
-                'ordType': 'market',
-                'sz': str(position_size),
-                'reduceOnly': True
-            }
-            
-            logger.log_info(f"🔄 {get_base_currency(symbol)}: 尝试备用平仓方法1 - 私有API")
-            response = exchange.private_post_trade_order(params)
-            
-            if response and response.get('code') == '0':
-                order_id = response['data'][0]['ordId']
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法1成功，订单ID: {order_id}")
+            if order and order.get('id'):
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法成功，订单ID: {order['id']}")
                 reset_scaling_status(symbol)
                 return True
                 
         except Exception as e1:
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法1失败: {str(e1)}")
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法失败: {str(e1)}")
         
-        # 🆕 方法2: 使用限价单平仓
-        try:
-            # 获取当前价格
-            ticker = exchange.fetch_ticker(config.symbol)
-            current_price = ticker['last']
-            
-            if position_side == 'long':
-                # 平多仓 - 使用稍低的价格确保成交
-                limit_price = current_price * 0.995
-                order = exchange.create_order(
-                    config.symbol,
-                    'limit',
-                    'sell',
-                    position_size,
-                    limit_price,
-                    {'reduceOnly': True}
-                )
-            else:
-                # 平空仓 - 使用稍高的价格确保成交
-                limit_price = current_price * 1.005
-                order = exchange.create_order(
-                    config.symbol,
-                    'limit',
-                    'buy',
-                    position_size,
-                    limit_price,
-                    {'reduceOnly': True}
-                )
-            
-            if order and order.get('id'):
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法2成功，订单ID: {order['id']}")
-                reset_scaling_status(symbol)
-                return True
-                
-        except Exception as e2:
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法2失败: {str(e2)}")
-        
-        # 🆕 方法3: 最后尝试 - 使用更简化的方式
-        try:
-            if position_side == 'long':
-                order = exchange.create_market_sell_order(config.symbol, position_size, {'reduceOnly': True})
-            else:
-                order = exchange.create_market_buy_order(config.symbol, position_size, {'reduceOnly': True})
-            
-            if order and order.get('id'):
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法3成功，订单ID: {order['id']}")
-                reset_scaling_status(symbol)
-                return True
-                
-        except Exception as e3:
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法3失败: {str(e3)}")
-        
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 所有平仓方法均失败")
         return False
         
     except Exception as e:
         logger.log_error(f"close_position_fallback_{get_base_currency(symbol)}", f"备用平仓方法异常: {str(e)}")
         return False
-
 
 def close_position_with_reason(symbol: str, position: dict, reason: str) -> bool:
     """根据原因平仓 - 增强版本"""
