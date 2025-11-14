@@ -203,14 +203,14 @@ def get_scaling_status(symbol: str) -> Dict:
     return SCALING_HISTORY[symbol]
 
 def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -> bool:
-    """判断是否允许加仓 - 修复版本"""
+    """判断是否允许加仓 - 严格版本"""
     config = SYMBOL_CONFIGS[symbol]
     scaling_config = config.position_management.get('scaling_in', {})
     
     if not scaling_config.get('enable_scaling_in', True):
         return False
     
-    # 🆕 安全检查：确保有持仓
+    # 安全检查：确保有持仓
     if not current_position or current_position['size'] <= 0:
         return False
     
@@ -222,10 +222,10 @@ def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -
     
     scaling_status = get_scaling_status(symbol)
     
-    # 🆕 双重检查加仓次数限制
+    # 🆕 严格检查加仓次数限制
     max_scaling_times = scaling_config.get('max_scaling_times', 3)
     if scaling_status['scaling_count'] >= max_scaling_times:
-        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 已达最大加仓次数{max_scaling_times}次")
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 已达最大加仓次数{max_scaling_times}次，禁止加仓")
         return False
     
     # 检查时间间隔
@@ -236,56 +236,69 @@ def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓间隔不足{min_interval}分钟")
             return False
     
-    # 🆕 额外检查：确保基础仓位大小有效
+    # 🆕 严格检查基础仓位大小
     if scaling_status['base_position_size'] <= 0:
         logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 基础仓位大小无效，不允许加仓")
         return False
     
+    # 🆕 额外检查：确保当前仓位足够大
+    min_position_threshold = getattr(config, 'min_amount', 0.01) * 5  # 至少5倍最小交易量
+    if current_position['size'] < min_position_threshold:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 当前仓位过小({current_position['size']:.4f}张)，不允许加仓")
+        return False
+    
     return True
 
+
 def monitor_scaling_status(symbol: str):
-    """监控加仓状态，用于调试"""
+    """监控加仓状态，用于调试和防护"""
     scaling_status = get_scaling_status(symbol)
     config = SYMBOL_CONFIGS[symbol]
     scaling_config = config.position_management.get('scaling_in', {})
     max_scaling_times = scaling_config.get('max_scaling_times', 3)
     
+    # 🆕 如果加仓次数异常，自动重置
+    if scaling_status['scaling_count'] > max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数异常({scaling_status['scaling_count']})，自动重置")
+        reset_scaling_status(symbol)
+        scaling_status = get_scaling_status(symbol)  # 重新获取
+    
     logger.log_info(f"🔍 {get_base_currency(symbol)}加仓状态监控: "
                    f"当前次数{scaling_status['scaling_count']}/{max_scaling_times}, "
-                   f"基础仓位:{scaling_status['base_position_size']:.2f}, "
+                   f"基础仓位:{scaling_status['base_position_size']:.6f}, "
                    f"最后加仓:{scaling_status['last_scaling_time']}")
-    
-    # 如果超出限制，记录警告
-    if scaling_status['scaling_count'] > max_scaling_times:
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数超出限制!")
 
 def calculate_scaling_position(symbol: str, base_position: float, signal_data: dict) -> float:
-    """计算加仓仓位大小 - 修复版本"""
+    """计算加仓仓位大小 - 严格版本"""
     config = SYMBOL_CONFIGS[symbol]
     scaling_config = config.position_management.get('scaling_in', {})
+    
+    scaling_status = get_scaling_status(symbol)
+    
+    # 🆕 在计算前再次严格检查
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    if scaling_status['scaling_count'] >= max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数已满，但仍在尝试加仓，强制阻止")
+        return 0  # 返回0表示不允许加仓
     
     scaling_multiplier = scaling_config.get('scaling_multiplier', 0.5)
     scaling_position = base_position * scaling_multiplier
     
     # 确保不小于最小交易量
     min_contracts = getattr(config, 'min_amount', 0.01)
-    scaling_position = max(scaling_position, min_contracts)
     
-    scaling_status = get_scaling_status(symbol)
+    # 🆕 检查加仓仓位是否过小
+    if scaling_position < min_contracts:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算出的加仓仓位({scaling_position:.6f})过小，使用最小交易量")
+        scaling_position = min_contracts
     
-    # 🆕 在增加计数前再次检查
-    max_scaling_times = scaling_config.get('max_scaling_times', 3)
-    if scaling_status['scaling_count'] >= max_scaling_times:
-        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数已满，但仍在尝试加仓")
-        return min_contracts  # 返回最小仓位而不是加仓仓位
-    
+    # 🆕 增加计数（只有在仓位有效时）
     scaling_status['scaling_count'] += 1
     scaling_status['last_scaling_time'] = datetime.now()
     
-    logger.log_info(f"📈 {get_base_currency(symbol)}: 第{scaling_status['scaling_count']}次加仓，仓位:{scaling_position:.2f}张")
+    logger.log_info(f"📈 {get_base_currency(symbol)}: 第{scaling_status['scaling_count']}次加仓，仓位:{scaling_position:.6f}张")
     
     return scaling_position
-
 
 def reset_scaling_status(symbol: str):
     """重置加仓状态（平仓时调用）"""
@@ -686,7 +699,7 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
     }
 
 def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
-    """增强版仓位计算"""
+    """增强版仓位计算 - 修复基础仓位问题"""
     config = SYMBOL_CONFIGS[symbol]
     posMngmt = config.position_management
     
@@ -704,21 +717,36 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         if is_scaling:
             # 🆕 加仓逻辑 - 检查是否允许加仓
             if not can_scale_position(symbol, signal_data, current_position):
-                logger.log_info(f"⏸️ {get_base_currency(symbol)}: 不允许加仓，使用最小仓位")
-                return getattr(config, 'min_amount', 0.01)
+                logger.log_info(f"⏸️ {get_base_currency(symbol)}: 不允许加仓，返回0仓位")
+                return 0  # 返回0表示不允许加仓
             
-            # 🆕 使用加仓仓位计算
+            # 🆕 修复基础仓位设置逻辑
             scaling_status = get_scaling_status(symbol)
             if scaling_status['base_position_size'] == 0:
-                # 记录基础仓位大小（首次加仓时）
-                scaling_status['base_position_size'] = dynamic_base_usdt
+                # 🆕 重新计算基础仓位，确保合理
+                base_position_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
+                # 转换为合约张数作为基础仓位
+                nominal_value = base_position_usdt * config.leverage
+                base_position_contracts = nominal_value / (price_data['price'] * config.contract_size)
+                base_position_contracts = round(base_position_contracts, 6)
+                
+                # 确保基础仓位合理
+                min_contracts = getattr(config, 'min_amount', 0.01)
+                if base_position_contracts < min_contracts:
+                    base_position_contracts = min_contracts
+                
+                scaling_status['base_position_size'] = base_position_contracts
+                logger.log_info(f"🔧 {get_base_currency(symbol)}: 设置基础仓位为 {base_position_contracts:.6f} 张")
             
             scaling_position = calculate_scaling_position(symbol, scaling_status['base_position_size'], signal_data)
             
+            # 🆕 如果加仓仓位为0，直接返回
+            if scaling_position <= 0:
+                return 0
+                
             # 转换为合约张数
-            nominal_value = scaling_position * config.leverage
-            contract_size = nominal_value / (price_data['price'] * config.contract_size)
-            contract_size = round(contract_size, 2)
+            # 注意：scaling_position 已经是合约张数，不需要再次转换
+            contract_size = scaling_position
             
             # 🆕 修复：根据品种调整最终合约数量
             base_currency = get_base_currency(symbol)
@@ -730,7 +758,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
                 contract_size = max(1, math.ceil(contract_size))
                 logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
 
-            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.2f}张")
+            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
             
             return contract_size
         
