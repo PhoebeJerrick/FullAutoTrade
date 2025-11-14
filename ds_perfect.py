@@ -3799,15 +3799,26 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     signal_side = 'long' if signal_data['signal'] == 'BUY' else 'short'
     current_position = get_current_position(symbol)
     
-    # 🆕 修复：正确判断交易方向
-    if current_position:
-        # 如果有持仓，使用持仓方向来计算止损止盈
-        position_side = current_position['side']
-        is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == signal_side
-    else:
-        # 如果没有持仓，使用信号方向
-        position_side = signal_side
-        is_scaling = False
+    # 🆕 修复：始终使用信号方向来计算止损止盈
+    position_side = signal_side  # 始终使用信号方向
+    
+    # 🆕 修复：正确判断加仓条件
+    is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == signal_side
+    
+    # 🆕 修复：如果持仓方向与信号方向相反，应该先平仓
+    if current_position and current_position['side'] != signal_side:
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 持仓方向{current_position['side']}与信号方向{signal_side}相反，先平仓")
+        close_success = close_position_safely(symbol, current_position, f"反向信号平仓: {signal_side}")
+        if close_success:
+            # 平仓成功后，重置持仓状态
+            current_position = None
+            reset_scaling_status(symbol)
+        else:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开仓")
+            return
+    
+    # 🆕 现在使用正确的方向计算止损止盈
+    stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
     
     # 🆕 修复：预先定义变量
     tp_result = None
