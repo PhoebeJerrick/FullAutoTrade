@@ -1780,9 +1780,8 @@ def cancel_existing_algo_orders(symbol: str):
                     cancel_params = {
                         'algoId': order['algoId'],
                         'instId': order['instId'],
-                        'algoOrdType': 'conditional'
                     }
-                    cancel_response = exchange.privatePostTradeCancelAlgoOrder(cancel_params)
+                    cancel_response = exchange.private_post_trade_cancel_algos(cancel_params)
                     if cancel_response['code'] == '0':
                         logger.log_info(f"✅ {get_base_currency(symbol)}: 取消策略委托订单: {order['algoId']}")
                         canceled_count += 1
@@ -2626,13 +2625,22 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
         except Exception as e:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: OCO订单检查失败: {str(e)}")
         
-        # 🆕 计算剩余需要设置的数量
-        algo_orders_analysis['remaining_size'] = max(0, position['size'] - algo_orders_analysis['total_covered_size'])
+        # 🆕 修复：计算剩余仓位时考虑浮点数精度
+        remaining_size = position['size'] - algo_orders_analysis['total_covered_size']
+        
+        # 🆕 添加精度容差（使用品种的最小交易单位）
+        min_amount = getattr(config, 'min_amount', 0.01)
+        precision_tolerance = min_amount * 0.1  # 使用最小交易单位的10%作为容差
+        
+        if abs(remaining_size) < precision_tolerance:
+            remaining_size = 0
+        
+        algo_orders_analysis['remaining_size'] = max(0, remaining_size)
         
         logger.log_info(f"📊 {get_base_currency(symbol)}: 策略委托分析 - 止损: {algo_orders_analysis['has_stop_loss']}, "
                       f"止盈: {algo_orders_analysis['has_take_profit']}, "
-                      f"已覆盖: {algo_orders_analysis['total_covered_size']}/{position['size']}张, "
-                      f"剩余: {algo_orders_analysis['remaining_size']}张")
+                      f"已覆盖: {algo_orders_analysis['total_covered_size']:.6f}/{position['size']:.6f}张, "
+                      f"剩余: {algo_orders_analysis['remaining_size']:.6f}张")
         
         return algo_orders_analysis
             
@@ -3358,8 +3366,17 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         position_side = position['side']
         remaining_size = orders_analysis['remaining_size']
         
+        # 🆕 修复：添加精度容差检查
+        min_amount = getattr(config, 'min_amount', 0.01)
+        precision_tolerance = min_amount * 0.1
+        
+        # 如果剩余仓位小于精度容差，认为已完全覆盖
+        if abs(remaining_size) < precision_tolerance:
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 止盈止损已完全覆盖持仓（精度容差内）")
+            return True
+            
         if remaining_size <= 0:
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 止损止盈已完全覆盖持仓，无需设置")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 止盈止损已完全覆盖持仓")
             return True
         
         # 计算止损价格
