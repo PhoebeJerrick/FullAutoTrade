@@ -182,21 +182,36 @@ def get_current_price(symbol: str): # 新增 symbol 参数
         return None
 
 def get_scaling_status(symbol: str) -> Dict:
-    """获取品种的加仓状态"""
+    """获取品种的加仓状态 - 修复版本"""
     if symbol not in SCALING_HISTORY:
         SCALING_HISTORY[symbol] = {
             'scaling_count': 0,
             'last_scaling_time': None,
             'base_position_size': 0
         }
+    
+    # 🆕 添加安全检查：确保加仓次数不会超过限制
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    
+    # 如果加仓次数异常，自动重置
+    if SCALING_HISTORY[symbol]['scaling_count'] > max_scaling_times:
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 加仓次数异常({SCALING_HISTORY[symbol]['scaling_count']})，自动重置")
+        SCALING_HISTORY[symbol]['scaling_count'] = max_scaling_times
+    
     return SCALING_HISTORY[symbol]
 
 def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -> bool:
-    """判断是否允许加仓"""
+    """判断是否允许加仓 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     scaling_config = config.position_management.get('scaling_in', {})
     
     if not scaling_config.get('enable_scaling_in', True):
+        return False
+    
+    # 🆕 安全检查：确保有持仓
+    if not current_position or current_position['size'] <= 0:
         return False
     
     # 检查持仓方向与信号方向是否一致
@@ -207,7 +222,7 @@ def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -
     
     scaling_status = get_scaling_status(symbol)
     
-    # 检查加仓次数限制
+    # 🆕 双重检查加仓次数限制
     max_scaling_times = scaling_config.get('max_scaling_times', 3)
     if scaling_status['scaling_count'] >= max_scaling_times:
         logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 已达最大加仓次数{max_scaling_times}次")
@@ -221,10 +236,31 @@ def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓间隔不足{min_interval}分钟")
             return False
     
+    # 🆕 额外检查：确保基础仓位大小有效
+    if scaling_status['base_position_size'] <= 0:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 基础仓位大小无效，不允许加仓")
+        return False
+    
     return True
 
+def monitor_scaling_status(symbol: str):
+    """监控加仓状态，用于调试"""
+    scaling_status = get_scaling_status(symbol)
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    
+    logger.log_info(f"🔍 {get_base_currency(symbol)}加仓状态监控: "
+                   f"当前次数{scaling_status['scaling_count']}/{max_scaling_times}, "
+                   f"基础仓位:{scaling_status['base_position_size']:.2f}, "
+                   f"最后加仓:{scaling_status['last_scaling_time']}")
+    
+    # 如果超出限制，记录警告
+    if scaling_status['scaling_count'] > max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数超出限制!")
+
 def calculate_scaling_position(symbol: str, base_position: float, signal_data: dict) -> float:
-    """计算加仓仓位大小"""
+    """计算加仓仓位大小 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     scaling_config = config.position_management.get('scaling_in', {})
     
@@ -236,12 +272,20 @@ def calculate_scaling_position(symbol: str, base_position: float, signal_data: d
     scaling_position = max(scaling_position, min_contracts)
     
     scaling_status = get_scaling_status(symbol)
+    
+    # 🆕 在增加计数前再次检查
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    if scaling_status['scaling_count'] >= max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数已满，但仍在尝试加仓")
+        return min_contracts  # 返回最小仓位而不是加仓仓位
+    
     scaling_status['scaling_count'] += 1
     scaling_status['last_scaling_time'] = datetime.now()
     
     logger.log_info(f"📈 {get_base_currency(symbol)}: 第{scaling_status['scaling_count']}次加仓，仓位:{scaling_position:.2f}张")
     
     return scaling_position
+
 
 def reset_scaling_status(symbol: str):
     """重置加仓状态（平仓时调用）"""
@@ -4139,6 +4183,9 @@ def trading_bot(symbol: str):
         # 记录执行时间
         execution_time = time.time() - start_time
         logger.log_info(f"⏱️ {get_base_currency(symbol)}: 本轮执行完成，耗时 {execution_time:.2f}秒")
+        
+        # 在交易循环的适当位置添加监控
+        monitor_scaling_status(symbol)
         
     except Exception as e:
         logger.log_error(f"trading_bot_{get_base_currency(symbol)}", str(e))
