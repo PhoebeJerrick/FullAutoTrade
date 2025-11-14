@@ -1805,10 +1805,10 @@ def cancel_existing_algo_orders(symbol: str):
             for order in response['data']:
                 if order['instId'] == inst_id:
                     # 取消策略委托订单
-                    cancel_params = {
+                    cancel_params = [{
                         'algoId': order['algoId'],
                         'instId': order['instId'],
-                    }
+                    }]
                     cancel_response = exchange.private_post_trade_cancel_algos(cancel_params)
                     if cancel_response['code'] == '0':
                         logger.log_info(f"✅ {get_base_currency(symbol)}: 取消策略委托订单: {order['algoId']}")
