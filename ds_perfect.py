@@ -592,6 +592,15 @@ def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, p
         direction = "above" if side == 'short' and stop_loss > current_price else "below"
         logger.log_info(f"🎯 {get_base_currency(symbol)}: 自适应止损 - {stop_loss:.2f} ({direction}当前价, 距离: {stop_distance_percent:.2f}%)")
         
+        # 🆕 新增：方向验证
+        if side == 'long' and stop_loss >= current_price:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止损价格异常({stop_loss:.2f} >= {current_price:.2f})，自动修正")
+            stop_loss = current_price * 0.98
+            
+        elif side == 'short' and stop_loss <= current_price:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止损价格异常({stop_loss:.2f} <= {current_price:.2f})，自动修正")
+            stop_loss = current_price * 1.02
+            
         return stop_loss
         
     except Exception as e:
@@ -665,12 +674,11 @@ def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float
 
 
 def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_price: float, price_data: dict) -> dict:
-    """基于整体仓位计算止损止盈 - 修复版本"""
+    """基于整体仓位计算止损止盈 - 彻底修复版本"""
     if not position_history:
-        # 🆕 修复：返回正确的止损止盈计算
         # 如果没有历史记录，使用当前价格作为参考
-        stop_loss = calculate_adaptive_stop_loss(symbol, 'short', current_price, price_data)
-        take_profit = calculate_intelligent_take_profit(symbol, 'short', current_price, price_data, 2.0)
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', current_price, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'long', current_price, price_data, 2.0)
         return {
             'stop_loss': stop_loss,
             'take_profit': take_profit,
@@ -685,15 +693,40 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
     # 基于平均成本计算止损止盈
     side = position_history[0]['side']
     
-    # 使用更保守的止损（基于平均成本）
-    avg_stop_loss = calculate_adaptive_stop_loss(symbol, side, weighted_entry, price_data)
+    # 🆕 修复：确保止损止盈方向正确
+    if side == 'long':
+        # 多头：止损在下方，止盈在上方
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', weighted_entry, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'long', weighted_entry, price_data, 1.8)
+        
+        # 🆕 双重验证：确保价格关系正确
+        if stop_loss >= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止损价格异常，自动修正")
+            stop_loss = weighted_entry * 0.98
+            
+        if take_profit <= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止盈价格异常，自动修正")
+            take_profit = weighted_entry * 1.03
+            
+    else:  # short
+        # 空头：止损在上方，止盈在下方
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'short', weighted_entry, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'short', weighted_entry, price_data, 1.8)
+        
+        # 🆕 双重验证：确保价格关系正确
+        if stop_loss <= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止损价格异常，自动修正")
+            stop_loss = weighted_entry * 1.02
+            
+        if take_profit >= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止盈价格异常，自动修正")
+            take_profit = weighted_entry * 0.97
     
-    # 使用更积极的止盈（基于当前价格）
-    avg_take_profit = calculate_intelligent_take_profit(symbol, side, weighted_entry, price_data, 1.8)  # 降低盈亏比要求
+    logger.log_info(f"🎯 {get_base_currency(symbol)}: 整体仓位管理 - {side}方向, 平均成本{weighted_entry:.2f}, 止损{stop_loss:.2f}, 止盈{take_profit:.2f}")
     
     return {
-        'stop_loss': avg_stop_loss,
-        'take_profit': avg_take_profit,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
         'weighted_entry': weighted_entry,
         'total_size': total_size
     }
