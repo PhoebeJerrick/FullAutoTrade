@@ -955,13 +955,24 @@ def close_position_universal(
                 logger.error(f"❌ {error_msg}")
                 return {'success': False, 'error': error_msg, 'order_id': None, 'cl_ord_id': None, 'response': None}
         
-        # 4. 调整数量为符合交易所要求的安全值
-        amount = adjust_position_size(amount)
+        # 4. 处理平仓数量（默认平掉全部持仓）
+        if amount is None:
+            position = get_current_position()
+            if not position:
+                error_msg = "没有持仓需要平仓"
+                logger.info(f"ℹ️ {error_msg}")
+                return {'success': True, 'error': error_msg, 'order_id': None, 'cl_ord_id': None, 'response': None}
+            
+            amount = float(position.get('sz', 0))
+            if amount <= 0:
+                error_msg = "持仓数量无效，无法平仓"
+                logger.error(f"❌ {error_msg}")
+                return {'success': False, 'error': error_msg, 'order_id': None, 'cl_ord_id': None, 'response': None}
+        
         if amount <= 0:
-            error_msg = f"调整后平仓数量无效: {amount}"
+            error_msg = f"平仓数量无效: {amount}"
             logger.error(f"❌ {error_msg}")
             return {'success': False, 'error': error_msg, 'order_id': None, 'cl_ord_id': None, 'response': None}
-        
         # 5. 生成自定义订单ID（ccxt标准参数为clientOrderId）
         cl_ord_id = generate_cl_ord_id(close_side)
         
