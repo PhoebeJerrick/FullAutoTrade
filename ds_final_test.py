@@ -313,6 +313,10 @@ def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tup
         stop_loss_price = entry_price * (1 + config.stop_loss_percent)
         take_profit_price = entry_price * (1 - config.take_profit_percent)
     
+    # 确保价格精度正确（BTC通常是1位小数）
+    stop_loss_price = round(stop_loss_price, 1)
+    take_profit_price = round(take_profit_price, 1)
+    
     logger.info(f"🎯 价格计算 - 入场: {entry_price:.2f}, 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
     return stop_loss_price, take_profit_price
 
@@ -740,9 +744,18 @@ def verify_position_closed(timeout: int = 10) -> bool:
     start_time = time.time()
     while time.time() - start_time < timeout:
         position = get_current_position()
+        
+        # 修复：改进持仓检查逻辑
         if not position:
             logger.info("✅ 确认仓位已平")
             return True
+        
+        # 检查是否是目标交易对的持仓
+        inst_id = get_correct_inst_id()
+        if position.get('symbol') != inst_id and position.get('instrument') != inst_id:
+            logger.info(f"✅ 目标交易对 {inst_id} 无持仓，其他持仓: {position.get('symbol')}")
+            return True
+            
         logger.info(f"⏳ 仍有持仓: {position}, 等待中...")
         time.sleep(2)
     
@@ -1022,30 +1035,52 @@ def close_position_universal(
         # 9. 处理API响应（ccxt标准化响应格式）
         logger.info(f"📥 {action_name}响应:")
         logger.info(json.dumps(response, indent=2, ensure_ascii=False))
-        
-        # 检查ccxt响应是否成功（不同交易所可能有差异）
-        if not response or ('status' in response and response['status'] not in ['open', 'closed']):
-            error_msg = f"订单状态异常: {response.get('info', {}).get('msg', '未知错误')}"
+
+        # 修复：改进订单状态检查逻辑
+        order_id = response.get('id')
+        if not order_id:
+            error_msg = f"订单创建失败: {response.get('info', {}).get('sMsg', '未知错误')}"
             logger.error(f"❌ {action_name}失败: {error_msg}")
             return {
                 'success': False,
                 'error': error_msg,
-                'order_id': response.get('id') if response else None,
+                'order_id': None,
                 'cl_ord_id': cl_ord_id,
                 'response': response
             }
         
-        # 10. 提取订单ID（ccxt标准字段为id）
-        order_id = response.get('id')
-        logger.info(f"✅ {action_name}成功: {order_id} (自定义ID: {cl_ord_id})")
-        
-        return {
-            'success': True,
-            'order_id': order_id,
-            'cl_ord_id': cl_ord_id,
-            'response': response,
-            'error': None
-        }
+        # 对于市价单，只要订单创建成功就认为成功，不检查初始状态
+        if ord_type == 'market':
+            logger.info(f"✅ {action_name}订单创建成功: {order_id} (自定义ID: {cl_ord_id})")
+            return {
+                'success': True,
+                'order_id': order_id,
+                'cl_ord_id': cl_ord_id,
+                'response': response,
+                'error': None
+            }
+        else:
+            # 限价单需要检查状态
+            status = response.get('status')
+            if status and status not in ['open', 'closed']:
+                error_msg = f"订单状态异常: {status}"
+                logger.error(f"❌ {action_name}失败: {error_msg}")
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'order_id': order_id,
+                    'cl_ord_id': cl_ord_id,
+                    'response': response
+                }
+            else:
+                logger.info(f"✅ {action_name}订单创建成功: {order_id} (自定义ID: {cl_ord_id})")
+                return {
+                    'success': True,
+                    'order_id': order_id,
+                    'cl_ord_id': cl_ord_id,
+                    'response': response,
+                    'error': None
+                }
         
     except Exception as e:
         error_msg = f"{action_name}异常: {str(e)}"
@@ -1876,26 +1911,23 @@ def run_short_sl_tp_test():
     logger.info("-" * 40)
 
     result = close_position_universal(side='sell', ord_type = 'market', amount = short_position['size'])
+    # 修复：改进平仓结果处理
     if result['success']:
-        print(f"市价平{short_position['size']}张空单成功，订单ID: {result['order_id']},clid:{result['cl_ord_id']}")
-    close_order_id = result['order_id']
-    
-    if close_order_id:
-        if not wait_for_order_fill(close_order_id, 30):
-            logger.error("❌ 限价平仓未成交，尝试市价平仓")
-            try:
-                exchange.cancel_order(close_order_id, config.symbol)
-            except Exception as e:
-                logger.error(f"取消限价单失败: {str(e)}")
-            
-            close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
-            if not close_result:
-                logger.error("❌ 市价平仓失败")
-                return False
+        logger.info(f"✅ 市价平{short_position['size']}张空单成功，订单ID: {result['order_id']}, clid:{result['cl_ord_id']}")
+        close_order_id = result['order_id']
+        
+        # 等待订单成交
+        if close_order_id and wait_for_order_fill(close_order_id, 30):
+            logger.info("✅ 平仓订单已成交")
+        else:
+            logger.warning("⚠️ 平仓订单可能未完全成交，继续流程")
     else:
+        logger.error(f"❌ 平仓失败: {result.get('error', '未知错误')}")
+        # 尝试备用平仓方法
+        logger.info("🔄 尝试备用平仓方法...")
         close_result = close_position('short', short_position['size'], cancel_sl_tp=True)
         if not close_result:
-            logger.error("❌ 市价平仓失败")
+            logger.error("❌ 备用平仓方法也失败")
             return False
 
     # 阶段7: 确认仓位已平

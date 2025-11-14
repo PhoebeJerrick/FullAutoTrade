@@ -333,6 +333,10 @@ def calculate_stop_loss_take_profit_prices(side: str, entry_price: float) -> Tup
     else:  # 空头
         stop_loss_price = entry_price * (1 + config.stop_loss_percent)
         take_profit_price = entry_price * (1 - config.take_profit_percent)
+
+    # 确保价格精度正确（BTC通常是1位小数）
+    stop_loss_price = round(stop_loss_price, 1)
+    take_profit_price = round(take_profit_price, 1)
     
     logger.info(f"🎯 价格计算 - 入场: {entry_price:.2f}, 止损: {stop_loss_price:.2f}, 止盈: {take_profit_price:.2f}")
     return stop_loss_price, take_profit_price
