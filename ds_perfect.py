@@ -3720,6 +3720,12 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     """
     config = SYMBOL_CONFIGS[symbol]
     try:
+        # 🆕 新增：检查仓位是否有效
+        min_amount = getattr(config, 'min_amount', 0.01)
+        if amount < min_amount:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 仓位大小 {amount:.4f} 小于最小交易量 {min_amount}，跳过开仓")
+            return None
+        
         inst_id = get_correct_inst_id(symbol)
         
         # 🆕 修复：根据品种调整合约数量精度
@@ -3980,6 +3986,12 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     # 计算仓位
     position_size = calculate_enhanced_position(symbol, signal_data, price_data, get_current_position(symbol))
 
+    # 🆕 新增：严格检查仓位有效性
+    min_amount = getattr(config, 'min_amount', 0.01)
+    if position_size < min_amount:
+        logger.log_warning(f"⏸️ {get_base_currency(symbol)}: 计算仓位 {position_size:.4f} 小于最小交易量 {min_amount}，放弃开仓")
+        return
+    
     # 🆕 资金充足性检查
     if not check_sufficient_margin(symbol, position_size, current_price):
         logger.log_error("资金不足",f"❌ {get_base_currency(symbol)}: 放弃开仓")
