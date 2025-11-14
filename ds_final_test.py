@@ -215,40 +215,58 @@ def get_lot_size_info():
             'precision': 4
         }
 
-def adjust_position_size(calculated_size: float) -> float:
-    """根据市场规则调整仓位大小"""
+def adjust_position_size(amount: float) -> float:
+    """
+    调整仓位大小以符合交易所的最小交易量和精度要求
+    修复浮点数转整数时的类型错误
+    """
     try:
+        # 获取市场信息（最小交易量、精度等）
         market_info = get_lot_size_info()
-        min_amount = market_info['min_amount']
-        precision = market_info['precision']
+        min_amount = market_info.get('min_amount', 0.01)  # 最小交易量（如0.01）
+        precision = market_info.get('precision', 0.01)    # 精度（如0.01表示两位小数）
         
-        logger.info(f"📏 调整仓位大小:")
-        logger.info(f"   计算大小: {calculated_size}")
-        logger.info(f"   最小交易量: {min_amount}")
-        logger.info(f"   精度: {precision}")
+        # 处理极端情况：输入数量为0或负数
+        if amount <= 0:
+            logger.warning(f"输入数量无效: {amount}，使用最小交易量 {min_amount}")
+            return min_amount
         
-        # 确保不低于最小交易量
-        if calculated_size < min_amount:
-            adjusted_size = min_amount
-            logger.info(f"   调整后: {adjusted_size} (使用最小值)")
+        # 计算精度对应的小数位数（如0.01 → 2位小数）
+        # 避免浮点数直接处理，转为字符串解析
+        precision_str = str(precision)
+        if '.' in precision_str:
+            decimal_places = len(precision_str.split('.')[1])
         else:
-            # 根据精度调整
-            adjusted_size = round(calculated_size, precision)
-            logger.info(f"   调整后: {adjusted_size}")
+            decimal_places = 0  # 整数精度（如1.0 → 0位小数）
         
-        # 验证是否为最小交易量的整数倍
-        if min_amount > 0:
-            multiple = adjusted_size / min_amount
-            if not multiple.is_integer():
-                # 如果不是整数倍，向下取整到最近的倍数
-                adjusted_size = (int(multiple) * min_amount)
-                logger.info(f"   最终调整: {adjusted_size} (lot size的整数倍)")
+        # 1. 先将数量四舍五入到指定精度（避免小数位数过多）
+        rounded_amount = round(amount, decimal_places)
         
-        return adjusted_size
+        # 2. 确保数量不小于最小交易量
+        if rounded_amount < min_amount:
+            logger.warning(f"数量 {rounded_amount} 小于最小交易量 {min_amount}，自动调整为 {min_amount}")
+            return min_amount
+        
+        # 3. 确保数量是最小交易量的整数倍（核心修复：用整数运算避免浮点数误差）
+        # 转换为最小单位的整数（如0.01 → 1个单位，0.05 → 5个单位）
+        multiplier = 10 **decimal_places  # 10^小数位数（如2 → 100）
+        min_amount_units = int(round(min_amount * multiplier))  # 最小交易量的单位数（如0.01*100=1）
+        amount_units = int(round(rounded_amount * multiplier))   # 当前数量的单位数（如0.05*100=5）
+        
+        # 计算最大的、小于等于当前单位数的最小单位倍数
+        max_valid_units = (amount_units // min_amount_units) * min_amount_units
+        
+        # 转换回原始单位
+        adjusted_amount = max_valid_units / multiplier
+        
+        logger.info(f"📏 仓位调整完成: {amount} → {adjusted_amount} (精度: {decimal_places}位小数)")
+        return adjusted_amount
         
     except Exception as e:
         logger.error(f"调整仓位大小失败: {str(e)}")
-        return calculated_size
+        # 失败时返回最小交易量作为保底
+        return market_info.get('min_amount', 0.01)
+
 
 def calculate_position_size():
     """计算仓位大小 - 精确计算最小可用仓位"""
@@ -1634,10 +1652,12 @@ def confirm_algo_order_by_clId(
             mismatches.append(
                 f"数量不符（预期: {expected_sz}, 实际: {order_data.get('sz')}）"
             )
-        if not (order_data.get("ordType") == "conditional" or order_data.get("ordType") == "oco"):
+        orderType = order_data.get("ordType")
+        if orderType not in ["conditional", "oco"]:
             mismatches.append(
-                f"订单类型不符（预期: conditional or oco, 实际: {order_data.get('ordType')}）"
+                f"订单类型不符（预期: conditional or oco, 实际: {orderType}）"
             )
+            logger.log_warning(f"⚠️ 发现非算法订单类型: {orderType}")
         if order_data.get("state") not in ("live", "effective"):
             mismatches.append(
                 f"订单状态无效（当前: {order_data.get('state')}）"

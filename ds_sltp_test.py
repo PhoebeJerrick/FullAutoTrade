@@ -1534,10 +1534,12 @@ def confirm_algo_order_by_clId(
             mismatches.append(
                 f"数量不符（预期: {expected_sz}, 实际: {order_data.get('sz')}）"
             )
-        if not (order_data.get("ordType") == "conditional" or order_data.get("ordType") == "coc"):
+        orderType = order_data.get("ordType")
+        if orderType not in ["conditional", "oco"]:
             mismatches.append(
-                f"订单类型不符（预期: conditional or oco, 实际: {order_data.get('ordType')}）"
+                f"订单类型不符（预期: conditional or oco, 实际: {orderType}）"
             )
+            logger.log_warning(f"⚠️ 发现非算法订单类型: {orderType}")
         if order_data.get("state") not in ("live", "effective"):
             mismatches.append(
                 f"订单状态无效（当前: {order_data.get('state')}）"
