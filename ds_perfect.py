@@ -785,7 +785,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             base_currency = get_base_currency(symbol)
             
             # 需要整数张合约的品种
-            integer_only_currencies = ['BCH', 'LTC', 'DASH']
+            integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
             if base_currency in integer_only_currencies:
                 # 确保至少1张，向上取整到整数
                 contract_size = max(1, math.ceil(contract_size))
@@ -864,7 +864,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         base_currency = get_base_currency(symbol)
         
         # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
         if base_currency in integer_only_currencies:
             # 确保至少1张，向上取整到整数
             contract_size = max(1, math.ceil(contract_size))
@@ -1232,7 +1232,7 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         base_currency = get_base_currency(symbol)
         
         # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
         if base_currency in integer_only_currencies:
             # 确保至少1张，向上取整到整数
             contract_size = max(1, math.ceil(contract_size))
@@ -1469,6 +1469,10 @@ def get_correct_inst_id(symbol: str):
         return 'LTC-USDT-SWAP'
     elif symbol == 'DASH/USDT:USDT':
         return 'DASH-USDT-SWAP'
+    elif symbol == 'ZEC/USDT:USDT':
+        return 'ZEC-USDT-SWAP'
+    elif symbol == 'ZEN/USDT:USDT':
+        return 'ZEN-USDT-SWAP'
     else:
         # 通用处理
         return symbol.replace('/', '-').replace(':USDT', '-SWAP')
@@ -3082,10 +3086,10 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         min_amount = getattr(config, 'min_amount', 0.01)
         
         # 🆕 特殊处理：某些品种要求整数张合约
-        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
+        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'ZEC/USDT:USDT', 'ZEN/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
         base_currency = get_base_currency(symbol)
         
-        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH']:
+        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH', 'ZEC', 'ZEN']:
             # 这些品种要求整数张合约
             adjusted_amount = max(1, int(round(amount)))  # 至少1张，四舍五入到整数
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 整数张合约调整 - 从 {amount:.4f} 调整为 {adjusted_amount} 张")
