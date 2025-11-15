@@ -384,6 +384,71 @@ def calculate_volatility_adjustment(symbol: str, df: pd.DataFrame) -> float:
 # 添加全局变量来存储持仓历史
 POSITION_HISTORY: Dict[str, List[Dict]] = {}
 
+def get_current_position_history(symbol: str) -> list:
+    """获取当前有效持仓的历史记录（排除已平仓的）"""
+    try:
+        if symbol not in POSITION_HISTORY:
+            return []
+        
+        # 获取所有开仓记录
+        open_positions = []
+        close_positions = []
+        
+        for record in POSITION_HISTORY[symbol]:
+            if record.get('action') in ['open', 'add', 'partial_close']:
+                # 开仓或加仓记录
+                open_positions.append(record)
+            elif record.get('action') == 'close':
+                # 平仓记录
+                close_positions.append(record)
+        
+        # 简单的匹配逻辑：假设最后平仓的记录对应最早的开仓记录
+        # 更精确的做法需要记录订单ID来匹配
+        remaining_positions = open_positions.copy()
+        
+        for close_record in close_positions:
+            close_size = close_record.get('size', 0)
+            close_side = close_record.get('side')
+            
+            # 从开仓记录中减去平仓数量
+            temp_remaining = []
+            for open_record in remaining_positions:
+                if (open_record.get('side') == close_side and 
+                    open_record.get('size', 0) > 0):
+                    
+                    # 匹配到同方向的开仓记录
+                    remaining_size = open_record['size'] - close_size
+                    if remaining_size > 0:
+                        # 部分平仓，更新剩余数量
+                        updated_record = open_record.copy()
+                        updated_record['size'] = remaining_size
+                        temp_remaining.append(updated_record)
+                        close_size = 0  # 已完全匹配
+                    else:
+                        # 完全平仓，跳过这个开仓记录
+                        close_size = abs(remaining_size)
+                else:
+                    temp_remaining.append(open_record)
+            
+            remaining_positions = temp_remaining
+            if close_size <= 0:
+                break
+        
+        # 如果没有找到有效持仓，返回空列表
+        if not remaining_positions:
+            return []
+            
+        # 只返回最近50条有效记录
+        max_history = 50
+        if len(remaining_positions) > max_history:
+            remaining_positions = remaining_positions[-max_history:]
+            
+        return remaining_positions
+        
+    except Exception as e:
+        logger.log_error(f"get_current_position_history_{get_base_currency(symbol)}", f"获取当前持仓历史失败: {str(e)}")
+        return []
+
 def get_position_history(symbol: str) -> list:
     """获取品种的持仓历史记录"""
     try:
@@ -673,12 +738,14 @@ def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float
             return entry_price * 0.97  # 默认3%止盈
 
 
-def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_price: float, price_data: dict) -> dict:
-    """基于整体仓位计算止损止盈 - 彻底修复版本"""
-    if not position_history:
-        # 如果没有历史记录，使用当前价格作为参考
-        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', current_price, price_data)
-        take_profit = calculate_intelligent_take_profit(symbol, 'long', current_price, price_data, 2.0)
+def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_position: dict, current_price: float, price_data: dict) -> dict:
+    """基于整体仓位计算止损止盈 - 使用当前实际持仓方向"""
+    
+    if not position_history or not current_position:
+        # 没有历史记录或当前持仓，使用当前价格作为参考
+        actual_side = current_position.get('side', 'long') if current_position else 'long'
+        stop_loss = calculate_adaptive_stop_loss(symbol, actual_side, current_price, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, actual_side, current_price, price_data, 2.0)
         return {
             'stop_loss': stop_loss,
             'take_profit': take_profit,
@@ -686,20 +753,28 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
             'total_size': 0
         }
     
-    # 计算加权平均入场价格
-    total_size = sum([pos['size'] for pos in position_history])
-    weighted_entry = sum([pos['entry_price'] * pos['size'] for pos in position_history]) / total_size
+    # 🆕 修复：使用当前实际持仓方向，而不是历史记录的第一个方向
+    actual_side = current_position['side']
     
-    # 基于平均成本计算止损止盈
-    side = position_history[0]['side']
+    # 计算加权平均入场价格（只考虑同方向的持仓）
+    same_side_positions = [pos for pos in position_history if pos.get('side') == actual_side]
     
-    # 🆕 修复：确保止损止盈方向正确
-    if side == 'long':
+    if not same_side_positions:
+        # 如果没有同方向的历史记录，使用当前持仓
+        weighted_entry = current_position['entry_price']
+        total_size = current_position['size']
+    else:
+        # 计算同方向持仓的加权平均
+        total_size = sum([pos['size'] for pos in same_side_positions])
+        weighted_entry = sum([pos['entry_price'] * pos['size'] for pos in same_side_positions]) / total_size
+    
+    # 🆕 基于实际方向计算止损止盈
+    if actual_side == 'long':
         # 多头：止损在下方，止盈在上方
         stop_loss = calculate_adaptive_stop_loss(symbol, 'long', weighted_entry, price_data)
         take_profit = calculate_intelligent_take_profit(symbol, 'long', weighted_entry, price_data, 1.8)
         
-        # 🆕 双重验证：确保价格关系正确
+        # 双重验证：确保价格关系正确
         if stop_loss >= weighted_entry:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止损价格异常，自动修正")
             stop_loss = weighted_entry * 0.98
@@ -713,7 +788,7 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
         stop_loss = calculate_adaptive_stop_loss(symbol, 'short', weighted_entry, price_data)
         take_profit = calculate_intelligent_take_profit(symbol, 'short', weighted_entry, price_data, 1.8)
         
-        # 🆕 双重验证：确保价格关系正确
+        # 双重验证：确保价格关系正确
         if stop_loss <= weighted_entry:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止损价格异常，自动修正")
             stop_loss = weighted_entry * 1.02
@@ -722,7 +797,7 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止盈价格异常，自动修正")
             take_profit = weighted_entry * 0.97
     
-    logger.log_info(f"🎯 {get_base_currency(symbol)}: 整体仓位管理 - {side}方向, 平均成本{weighted_entry:.2f}, 止损{stop_loss:.2f}, 止盈{take_profit:.2f}")
+    logger.log_info(f"🎯 {get_base_currency(symbol)}: 整体仓位管理 - {actual_side}方向, 平均成本{weighted_entry:.2f}, 止损{stop_loss:.2f}, 止盈{take_profit:.2f}")
     
     return {
         'stop_loss': stop_loss,
@@ -730,6 +805,7 @@ def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list,
         'weighted_entry': weighted_entry,
         'total_size': total_size
     }
+
 
 def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
     """增强版仓位计算 - 修复基础仓位问题"""
@@ -1150,6 +1226,185 @@ def identify_trend_strength(df):
     except Exception as e:
         logger.log_error("trend_strength_analysis", str(e))
         return {'trend_strength': 'UNKNOWN', 'trend_score': 0}
+
+
+
+def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
+                                  price_data: dict, min_risk_reward: float) -> dict:
+    """计算现实的止盈位置 - 修复版本"""
+    try:
+        levels = price_data['levels_analysis']
+        current_price = price_data['price']
+        
+        # 🆕 首先验证止损价格的合理性
+        if side == 'long':
+            if stop_loss >= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 多头止损价格{stop_loss}高于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 0.98
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        else:  # short
+            if stop_loss <= entry_price:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 空头止损价格{stop_loss}低于入场价{entry_price}")
+                # 自动修正止损
+                stop_loss = entry_price * 1.02
+                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
+        
+        if side == 'long':
+            # 理论止盈（基于最小盈亏比）
+            risk = abs(entry_price - stop_loss)  # 使用绝对值
+            theoretical_tp = entry_price + (risk * min_risk_reward)
+            
+            # 现实止盈（基于阻力位）
+            resistance_level = levels.get('static_resistance', current_price * 1.03)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.03)
+            realistic_tp = min(resistance_level, dynamic_resistance)
+            
+            # 选择较近的止盈
+            take_profit = min(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = take_profit - entry_price
+            actual_rr = actual_reward / risk if risk > 0 else 0
+            
+        else:  # short
+            # 理论止盈（基于最小盈亏比）
+            risk = abs(stop_loss - entry_price)  # 使用绝对值
+            theoretical_tp = entry_price - (risk * min_risk_reward)
+            
+            # 现实止盈（基于支撑位）
+            support_level = levels.get('static_support', current_price * 0.97)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.97)
+            realistic_tp = max(support_level, dynamic_support)
+            
+            # 选择较近的止盈
+            take_profit = max(theoretical_tp, realistic_tp)
+            
+            # 计算实际盈亏比
+            actual_reward = entry_price - take_profit
+            actual_rr = actual_reward / risk if risk > 0 else 0
+        
+        return {
+            'take_profit': take_profit,
+            'actual_risk_reward': actual_rr,
+            'is_acceptable': actual_rr >= min_risk_reward * 0.8  # 允许80%的阈值
+        }
+        
+    except Exception as e:
+        logger.log_error(f"realistic_take_profit_{get_base_currency(symbol)}", str(e))
+        # 备用止盈
+        if side == 'long':
+            return {
+                'take_profit': entry_price * 1.02,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+        else:
+            return {
+                'take_profit': entry_price * 0.98,
+                'actual_risk_reward': 1.0,
+                'is_acceptable': True
+            }
+
+
+
+def calculate_aggressive_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
+                                   price_data: dict, min_risk_reward: float, trend_strength: str) -> dict:
+    """基于趋势强度的积极止盈计算"""
+    try:
+        levels = price_data['levels_analysis']
+        current_price = price_data['price']
+        
+        # 根据趋势强度调整盈亏比目标
+        trend_multiplier = {
+            'STRONG_UPTREND': 1.5,
+            'UPTREND': 1.2,
+            'CONSOLIDATION': 1.0,
+            'DOWNTREND': 1.2,
+            'STRONG_DOWNTREND': 1.5
+        }.get(trend_strength, 1.0)
+        
+        adjusted_min_rr = min_risk_reward * trend_multiplier
+        
+        if side == 'long':
+            risk = abs(entry_price - stop_loss)
+            
+            # 方法1: 理论止盈（基于调整后的盈亏比）
+            theoretical_tp = entry_price + (risk * adjusted_min_rr)
+            
+            # 方法2: 基于主要阻力位
+            primary_resistance = levels.get('primary_resistance', current_price * 1.05)
+            
+            # 方法3: 在强势趋势中，看更远的阻力位
+            if trend_strength in ['STRONG_UPTREND', 'UPTREND']:
+                # 查看次要阻力位（如果有）
+                resistance_levels = levels.get('resistance_levels', [])
+                if len(resistance_levels) > 1:
+                    # 取第二远的阻力位
+                    secondary_resistance = sorted(resistance_levels)[-2] if len(resistance_levels) >= 2 else primary_resistance * 1.05
+                else:
+                    secondary_resistance = primary_resistance * 1.08
+                
+                # 在强势趋势中，选择更远的止盈目标
+                realistic_tp = max(primary_resistance, secondary_resistance)
+            else:
+                realistic_tp = primary_resistance
+            
+            # 选择理论止盈和现实阻力位中较远的一个
+            take_profit = max(theoretical_tp, realistic_tp)
+            
+            # 但不要超过合理的最大止盈（入场价的15%）
+            max_reasonable_tp = entry_price * 1.15
+            take_profit = min(take_profit, max_reasonable_tp)
+            
+            actual_reward = take_profit - entry_price
+            actual_rr = actual_reward / risk if risk > 0 else 0
+            
+        else:  # short
+            risk = abs(stop_loss - entry_price)
+            
+            # 方法1: 理论止盈
+            theoretical_tp = entry_price - (risk * adjusted_min_rr)
+            
+            # 方法2: 基于主要支撑位
+            primary_support = levels.get('primary_support', current_price * 0.95)
+            
+            # 方法3: 在强势下跌趋势中，看更远的支撑位
+            if trend_strength in ['STRONG_DOWNTREND', 'DOWNTREND']:
+                support_levels = levels.get('support_levels', [])
+                if len(support_levels) > 1:
+                    # 取第二远的支撑位
+                    secondary_support = sorted(support_levels)[1] if len(support_levels) >= 2 else primary_support * 0.95
+                else:
+                    secondary_support = primary_support * 0.92
+                
+                # 在强势下跌趋势中，选择更远的止盈目标
+                realistic_tp = min(primary_support, secondary_support)
+            else:
+                realistic_tp = primary_support
+            
+            # 选择理论止盈和现实支撑位中较近的一个（对于空头，数值越小越好）
+            take_profit = min(theoretical_tp, realistic_tp)
+            
+            # 但不低于合理的最小止盈（入场价的85%）
+            min_reasonable_tp = entry_price * 0.85
+            take_profit = max(take_profit, min_reasonable_tp)
+            
+            actual_reward = entry_price - take_profit
+            actual_rr = actual_reward / risk if risk > 0 else 0
+        
+        return {
+            'take_profit': take_profit,
+            'actual_risk_reward': actual_rr,
+            'is_acceptable': actual_rr >= min_risk_reward,  # 必须满足最小盈亏比
+            'trend_adjusted_rr': adjusted_min_rr,
+            'trend_strength': trend_strength
+        }
+        
+    except Exception as e:
+        logger.log_error(f"aggressive_take_profit_{get_base_currency(symbol)}", str(e))
+        # 备用计算
+        return calculate_realistic_take_profit(symbol, side, entry_price, stop_loss, price_data, min_risk_reward)
 
 
 def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
@@ -3221,48 +3476,49 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开仓")
             return
     
-    # 🆕 现在使用正确的方向计算止损止盈
-    stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
-    
     # 🆕 修复：预先定义变量
     tp_result = None
     actual_rr = 0
     dynamic_min_rr = 1.2
-    
+    stop_loss_price = None  # 初始化为None
+    take_profit_price = None  # 初始化为None
+
     if is_scaling:
         try:
-            # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
-            position_history = get_position_history(symbol)
+            # 🆕 修复：使用过滤后的当前持仓历史
+            position_history = get_current_position_history(symbol)
+            
+            # 🆕 修复：传入当前持仓以确保方向正确
             overall_levels = calculate_overall_stop_loss_take_profit(
-                symbol, position_history, current_price, price_data
+                symbol, position_history, current_position, current_price, price_data
             )
             
             stop_loss_price = overall_levels['stop_loss']
             take_profit_price = overall_levels['take_profit']
             
-            logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张")
+            logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张, 方向:{current_position['side']}")
             
-            # 🆕 修复：在加仓情况下计算 actual_rr
-            if position_side == 'long':
+            # 🆕 修复：使用当前持仓方向计算盈亏比
+            if current_position['side'] == 'long':
                 risk = current_price - stop_loss_price
                 reward = take_profit_price - current_price
             else:
                 risk = stop_loss_price - current_price
                 reward = current_price - take_profit_price
+                
             actual_rr = reward / risk if risk > 0 else 0
             
-            # 🆕 修复：创建模拟的 tp_result
             tp_result = {
-                'is_acceptable': True,  # 加仓时默认接受
+                'is_acceptable': True,
                 'actual_risk_reward': actual_rr
             }
-            
+        
         except Exception as e:
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓止损计算失败: {str(e)}")
             is_scaling = False
     
     if not is_scaling:
-        # 首次开仓或非加仓：使用原有逻辑
+        # 🆕 非加仓情况：在这里计算止损止盈
         stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
         
         # 动态盈亏比
