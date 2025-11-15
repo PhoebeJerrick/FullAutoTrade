@@ -824,28 +824,28 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         is_scaling = current_position and current_position['size'] > 0
         
         if is_scaling:
-            # 🆕 加仓逻辑 - 检查是否允许加仓
-            if not can_scale_position(symbol, signal_data, current_position):
-                logger.log_info(f"⏸️ {get_base_currency(symbol)}: 不允许加仓，返回0仓位")
-                return 0  # 返回0表示不允许加仓
-            
-            # 🆕 修复基础仓位设置逻辑
+            # 1. 先获取状态并设置
             scaling_status = get_scaling_status(symbol)
             if scaling_status['base_position_size'] == 0:
-                # 🆕 重新计算基础仓位，确保合理
+                # (这段代码现在会被首先执行)
+                logger.log_info(f"🔧 {get_base_currency(symbol)}: 首次加仓，正在设置基础仓位...")
+                balance = exchange.fetch_balance()
+                usdt_balance = balance['USDT']['free']
                 base_position_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
-                # 转换为合约张数作为基础仓位
                 nominal_value = base_position_usdt * config.leverage
                 base_position_contracts = nominal_value / (price_data['price'] * config.contract_size)
                 base_position_contracts = round(base_position_contracts, 6)
-                
-                # 确保基础仓位合理
                 min_contracts = getattr(config, 'min_amount', 0.01)
                 if base_position_contracts < min_contracts:
                     base_position_contracts = min_contracts
                 
                 scaling_status['base_position_size'] = base_position_contracts
                 logger.log_info(f"🔧 {get_base_currency(symbol)}: 设置基础仓位为 {base_position_contracts:.6f} 张")
+            
+            # 2. 后检查 (此时 base_position_size > 0，检查可以通过)
+            if not can_scale_position(symbol, signal_data, current_position):
+                logger.log_info(f"⏸️ {get_base_currency(symbol)}: 不允许加仓（例如：间隔太短或次数已满），返回0仓位")
+                return 0  
             
             scaling_position = calculate_scaling_position(symbol, scaling_status['base_position_size'], signal_data)
             
