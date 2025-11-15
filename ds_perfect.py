@@ -1990,11 +1990,11 @@ def validate_price_relationship(entry_price: float, stop_loss_price: float, take
                 return False
         
         # 检查价格是否过于接近
-        if abs(entry_price - stop_loss_price) / entry_price < 0.005:  # 小于0.5%
+        if abs(entry_price - stop_loss_price) / entry_price < 0.001:  # 小于0.5%
             logger.log_warning("⚠️ 止损价格过于接近入场价格")
             return False
             
-        if abs(take_profit_price - entry_price) / entry_price < 0.005:  # 小于0.5%
+        if abs(take_profit_price - entry_price) / entry_price < 0.0015:  # 小于0.5%
             logger.log_warning("⚠️ 止盈价格过于接近入场价格")
             return False
             
