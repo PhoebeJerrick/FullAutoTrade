@@ -206,7 +206,7 @@ class TradingConfig:
         """获取版本信息"""
         base_version = VERSION_CONFIG['version']
         
-        if VERSION_CONFIG['auto_increment'] and VERSION_CONFIG['git_commit_count_as_build']:
+        if VERSION_CONFIG.get('auto_increment') and VERSION_CONFIG.get('git_commit_count_as_build'):
             commit_count = self._get_git_commit_count()
             short_hash = self._get_git_short_hash()
             branch = self._get_git_branch()
