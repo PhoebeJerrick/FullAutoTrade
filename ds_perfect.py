@@ -4,8 +4,10 @@ import base64
 import hmac
 import hashlib
 import sys
+import math
+import uuid
 from functools import wraps
-from typing import Optional, Dict, List, Any, Union
+from typing import Dict, Any, Optional, List, Tuple, Any, Union
 import schedule
 from openai import OpenAI
 import ccxt
@@ -33,6 +35,11 @@ CURRENT_SYMBOL: Optional[str] = None
 price_history = {}
 signal_history = {}
 position = None
+
+# 全局变量 - 记录每个品种的加仓状态
+SCALING_HISTORY: Dict[str, Dict] = {}
+# 添加全局变量来存储持仓历史
+POSITION_HISTORY: Dict[str, List[Dict]] = {}
 
 # Use relative path
 env_path = '../ExApiConfig/ExApiConfig.env'  # .env file in config folder of parent directory
@@ -174,28 +181,187 @@ def get_current_price(symbol: str): # 新增 symbol 参数
         logger.log_error("current_price", str(e))
         return None
 
+def get_scaling_status(symbol: str) -> Dict:
+    """获取品种的加仓状态 - 修复版本"""
+    if symbol not in SCALING_HISTORY:
+        SCALING_HISTORY[symbol] = {
+            'scaling_count': 0,
+            'last_scaling_time': None,
+            'base_position_size': 0
+        }
+    
+    # 🆕 添加安全检查：确保加仓次数不会超过限制
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    
+    # 如果加仓次数异常，自动重置
+    if SCALING_HISTORY[symbol]['scaling_count'] > max_scaling_times:
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 加仓次数异常({SCALING_HISTORY[symbol]['scaling_count']})，自动重置")
+        SCALING_HISTORY[symbol]['scaling_count'] = max_scaling_times
+    
+    return SCALING_HISTORY[symbol]
+
+def can_scale_position(symbol: str, signal_data: dict, current_position: dict) -> bool:
+    """判断是否允许加仓 - 严格版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    
+    if not scaling_config.get('enable_scaling_in', True):
+        return False
+    
+    # 安全检查：确保有持仓
+    if not current_position or current_position['size'] <= 0:
+        return False
+    
+    # 检查持仓方向与信号方向是否一致
+    position_side = current_position['side']
+    signal_side = 'long' if signal_data['signal'] == 'BUY' else 'short'
+    if position_side != signal_side:
+        return False
+    
+    scaling_status = get_scaling_status(symbol)
+    
+    # 🆕 严格检查加仓次数限制
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    if scaling_status['scaling_count'] >= max_scaling_times:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 已达最大加仓次数{max_scaling_times}次，禁止加仓")
+        return False
+    
+    # 检查时间间隔
+    min_interval = scaling_config.get('min_interval_minutes', 30)
+    if scaling_status['last_scaling_time']:
+        time_diff = (datetime.now() - scaling_status['last_scaling_time']).total_seconds() / 60
+        if time_diff < min_interval:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓间隔不足{min_interval}分钟")
+            return False
+    
+    # 🆕 严格检查基础仓位大小
+    if scaling_status['base_position_size'] <= 0:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 基础仓位大小无效，不允许加仓")
+        return False
+    
+    # 🆕 额外检查：确保当前仓位足够大
+    min_position_threshold = getattr(config, 'min_amount', 0.01) * 5  # 至少5倍最小交易量
+    if current_position['size'] < min_position_threshold:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 当前仓位过小({current_position['size']:.4f}张)，不允许加仓")
+        return False
+    
+    return True
+
+
+def monitor_scaling_status(symbol: str):
+    """监控加仓状态，用于调试和防护"""
+    scaling_status = get_scaling_status(symbol)
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    
+    # 🆕 如果加仓次数异常，自动重置
+    if scaling_status['scaling_count'] > max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数异常({scaling_status['scaling_count']})，自动重置")
+        reset_scaling_status(symbol)
+        scaling_status = get_scaling_status(symbol)  # 重新获取
+    
+    logger.log_info(f"🔍 {get_base_currency(symbol)}加仓状态监控: "
+                   f"当前次数{scaling_status['scaling_count']}/{max_scaling_times}, "
+                   f"基础仓位:{scaling_status['base_position_size']:.6f}, "
+                   f"最后加仓:{scaling_status['last_scaling_time']}")
+
+def calculate_scaling_position(symbol: str, base_position: float, signal_data: dict) -> float:
+    """计算加仓仓位大小 - 严格版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    scaling_config = config.position_management.get('scaling_in', {})
+    
+    scaling_status = get_scaling_status(symbol)
+    
+    # 🆕 在计算前再次严格检查
+    max_scaling_times = scaling_config.get('max_scaling_times', 3)
+    if scaling_status['scaling_count'] >= max_scaling_times:
+        logger.log_error(f"❌ {get_base_currency(symbol)}: 加仓次数已满，但仍在尝试加仓，强制阻止")
+        return 0  # 返回0表示不允许加仓
+    
+    scaling_multiplier = scaling_config.get('scaling_multiplier', 0.5)
+    scaling_position = base_position * scaling_multiplier
+    
+    # 确保不小于最小交易量
+    min_contracts = getattr(config, 'min_amount', 0.01)
+    
+    # 🆕 检查加仓仓位是否过小
+    if scaling_position < min_contracts:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算出的加仓仓位({scaling_position:.6f})过小，使用最小交易量")
+        scaling_position = min_contracts
+    
+    # 🆕 增加计数（只有在仓位有效时）
+    scaling_status['scaling_count'] += 1
+    scaling_status['last_scaling_time'] = datetime.now()
+    
+    logger.log_info(f"📈 {get_base_currency(symbol)}: 第{scaling_status['scaling_count']}次加仓，仓位:{scaling_position:.6f}张")
+    
+    return scaling_position
+
+def reset_scaling_status(symbol: str):
+    """重置加仓状态（平仓时调用）"""
+    if symbol in SCALING_HISTORY:
+        SCALING_HISTORY[symbol] = {
+            'scaling_count': 0,
+            'last_scaling_time': None,
+            'base_position_size': 0
+        }
+
+def check_sufficient_margin(symbol: str, position_size: float, current_price: float) -> bool:
+    """检查保证金是否充足"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    try:
+        # 计算所需保证金
+        required_margin = (position_size * current_price * config.contract_size) / config.leverage
+        
+        # 获取账户余额
+        balance = exchange.fetch_balance()
+        usdt_balance = balance['USDT']['free']
+        
+        # 安全缓冲：要求保证金不超过余额的70%
+        if required_margin > usdt_balance * 0.7:
+            logger.log_error("保证金不足", f"❌ {get_base_currency(symbol)}:需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+            return False
+            
+        logger.log_info(f"✅ {get_base_currency(symbol)}: 保证金充足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+        return True
+        
+    except Exception as e:
+        logger.log_error(f"margin_check_{get_base_currency(symbol)}", f"保证金检查失败: {str(e)}")
+        return False
+
 def calculate_dynamic_base_amount(symbol: str, usdt_balance: float) -> float:
-    """基于账户规模计算动态基础金额"""
+    """基于账户规模计算动态基础金额 - 修复版本"""
     config = SYMBOL_CONFIGS[symbol]
     posMngmt = config.position_management
     
-    # 方法1：固定比例
-    base_ratio = 0.02  # 2% of total balance
-    dynamic_base = usdt_balance * base_ratio
-    
-    # 方法2：分级比例（资金越大，单次投资比例越小）
+    # 分级比例
     if usdt_balance > 10000:
         base_ratio = 0.015
     elif usdt_balance > 5000:
         base_ratio = 0.02
+    elif usdt_balance > 1000:
+        base_ratio = 0.025
     else:
-        base_ratio = 0.03
-        
+        base_ratio = 0.03  # 小资金使用较高比例但确保不超过余额
+    
     dynamic_base = usdt_balance * base_ratio
     
-    # 设置上下限（保持不变）
-    min_base = 10  # 最小10U (<<<<< 修改这里！将 50 修改为 10)
-    max_base = 500 # 最大500U
+    # 🆕 修复：确保不超过账户余额的80%
+    dynamic_base = min(dynamic_base, usdt_balance * 0.8)
+    
+    # 🆕 修复：调整最小基础金额，基于账户规模
+    if usdt_balance < 100:
+        min_base = 5  # 小账户最小5U
+    elif usdt_balance < 500:
+        min_base = 10
+    else:
+        min_base = 20
+    
+    max_base = 500
     
     return max(min_base, min(dynamic_base, max_base))
 
@@ -214,8 +380,359 @@ def calculate_volatility_adjustment(symbol: str, df: pd.DataFrame) -> float:
     else:  # 低波动
         return 1.0
 
+
+# 添加全局变量来存储持仓历史
+POSITION_HISTORY: Dict[str, List[Dict]] = {}
+
+def get_position_history(symbol: str) -> list:
+    """获取品种的持仓历史记录"""
+    try:
+        if symbol not in POSITION_HISTORY:
+            POSITION_HISTORY[symbol] = []
+        
+        # 从持仓历史中筛选出有效的持仓记录
+        current_history = POSITION_HISTORY[symbol]
+        
+        # 只返回最近50条记录，避免内存占用过大
+        max_history = 50
+        if len(current_history) > max_history:
+            current_history = current_history[-max_history:]
+            POSITION_HISTORY[symbol] = current_history
+            
+        return current_history
+        
+    except Exception as e:
+        logger.log_error(f"get_position_history_{get_base_currency(symbol)}", f"获取持仓历史失败: {str(e)}")
+        return []
+
+def add_to_position_history(symbol: str, position_data: dict):
+    """添加持仓历史记录"""
+    try:
+        if symbol not in POSITION_HISTORY:
+            POSITION_HISTORY[symbol] = []
+        
+        # 添加时间戳
+        position_record = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': symbol,
+            'side': position_data.get('side'),
+            'size': position_data.get('size'),
+            'entry_price': position_data.get('entry_price'),
+            'unrealized_pnl': position_data.get('unrealized_pnl', 0),
+            'leverage': position_data.get('leverage'),
+            'margin_mode': position_data.get('margin_mode')
+        }
+        
+        # 如果是平仓操作，添加平仓信息
+        if position_data.get('action') == 'close':
+            position_record.update({
+                'action': 'close',
+                'close_price': position_data.get('close_price'),
+                'close_reason': position_data.get('close_reason', 'manual'),
+                'realized_pnl': position_data.get('realized_pnl', 0)
+            })
+        else:
+            position_record['action'] = position_data.get('action', 'open')
+        
+        POSITION_HISTORY[symbol].append(position_record)
+        
+        logger.log_info(f"📝 {get_base_currency(symbol)}: 添加持仓历史 - {position_record['action']} {position_record['side']} {position_record['size']}张")
+        
+    except Exception as e:
+        logger.log_error(f"add_to_position_history_{get_base_currency(symbol)}", f"添加持仓历史失败: {str(e)}")
+
+def cleanup_resources():
+    """清理资源"""
+    try:
+        logger.log_info("🧹 清理资源...")
+        
+        # 1. 保存持仓历史到文件
+        save_position_history()
+        
+        # 2. 关闭交易所连接
+        global exchange
+        if exchange:
+            try:
+                # CCXT 交易所对象通常不需要显式关闭，但我们可以标记为 None
+                exchange = None
+                logger.log_info("✅ 交易所连接已清理")
+            except Exception as e:
+                logger.log_warning(f"⚠️ 交易所连接清理异常: {str(e)}")
+        
+        # 3. 清理 DeepSeek 客户端
+        global deepseek_client
+        if deepseek_client:
+            deepseek_client = None
+            logger.log_info("✅ DeepSeek 客户端已清理")
+        
+        # 4. 清理全局变量
+        global price_history, signal_history, SCALING_HISTORY, POSITION_HISTORY
+        price_history.clear()
+        signal_history.clear()
+        SCALING_HISTORY.clear()
+        POSITION_HISTORY.clear()
+        
+        logger.log_info("✅ 所有资源清理完成")
+        
+    except Exception as e:
+        logger.log_error("cleanup_resources", f"资源清理异常: {str(e)}")
+
+def save_position_history():
+    """保存持仓历史到文件"""
+    try:
+        if not POSITION_HISTORY:
+            return
+            
+        # 创建数据目录
+        data_dir = "trading_data"
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        
+        # 保存每个品种的持仓历史
+        for symbol, history in POSITION_HISTORY.items():
+            if history:
+                filename = f"{data_dir}/{get_base_currency(symbol)}_position_history.json"
+                try:
+                    # 转换 datetime 对象为字符串
+                    serializable_history = []
+                    for record in history:
+                        serializable_record = record.copy()
+                        # 确保所有值都是可序列化的
+                        for key, value in serializable_record.items():
+                            if isinstance(value, (datetime, pd.Timestamp)):
+                                serializable_record[key] = value.strftime('%Y-%m-%d %H:%M:%S')
+                        serializable_history.append(serializable_record)
+                    
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(serializable_history, f, indent=2, ensure_ascii=False)
+                    
+                    logger.log_info(f"💾 {get_base_currency(symbol)}: 持仓历史已保存到 {filename}")
+                    
+                except Exception as e:
+                    logger.log_error(f"save_history_{get_base_currency(symbol)}", f"保存持仓历史失败: {str(e)}")
+                    
+    except Exception as e:
+        logger.log_error("save_position_history", f"保存持仓历史异常: {str(e)}")
+
+def load_position_history():
+    """从文件加载持仓历史"""
+    try:
+        data_dir = "trading_data"
+        if not os.path.exists(data_dir):
+            return
+            
+        for filename in os.listdir(data_dir):
+            if filename.endswith("_position_history.json"):
+                filepath = os.path.join(data_dir, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        history = json.load(f)
+                    
+                    # 提取品种名称
+                    symbol_name = filename.replace("_position_history.json", "")
+                    # 这里需要根据文件名映射回完整的symbol，可能需要调整
+                    # 暂时跳过具体映射
+                    logger.log_info(f"📂 加载持仓历史: {filename} ({len(history)} 条记录)")
+                    
+                except Exception as e:
+                    logger.log_warning(f"⚠️ 加载持仓历史文件失败 {filename}: {str(e)}")
+                    
+    except Exception as e:
+        logger.log_error("load_position_history", f"加载持仓历史异常: {str(e)}")
+
+def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
+    """自适应止损计算 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    
+    try:
+        df = price_data['full_data']
+        atr = calculate_atr(df)
+        
+        # 方法1: 基于ATR的止损
+        atr_stop_distance = atr * 1.5  # 1.5倍ATR
+        
+        # 方法2: 基于支撑阻力位的止损
+        levels = price_data['levels_analysis']
+        
+        if side == 'long':
+            # 🆕 多头：止损在支撑位下方
+            support_level = levels.get('static_support', current_price * 0.98)
+            dynamic_support = levels.get('dynamic_support', current_price * 0.98)
+            
+            # 选择较近的支撑位
+            structure_stop = min(support_level, dynamic_support)
+            
+            # 结合ATR和结构止损，选择较近的
+            atr_stop_price = current_price - atr_stop_distance
+            stop_loss = max(structure_stop, atr_stop_price)
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            min_stop_price = current_price - max_stop_distance
+            stop_loss = max(stop_loss, min_stop_price)
+            
+        else:  # short - 🆕 修复空头止损逻辑
+            # 空头：止损在阻力位上方
+            resistance_level = levels.get('static_resistance', current_price * 1.02)
+            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.02)
+            
+            # 选择较远的阻力位（更严格的止损）
+            structure_stop = max(resistance_level, dynamic_resistance)
+            
+            # 结合ATR和结构止损，选择较远的
+            atr_stop_price = current_price + atr_stop_distance
+            stop_loss = min(structure_stop, atr_stop_price)  # 取较小值，因为要选择较近的阻力位
+            
+            # 确保止损合理（不超过当前价格的5%）
+            max_stop_distance = current_price * 0.05
+            max_stop_price = current_price + max_stop_distance
+            stop_loss = min(stop_loss, max_stop_price)
+        
+        stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
+        direction = "above" if side == 'short' and stop_loss > current_price else "below"
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 自适应止损 - {stop_loss:.2f} ({direction}当前价, 距离: {stop_distance_percent:.2f}%)")
+        
+        # 🆕 新增：方向验证
+        if side == 'long' and stop_loss >= current_price:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止损价格异常({stop_loss:.2f} >= {current_price:.2f})，自动修正")
+            stop_loss = current_price * 0.98
+            
+        elif side == 'short' and stop_loss <= current_price:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止损价格异常({stop_loss:.2f} <= {current_price:.2f})，自动修正")
+            stop_loss = current_price * 1.02
+            
+        return stop_loss
+        
+    except Exception as e:
+        logger.log_error(f"adaptive_stop_loss_{get_base_currency(symbol)}", str(e))
+        # 备用止损
+        if side == 'long':
+            return current_price * 0.98
+        else:
+            return current_price * 1.02
+
+def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0) -> float:
+    """计算智能止盈价格 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        current_price = price_data['price']
+        df = price_data['full_data']
+        
+        if side == 'long':
+            # 多头止盈计算
+            # 方法1: 基于阻力位
+            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.05)
+            
+            # 方法2: 基于ATR
+            atr = calculate_atr(df)
+            atr_take_profit = current_price + (atr * risk_reward_ratio)
+            
+            # 方法3: 基于固定风险回报比
+            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 0.98))
+            rr_take_profit = entry_price + (risk * risk_reward_ratio)
+            
+            # 取最合理的止盈价格
+            take_profit_price = min(resistance_level, atr_take_profit, rr_take_profit)
+            
+            # 确保止盈价格合理
+            min_take_profit = current_price * 1.01  # 至少1%盈利
+            take_profit_price = max(take_profit_price, min_take_profit)
+            
+        else:  # short - 🆕 修复空头止盈逻辑
+            # 空头止盈计算
+            # 方法1: 基于支撑位
+            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.95)
+            
+            # 方法2: 基于ATR
+            atr = calculate_atr(df)
+            atr_take_profit = current_price - (atr * risk_reward_ratio)
+            
+            # 方法3: 基于固定风险回报比
+            risk = abs(price_data.get('stop_loss', entry_price * 1.02) - entry_price)
+            rr_take_profit = entry_price - (risk * risk_reward_ratio)
+            
+            # 取最合理的止盈价格（对于空头，数值越小越好）
+            take_profit_price = max(support_level, atr_take_profit, rr_take_profit)
+            
+            # 确保止盈价格合理
+            max_take_profit = current_price * 0.99  # 至少1%盈利
+            take_profit_price = min(take_profit_price, max_take_profit)
+        
+        take_profit_ratio = abs(take_profit_price - entry_price) / entry_price * 100
+        profit_type = "above" if side == 'long' and take_profit_price > entry_price else "below"
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 智能止盈计算 - 入场{entry_price:.2f}, 止盈{take_profit_price:.2f} ({profit_type}入场价, 盈利{take_profit_ratio:.2f}%)")
+        
+        return take_profit_price
+        
+    except Exception as e:
+        logger.log_error(f"take_profit_calculation_{get_base_currency(symbol)}", f"止盈计算失败: {str(e)}")
+        # 备用止盈计算
+        if side == 'long':
+            return entry_price * 1.03  # 默认3%止盈
+        else:
+            return entry_price * 0.97  # 默认3%止盈
+
+
+def calculate_overall_stop_loss_take_profit(symbol: str, position_history: list, current_price: float, price_data: dict) -> dict:
+    """基于整体仓位计算止损止盈 - 彻底修复版本"""
+    if not position_history:
+        # 如果没有历史记录，使用当前价格作为参考
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', current_price, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'long', current_price, price_data, 2.0)
+        return {
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'weighted_entry': current_price,
+            'total_size': 0
+        }
+    
+    # 计算加权平均入场价格
+    total_size = sum([pos['size'] for pos in position_history])
+    weighted_entry = sum([pos['entry_price'] * pos['size'] for pos in position_history]) / total_size
+    
+    # 基于平均成本计算止损止盈
+    side = position_history[0]['side']
+    
+    # 🆕 修复：确保止损止盈方向正确
+    if side == 'long':
+        # 多头：止损在下方，止盈在上方
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'long', weighted_entry, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'long', weighted_entry, price_data, 1.8)
+        
+        # 🆕 双重验证：确保价格关系正确
+        if stop_loss >= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止损价格异常，自动修正")
+            stop_loss = weighted_entry * 0.98
+            
+        if take_profit <= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多头止盈价格异常，自动修正")
+            take_profit = weighted_entry * 1.03
+            
+    else:  # short
+        # 空头：止损在上方，止盈在下方
+        stop_loss = calculate_adaptive_stop_loss(symbol, 'short', weighted_entry, price_data)
+        take_profit = calculate_intelligent_take_profit(symbol, 'short', weighted_entry, price_data, 1.8)
+        
+        # 🆕 双重验证：确保价格关系正确
+        if stop_loss <= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止损价格异常，自动修正")
+            stop_loss = weighted_entry * 1.02
+            
+        if take_profit >= weighted_entry:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 空头止盈价格异常，自动修正")
+            take_profit = weighted_entry * 0.97
+    
+    logger.log_info(f"🎯 {get_base_currency(symbol)}: 整体仓位管理 - {side}方向, 平均成本{weighted_entry:.2f}, 止损{stop_loss:.2f}, 止盈{take_profit:.2f}")
+    
+    return {
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'weighted_entry': weighted_entry,
+        'total_size': total_size
+    }
+
 def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
-    """增强版仓位计算"""
+    """增强版仓位计算 - 修复基础仓位问题"""
     config = SYMBOL_CONFIGS[symbol]
     posMngmt = config.position_management
     
@@ -227,6 +744,58 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         # 1. 动态基础金额（基于账户规模）
         dynamic_base_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
         
+        # 检查是否是加仓情况
+        is_scaling = current_position and current_position['size'] > 0
+        
+        if is_scaling:
+            # 🆕 加仓逻辑 - 检查是否允许加仓
+            if not can_scale_position(symbol, signal_data, current_position):
+                logger.log_info(f"⏸️ {get_base_currency(symbol)}: 不允许加仓，返回0仓位")
+                return 0  # 返回0表示不允许加仓
+            
+            # 🆕 修复基础仓位设置逻辑
+            scaling_status = get_scaling_status(symbol)
+            if scaling_status['base_position_size'] == 0:
+                # 🆕 重新计算基础仓位，确保合理
+                base_position_usdt = calculate_dynamic_base_amount(symbol, usdt_balance)
+                # 转换为合约张数作为基础仓位
+                nominal_value = base_position_usdt * config.leverage
+                base_position_contracts = nominal_value / (price_data['price'] * config.contract_size)
+                base_position_contracts = round(base_position_contracts, 6)
+                
+                # 确保基础仓位合理
+                min_contracts = getattr(config, 'min_amount', 0.01)
+                if base_position_contracts < min_contracts:
+                    base_position_contracts = min_contracts
+                
+                scaling_status['base_position_size'] = base_position_contracts
+                logger.log_info(f"🔧 {get_base_currency(symbol)}: 设置基础仓位为 {base_position_contracts:.6f} 张")
+            
+            scaling_position = calculate_scaling_position(symbol, scaling_status['base_position_size'], signal_data)
+            
+            # 🆕 如果加仓仓位为0，直接返回
+            if scaling_position <= 0:
+                return 0
+                
+            # 转换为合约张数
+            # 注意：scaling_position 已经是合约张数，不需要再次转换
+            contract_size = scaling_position
+            
+            # 🆕 修复：根据品种调整最终合约数量
+            base_currency = get_base_currency(symbol)
+            
+            # 需要整数张合约的品种
+            integer_only_currencies = ['BCH', 'LTC', 'DASH']
+            if base_currency in integer_only_currencies:
+                # 确保至少1张，向上取整到整数
+                contract_size = max(1, math.ceil(contract_size))
+                logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+
+            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
+            
+            return contract_size
+        
+        # 非加仓情况，继续标准计算
         # 2. 信心倍数
         confidence_multiplier = {
             'HIGH': posMngmt['high_confidence_multiplier'],
@@ -266,9 +835,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             logger.log_info(f"ℹ️ 检测到加仓信号，使用标准逻辑计算仓位。")
 
         # 计算建议投资金额
-        suggested_usdt = (dynamic_base_usdt * confidence_multiplier * 
-                         trend_multiplier * rsi_multiplier * 
-                         volatility_multiplier * leverage_multiplier)
+        suggested_usdt = (dynamic_base_usdt * confidence_multiplier * trend_multiplier * rsi_multiplier * volatility_multiplier * leverage_multiplier)
         
         # 风险上限
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
@@ -282,11 +849,27 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         
         contract_size = round(contract_size, 2)  # 精度处理
         
-        # 确保最小交易量
+        # 在返回 contract_size 之前添加精度检查
         min_contracts = getattr(config, 'min_amount', 0.01)
-        if contract_size < min_contracts:
-            contract_size = min_contracts
+        if min_contracts > 0:
+            # 向下取整到最小交易单位的整数倍
+            contract_size = (contract_size // min_contracts) * min_contracts
+            if contract_size < min_contracts:
+                contract_size = min_contracts
+
+        # 确保最小交易量
+        contract_size = max(contract_size, min_contracts)      
+
+        # 🆕 修复：根据品种调整最终合约数量
+        base_currency = get_base_currency(symbol)
         
+        # 需要整数张合约的品种
+        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        if base_currency in integer_only_currencies:
+            # 确保至少1张，向上取整到整数
+            contract_size = max(1, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+
         # 详细日志 (更新日志术语)
         calculation_details = f"""
         🎯 增强版仓位计算详情:
@@ -302,6 +885,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         """
         logger.log_info(calculation_details)
         
+
         return contract_size
         
     except Exception as e:
@@ -567,181 +1151,6 @@ def identify_trend_strength(df):
         logger.log_error("trend_strength_analysis", str(e))
         return {'trend_strength': 'UNKNOWN', 'trend_score': 0}
 
-def calculate_realistic_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
-                                  price_data: dict, min_risk_reward: float) -> dict:
-    """计算现实的止盈位置 - 修复版本"""
-    try:
-        levels = price_data['levels_analysis']
-        current_price = price_data['price']
-        
-        # 🆕 首先验证止损价格的合理性
-        if side == 'long':
-            if stop_loss >= entry_price:
-                logger.log_error(f"❌ {get_base_currency(symbol)}: 多头止损价格{stop_loss}高于入场价{entry_price}")
-                # 自动修正止损
-                stop_loss = entry_price * 0.98
-                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
-        else:  # short
-            if stop_loss <= entry_price:
-                logger.log_error(f"❌ {get_base_currency(symbol)}: 空头止损价格{stop_loss}低于入场价{entry_price}")
-                # 自动修正止损
-                stop_loss = entry_price * 1.02
-                logger.log_warning(f"🔄 自动修正止损为: {stop_loss:.2f}")
-        
-        if side == 'long':
-            # 理论止盈（基于最小盈亏比）
-            risk = abs(entry_price - stop_loss)  # 使用绝对值
-            theoretical_tp = entry_price + (risk * min_risk_reward)
-            
-            # 现实止盈（基于阻力位）
-            resistance_level = levels.get('static_resistance', current_price * 1.03)
-            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.03)
-            realistic_tp = min(resistance_level, dynamic_resistance)
-            
-            # 选择较近的止盈
-            take_profit = min(theoretical_tp, realistic_tp)
-            
-            # 计算实际盈亏比
-            actual_reward = take_profit - entry_price
-            actual_rr = actual_reward / risk if risk > 0 else 0
-            
-        else:  # short
-            # 理论止盈（基于最小盈亏比）
-            risk = abs(stop_loss - entry_price)  # 使用绝对值
-            theoretical_tp = entry_price - (risk * min_risk_reward)
-            
-            # 现实止盈（基于支撑位）
-            support_level = levels.get('static_support', current_price * 0.97)
-            dynamic_support = levels.get('dynamic_support', current_price * 0.97)
-            realistic_tp = max(support_level, dynamic_support)
-            
-            # 选择较近的止盈
-            take_profit = max(theoretical_tp, realistic_tp)
-            
-            # 计算实际盈亏比
-            actual_reward = entry_price - take_profit
-            actual_rr = actual_reward / risk if risk > 0 else 0
-        
-        return {
-            'take_profit': take_profit,
-            'actual_risk_reward': actual_rr,
-            'is_acceptable': actual_rr >= min_risk_reward * 0.8  # 允许80%的阈值
-        }
-        
-    except Exception as e:
-        logger.log_error(f"realistic_take_profit_{get_base_currency(symbol)}", str(e))
-        # 备用止盈
-        if side == 'long':
-            return {
-                'take_profit': entry_price * 1.02,
-                'actual_risk_reward': 1.0,
-                'is_acceptable': True
-            }
-        else:
-            return {
-                'take_profit': entry_price * 0.98,
-                'actual_risk_reward': 1.0,
-                'is_acceptable': True
-            }
-
-
-def calculate_aggressive_take_profit(symbol: str, side: str, entry_price: float, stop_loss: float, 
-                                   price_data: dict, min_risk_reward: float, trend_strength: str) -> dict:
-    """基于趋势强度的积极止盈计算"""
-    try:
-        levels = price_data['levels_analysis']
-        current_price = price_data['price']
-        
-        # 根据趋势强度调整盈亏比目标
-        trend_multiplier = {
-            'STRONG_UPTREND': 1.5,
-            'UPTREND': 1.2,
-            'CONSOLIDATION': 1.0,
-            'DOWNTREND': 1.2,
-            'STRONG_DOWNTREND': 1.5
-        }.get(trend_strength, 1.0)
-        
-        adjusted_min_rr = min_risk_reward * trend_multiplier
-        
-        if side == 'long':
-            risk = abs(entry_price - stop_loss)
-            
-            # 方法1: 理论止盈（基于调整后的盈亏比）
-            theoretical_tp = entry_price + (risk * adjusted_min_rr)
-            
-            # 方法2: 基于主要阻力位
-            primary_resistance = levels.get('primary_resistance', current_price * 1.05)
-            
-            # 方法3: 在强势趋势中，看更远的阻力位
-            if trend_strength in ['STRONG_UPTREND', 'UPTREND']:
-                # 查看次要阻力位（如果有）
-                resistance_levels = levels.get('resistance_levels', [])
-                if len(resistance_levels) > 1:
-                    # 取第二远的阻力位
-                    secondary_resistance = sorted(resistance_levels)[-2] if len(resistance_levels) >= 2 else primary_resistance * 1.05
-                else:
-                    secondary_resistance = primary_resistance * 1.08
-                
-                # 在强势趋势中，选择更远的止盈目标
-                realistic_tp = max(primary_resistance, secondary_resistance)
-            else:
-                realistic_tp = primary_resistance
-            
-            # 选择理论止盈和现实阻力位中较远的一个
-            take_profit = max(theoretical_tp, realistic_tp)
-            
-            # 但不要超过合理的最大止盈（入场价的15%）
-            max_reasonable_tp = entry_price * 1.15
-            take_profit = min(take_profit, max_reasonable_tp)
-            
-            actual_reward = take_profit - entry_price
-            actual_rr = actual_reward / risk if risk > 0 else 0
-            
-        else:  # short
-            risk = abs(stop_loss - entry_price)
-            
-            # 方法1: 理论止盈
-            theoretical_tp = entry_price - (risk * adjusted_min_rr)
-            
-            # 方法2: 基于主要支撑位
-            primary_support = levels.get('primary_support', current_price * 0.95)
-            
-            # 方法3: 在强势下跌趋势中，看更远的支撑位
-            if trend_strength in ['STRONG_DOWNTREND', 'DOWNTREND']:
-                support_levels = levels.get('support_levels', [])
-                if len(support_levels) > 1:
-                    # 取第二远的支撑位
-                    secondary_support = sorted(support_levels)[1] if len(support_levels) >= 2 else primary_support * 0.95
-                else:
-                    secondary_support = primary_support * 0.92
-                
-                # 在强势下跌趋势中，选择更远的止盈目标
-                realistic_tp = min(primary_support, secondary_support)
-            else:
-                realistic_tp = primary_support
-            
-            # 选择理论止盈和现实支撑位中较近的一个（对于空头，数值越小越好）
-            take_profit = min(theoretical_tp, realistic_tp)
-            
-            # 但不低于合理的最小止盈（入场价的85%）
-            min_reasonable_tp = entry_price * 0.85
-            take_profit = max(take_profit, min_reasonable_tp)
-            
-            actual_reward = entry_price - take_profit
-            actual_rr = actual_reward / risk if risk > 0 else 0
-        
-        return {
-            'take_profit': take_profit,
-            'actual_risk_reward': actual_rr,
-            'is_acceptable': actual_rr >= min_risk_reward,  # 必须满足最小盈亏比
-            'trend_adjusted_rr': adjusted_min_rr,
-            'trend_strength': trend_strength
-        }
-        
-    except Exception as e:
-        logger.log_error(f"aggressive_take_profit_{get_base_currency(symbol)}", str(e))
-        # 备用计算
-        return calculate_realistic_take_profit(symbol, side, entry_price, stop_loss, price_data, min_risk_reward)
 
 def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: dict, current_position: Optional[dict]) -> float:
     """Calculate intelligent position size - with additional safety checks"""
@@ -808,11 +1217,27 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         # Precision handling: OKX BTC contract minimum trading unit is 0.01 contracts
         contract_size = round(contract_size, 2)  # Keep 2 decimal places
 
-        # Ensure minimum trading volume
+        # 在返回 contract_size 之前添加精度检查
         min_contracts = getattr(config, 'min_amount', 0.01)
-        if contract_size < min_contracts:
-            contract_size = min_contracts
+        if min_contracts > 0:
+            # 向下取整到最小交易单位的整数倍
+            contract_size = (contract_size // min_contracts) * min_contracts
+            if contract_size < min_contracts:
+                contract_size = min_contracts
 
+        # 确保最小交易量
+        contract_size = max(contract_size, min_contracts)
+
+        # 🆕 修复：根据品种调整最终合约数量
+        base_currency = get_base_currency(symbol)
+        
+        # 需要整数张合约的品种
+        integer_only_currencies = ['BCH', 'LTC', 'DASH']
+        if base_currency in integer_only_currencies:
+            # 确保至少1张，向上取整到整数
+            contract_size = max(1, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+            
         calculation_summary = f"""
             📊 仓位计算详情:
             基础保证金: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
@@ -1061,89 +1486,163 @@ def log_api_response(response, function_name=""):
     except Exception as e:
         logger.log_error("log_api_response", f"记录API响应失败: {str(e)}")
 
-def create_algo_order(symbol: str, side: str, sz: Union[float, str], trigger_price: Union[float, str], 
-                     order_type: str = 'conditional', stop_loss_price: float = None, take_profit_price: float = None) -> bool:
-    """创建策略委托订单 - 根据OKX API重新实现"""
+def get_current_position(symbol: str) -> Optional[dict]:
+    """Get current position status - 增强版持仓检测"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        inst_id = get_correct_inst_id(symbol)
+        positions = exchange.fetch_positions([config.symbol])
+        if not positions:
+            return None
         
-        # 确保参数类型正确
-        if isinstance(trigger_price, (int, float)):
-            trigger_price = str(round(trigger_price, 1))
-        if isinstance(sz, (int, float)):
-            sz = str(round(sz, 2))
-        if stop_loss_price and isinstance(stop_loss_price, (int, float)):
-            stop_loss_price = str(round(stop_loss_price, 1))
-        if take_profit_price and isinstance(take_profit_price, (int, float)):
-            take_profit_price = str(round(take_profit_price, 1))
-        
-        margin_mode = getattr(config, 'margin_mode', 'isolated')
-        
-        # 🆕 根据OKX API构建策略委托参数
-        params = {
-            'instId': inst_id,
-            'tdMode': margin_mode,
-            'algoOrdType': order_type,
-        }
-        
-        # 根据订单类型设置不同参数
-        if order_type == 'conditional':
-            # 条件单参数
-            params.update({
-                'side': side.upper(),
-                'sz': sz,
-                'tpTriggerPx': take_profit_price if take_profit_price else '',
-                'slTriggerPx': stop_loss_price if stop_loss_price else '',
-                'tpOrdPx': '-1',  # 触发后市价单
-                'slOrdPx': '-1',  # 触发后市价单
-            })
-            
-            # 如果没有明确指定触发价格，使用止损或止盈价格
-            if not trigger_price and stop_loss_price:
-                params['slTriggerPx'] = stop_loss_price
-            elif not trigger_price and take_profit_price:
-                params['tpTriggerPx'] = take_profit_price
-            else:
-                # 根据方向设置触发价格
-                if side.upper() == 'SELL' and take_profit_price:
-                    params['tpTriggerPx'] = trigger_price
-                elif side.upper() == 'BUY' and stop_loss_price:
-                    params['slTriggerPx'] = trigger_price
+        for pos in positions:
+            if pos['symbol'] == config.symbol:
+                contracts = float(pos['contracts']) if pos['contracts'] else 0
+                side = pos.get('side')
                 
-        elif order_type == 'oco':
-            # 双向止盈止损单 - 同时设置止损和止盈
-            params.update({
-                'side': side.upper(),
-                'sz': sz,
-                'tpTriggerPx': take_profit_price if take_profit_price else '',
-                'slTriggerPx': stop_loss_price if stop_loss_price else '',
-                'tpOrdPx': '-1',
-                'slOrdPx': '-1',
-            })
-        
-        # 记录订单参数
-        log_order_params(f"策略委托{order_type}", params, "create_algo_order")
-        
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 创建策略委托 - 类型:{order_type}, 方向:{side}, 数量:{sz}")
-        
-        # 调用OKX策略委托下单接口
-        response = exchange.privatePostTradeOrderAlgo(params)
-        
-        # 记录API响应
-        log_api_response(response, "create_algo_order")
-        
-        if response['code'] == '0':
-            algo_id = response['data'][0]['algoId']
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 策略委托创建成功: {algo_id}")
-            return True
-        else:
-            logger.log_error(f"algo_order_failed_{get_base_currency(symbol)}", f"策略委托创建失败: {response}")
-            return False
-            
+                # 🆕 增强验证：确保持仓真实存在
+                if (contracts > 0 and 
+                    side in ['long', 'short'] and 
+                    pos.get('marginMode') in ['isolated', 'cross'] and
+                    pos.get('entryPrice') and 
+                    float(pos['entryPrice']) > 0):
+                    
+                    # 🆕 额外验证：通过余额检查
+                    try:
+                        balance = exchange.fetch_balance()
+                        total_balance = balance['total'].get('USDT', 0)
+                        if total_balance <= 0:
+                            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常，跳过持仓")
+                            continue
+                    except:
+                        pass
+                    
+                    return {
+                        'side': side,
+                        'size': contracts,
+                        'entry_price': float(pos['entryPrice']),
+                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
+                        'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
+                        'symbol': pos['symbol'],
+                        'margin_mode': pos.get('marginMode', ''),
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+
+        return None
+
     except Exception as e:
-        logger.log_error(f"create_algo_order_{get_base_currency(symbol)}", f"创建策略委托异常: {str(e)}")
-        return False
+        logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
+        return None
+
+def generate_cl_ord_id(side: str) -> str:
+    """
+    生成符合OKX规范的clOrdId：
+    - 仅包含字母和数字
+    - 长度 1-32位
+    - 前缀区分买卖方向，确保唯一性
+    """
+    prefix = "SELL" if side == "sell" else "BUY"
+    unique_str = str(uuid.uuid4()).replace('-', '')
+    cl_ord_id = f"{prefix}{unique_str}"[:32]
+    return cl_ord_id
+
+def sl_tp_algo_order_set(symbol: str, side: str, amount: float, stop_loss_price: Optional[float] = None, take_profit_price: Optional[float] = None) -> Dict[str, Any]:
+    """
+    优化版：根据OKX API文档，价格为0表示撤销止盈止损
+    返回单个ID而非列表（因每次调用最多生成一个订单）
+    """
+    # 初始化返回结果
+    result = {'success': False, 'algo_id': None, 'algo_cl_ord_id': None}
+    config = SYMBOL_CONFIGS[symbol]
+    
+    # 根据OKX API文档，价格为0表示撤销
+    has_stop_loss = stop_loss_price is not None and stop_loss_price != 0
+    has_take_profit = take_profit_price is not None and take_profit_price != 0
+    
+    # 如果都是0或None，则无需创建任何订单
+    if not (has_stop_loss or has_take_profit):
+        logger.log_warning("⚠️ 未设置有效的止损或止盈价格，无需创建订单")
+        return result
+
+    try:
+        inst_id = get_correct_inst_id(symbol)
+        opposite_side = 'buy' if side in ('sell', 'short') else 'sell'
+        
+        # 公共参数（三种订单类型的共有字段）
+        base_params = {
+            'instId': inst_id,
+            'tdMode': config.margin_mode,
+            'side': opposite_side,
+            'sz': str(amount),
+        }
+
+        # 1. 同时存在有效的止损止盈：生成OCO订单
+        if has_stop_loss and has_take_profit:
+            oco_params = {
+                **base_params,
+                'ordType': 'oco',
+                'slTriggerPx': str(stop_loss_price),
+                'slOrdPx': '-1',
+                'tpTriggerPx': str(take_profit_price),
+                'tpOrdPx': '-1',
+                'algoClOrdId': generate_cl_ord_id(f"{side}")  # OCO单专用ID
+            }
+            logger.log_info(f"📝 OCO订单参数: {json.dumps(oco_params, indent=2)}")
+            response = exchange.private_post_trade_order_algo(oco_params)
+            log_api_response(response, "OCO订单")
+            
+            if response and response.get('code') == '0':
+                algo_id = response['data'][0]['algoId']
+                result['success'] = True
+                result['algo_id'] = algo_id
+                result['algo_cl_ord_id'] = oco_params['algoClOrdId']
+                logger.log_info(f"✅ OCO订单创建成功 (algoId: {algo_id})")
+
+        # 2. 仅止损有效：生成止损单
+        elif has_stop_loss:
+            sl_params = {
+                **base_params,
+                'ordType': 'conditional',
+                'slTriggerPx': str(stop_loss_price),
+                'slOrdPx': '-1',
+                'algoClOrdId': generate_cl_ord_id(f"{side}")
+            }
+            logger.log_info(f"📝 止损订单参数: {json.dumps(sl_params, indent=2)}")
+            response = exchange.private_post_trade_order_algo(sl_params)
+            log_api_response(response, "止损订单")
+            
+            if response and response.get('code') == '0':
+                algo_id = response['data'][0]['algoId']
+                result['success'] = True
+                result['algo_id'] = algo_id
+                result['algo_cl_ord_id'] = sl_params['algoClOrdId']
+                logger.log_info(f"✅ 止损订单创建成功 (algoId: {algo_id})")
+
+        # 3. 仅止盈有效：生成止盈单
+        elif has_take_profit:
+            tp_params = {
+                **base_params,
+                'ordType': 'conditional',
+                'tpTriggerPx': str(take_profit_price),
+                'tpOrdPx': '-1',
+                'algoClOrdId': generate_cl_ord_id(f"{side}_tp")
+            }
+            logger.log_info(f"📝 止盈订单参数: {json.dumps(tp_params, indent=2)}")
+            response = exchange.private_post_trade_order_algo(tp_params)
+            log_api_response(response, "止盈订单")
+            
+            if response and response.get('code') == '0':
+                algo_id = response['data'][0]['algoId']
+                result['success'] = True
+                result['algo_id'] = algo_id
+                result['algo_cl_ord_id'] = tp_params['algoClOrdId']
+                logger.log_info(f"✅ 止盈订单创建成功 (algoId: {algo_id})")
+
+        return result
+
+    except Exception as e:
+        result['success'] = False
+        logger.log_error("sl_tp_algo_order_set", f"设置止损止盈失败: {str(e)}")
+        return result
 
 def cancel_existing_algo_orders(symbol: str):
     """取消指定品种的现有策略委托订单"""
@@ -1151,7 +1650,8 @@ def cancel_existing_algo_orders(symbol: str):
     try:
         params = {
             'instType': 'SWAP',
-            'algoOrdType': 'conditional'
+            'instId': get_correct_inst_id(symbol),
+            'ordType': 'conditional,oco'
         }
         
         response = exchange.private_get_trade_orders_algo_pending(params)
@@ -1163,12 +1663,11 @@ def cancel_existing_algo_orders(symbol: str):
             for order in response['data']:
                 if order['instId'] == inst_id:
                     # 取消策略委托订单
-                    cancel_params = {
+                    cancel_params = [{
                         'algoId': order['algoId'],
                         'instId': order['instId'],
-                        'algoOrdType': 'conditional'
-                    }
-                    cancel_response = exchange.privatePostTradeCancelAlgoOrder(cancel_params)
+                    }]
+                    cancel_response = exchange.private_post_trade_cancel_algos(cancel_params)
                     if cancel_response['code'] == '0':
                         logger.log_info(f"✅ {get_base_currency(symbol)}: 取消策略委托订单: {order['algoId']}")
                         canceled_count += 1
@@ -1184,106 +1683,6 @@ def cancel_existing_algo_orders(symbol: str):
                     
     except Exception as e:
         logger.log_error(f"cancel_algo_orders_{get_base_currency(symbol)}", str(e))
-
-def calculate_dynamic_risk_reward_threshold(symbol: str, price_data: dict) -> float:
-    """基于市场波动性计算动态盈亏比阈值"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        # 计算ATR波动率
-        df = price_data['full_data']
-        atr = calculate_atr(df)
-        current_price = price_data['price']
-        atr_percentage = (atr / current_price) * 100
-        
-        # 基于波动率设置不同的盈亏比阈值
-        if atr_percentage > 3.0:  # 高波动市场
-            min_rr = 1.5  # 高波动时可以要求更高盈亏比
-        elif atr_percentage > 2.0:  # 中等波动
-            min_rr = 1.2
-        elif atr_percentage > 1.0:  # 低波动
-            min_rr = 1.0
-        else:  # 极低波动
-            min_rr = 0.8  # 窄幅震荡时降低要求
-        
-        # 考虑品种特性
-        symbol_factors = {
-            'BTC/USDT:USDT': 1,
-            'ETH/USDT:USDT': 0.9,
-            'SOL/USDT:USDT': 0.8,
-            'LTC/USDT:USDT': 0.7,
-            'BCH/USDT:USDT': 0.7,
-            'DASH/USDT:USDT': 0.6,
-        }
-        
-        symbol_factor = config.leverage_factor
-        adjusted_min_rr = min_rr * symbol_factor
-        
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 波动率{atr_percentage:.2f}%, 动态盈亏比阈值: {adjusted_min_rr:.2f}")
-        
-        return adjusted_min_rr
-        
-    except Exception as e:
-        logger.log_error("dynamic_rr_threshold", str(e))
-        return 1.0  # 默认阈值
-
-def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
-    """自适应止损计算"""
-    config = SYMBOL_CONFIGS[symbol]
-    
-    try:
-        df = price_data['full_data']
-        atr = calculate_atr(df)
-        
-        # 方法1: 基于ATR的止损
-        atr_stop_distance = atr * 1.5  # 1.5倍ATR
-        
-        # 方法2: 基于支撑阻力位的止损
-        levels = price_data['levels_analysis']
-        
-        if side == 'long':
-            support_level = levels.get('static_support', current_price * 0.98)
-            dynamic_support = levels.get('dynamic_support', current_price * 0.98)
-            
-            # 选择较近的支撑位
-            structure_stop = min(support_level, dynamic_support)
-            
-            # 结合ATR和结构止损，选择较近的
-            atr_stop_price = current_price - atr_stop_distance
-            stop_loss = max(structure_stop, atr_stop_price)
-            
-            # 确保止损合理（不超过当前价格的5%）
-            max_stop_distance = current_price * 0.05
-            min_stop_price = current_price - max_stop_distance
-            stop_loss = max(stop_loss, min_stop_price)
-            
-        else:  # short
-            resistance_level = levels.get('static_resistance', current_price * 1.02)
-            dynamic_resistance = levels.get('dynamic_resistance', current_price * 1.02)
-            
-            # 选择较近的阻力位
-            structure_stop = max(resistance_level, dynamic_resistance)
-            
-            # 结合ATR和结构止损，选择较近的
-            atr_stop_price = current_price + atr_stop_distance
-            stop_loss = min(structure_stop, atr_stop_price)
-            
-            # 确保止损合理（不超过当前价格的5%）
-            max_stop_distance = current_price * 0.05
-            max_stop_price = current_price + max_stop_distance
-            stop_loss = min(stop_loss, max_stop_price)
-        
-        stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 自适应止损 - {stop_loss:.2f} (距离: {stop_distance_percent:.2f}%)")
-        
-        return stop_loss
-        
-    except Exception as e:
-        logger.log_error(f"adaptive_stop_loss_{get_base_currency(symbol)}", str(e))
-        # 备用止损
-        if side == 'long':
-            return current_price * 0.98
-        else:
-            return current_price * 1.02
 
 
 def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> float:
@@ -1316,26 +1715,45 @@ def calculate_risk_reward_ratio(entry_price: float, stop_loss_price: float, take
         return 0
 
 def validate_price_relationship(entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> bool:
-    """验证价格关系的合理性"""
+    """验证价格关系的合理性 - 增强版本"""
     try:
         if side == 'long':
             # 多头：止损价 < 入场价 < 止盈价
             if not (stop_loss_price < entry_price < take_profit_price):
-                logger.log_error("price_validation", f"多头价格关系错误: 止损{stop_loss_price} < 入场{entry_price} < 止盈{take_profit_price}")
+                logger.log_error("price_validation", 
+                               f"多头价格关系错误: 止损{stop_loss_price:.2f} < 入场{entry_price:.2f} < 止盈{take_profit_price:.2f}")
                 return False
         else:  # short
             # 空头：止盈价 < 入场价 < 止损价
             if not (take_profit_price < entry_price < stop_loss_price):
-                logger.log_error("price_validation", f"空头价格关系错误: 止盈{take_profit_price} < 入场{entry_price} < 止损{stop_loss_price}")
+                logger.log_error("price_validation", 
+                               f"空头价格关系错误: 止盈{take_profit_price:.2f} < 入场{entry_price:.2f} < 止损{stop_loss_price:.2f}")
                 return False
         
         # 检查价格是否过于接近
-        if abs(entry_price - stop_loss_price) / entry_price < 0.001:  # 小于0.1%
+        if abs(entry_price - stop_loss_price) / entry_price < 0.005:  # 小于0.5%
             logger.log_warning("⚠️ 止损价格过于接近入场价格")
             return False
             
-        if abs(take_profit_price - entry_price) / entry_price < 0.001:  # 小于0.1%
+        if abs(take_profit_price - entry_price) / entry_price < 0.005:  # 小于0.5%
             logger.log_warning("⚠️ 止盈价格过于接近入场价格")
+            return False
+            
+        # 🆕 检查盈亏比是否合理
+        if side == 'long':
+            risk = entry_price - stop_loss_price
+            reward = take_profit_price - entry_price
+        else:
+            risk = stop_loss_price - entry_price
+            reward = entry_price - take_profit_price
+            
+        if risk <= 0:
+            logger.log_warning("⚠️ 风险为0或负数")
+            return False
+            
+        risk_reward_ratio = reward / risk
+        if risk_reward_ratio < 0.5:  # 最小盈亏比0.5
+            logger.log_warning(f"⚠️ 盈亏比过低: {risk_reward_ratio:.2f}")
             return False
             
         return True
@@ -1343,252 +1761,6 @@ def validate_price_relationship(entry_price: float, stop_loss_price: float, take
     except Exception as e:
         logger.log_error("price_relationship_validation", str(e))
         return False
-
-
-def validate_risk_reward_before_trade(symbol: str, entry_price: float, stop_loss_price: float, 
-                                    take_profit_price: float, side: str, min_risk_reward: float = 1.5) -> dict:
-    """在交易前验证盈亏比，决定是否开仓 - 修复版本"""
-    try:
-        # 首先验证价格合理性
-        if not validate_price_relationship(entry_price, stop_loss_price, take_profit_price, side):
-            return {
-                'is_valid': False,
-                'risk_reward_ratio': 0,
-                'risk_percent': 0,
-                'reward_percent': 0,
-                'risk_amount': 0,
-                'reward_amount': 0,
-                'message': "价格关系不合理，请检查止损止盈设置"
-            }
-        
-        risk_reward_ratio = calculate_risk_reward_ratio(entry_price, stop_loss_price, take_profit_price, side)
-        
-        # 计算风险和回报金额（使用绝对值确保正数）
-        if side == 'long':
-            risk_amount = abs(entry_price - stop_loss_price)
-            reward_amount = abs(take_profit_price - entry_price)
-            risk_percent = (risk_amount / entry_price) * 100
-            reward_percent = (reward_amount / entry_price) * 100
-        else:  # short
-            risk_amount = abs(stop_loss_price - entry_price)
-            reward_amount = abs(entry_price - take_profit_price)
-            risk_percent = (risk_amount / entry_price) * 100
-            reward_percent = (reward_amount / entry_price) * 100
-        
-        validation_result = {
-            'is_valid': risk_reward_ratio >= min_risk_reward and risk_reward_ratio > 0,
-            'risk_reward_ratio': risk_reward_ratio,
-            'risk_percent': risk_percent,
-            'reward_percent': reward_percent,
-            'risk_amount': risk_amount,
-            'reward_amount': reward_amount,
-            'message': ''
-        }
-        
-        if validation_result['is_valid']:
-            validation_result['message'] = f"✅ 盈亏比达标: {risk_reward_ratio:.2f} >= {min_risk_reward}"
-        else:
-            if risk_reward_ratio <= 0:
-                validation_result['message'] = f"❌ 无效盈亏比: {risk_reward_ratio:.2f}"
-            else:
-                validation_result['message'] = f"❌ 盈亏比不足: {risk_reward_ratio:.2f} < {min_risk_reward}，放弃开仓"
-        
-        return validation_result
-        
-    except Exception as e:
-        logger.log_error("risk_reward_validation", str(e))
-        return {
-            'is_valid': False,
-            'risk_reward_ratio': 0,
-            'risk_percent': 0,
-            'reward_percent': 0,
-            'risk_amount': 0,
-            'reward_amount': 0,
-            'message': f"盈亏比验证失败: {str(e)}"
-        }
-
-
-def find_optimal_risk_reward_levels(symbol: str, side: str, current_price: float, price_data: dict, 
-                                  min_risk_reward: float = 1.5) -> dict:
-    """寻找满足最小盈亏比的最优止损止盈位置"""
-    config = SYMBOL_CONFIGS[symbol]
-    
-    try:
-        # 基于市场结构计算止损位置
-        if side == 'long':
-            # 多头：止损放在支撑位下方
-            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.98)
-            dynamic_support = price_data['levels_analysis'].get('dynamic_support', current_price * 0.98)
-            
-            # 选择较近的支撑作为止损参考
-            stop_loss_candidate = min(support_level, dynamic_support)
-            
-            # 添加安全缓冲（1%）
-            stop_loss_price = stop_loss_candidate * 0.99
-            
-            # 计算满足最小盈亏比的止盈位置
-            risk_amount = current_price - stop_loss_price
-            min_reward_amount = risk_amount * min_risk_reward
-            take_profit_price = current_price + min_reward_amount
-            
-            # 检查止盈位置是否合理（不超过阻力位）
-            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.05)
-            dynamic_resistance = price_data['levels_analysis'].get('dynamic_resistance', current_price * 1.05)
-            
-            max_reasonable_tp = min(resistance_level, dynamic_resistance)
-            
-            if take_profit_price > max_reasonable_tp:
-                # 止盈位置超出合理范围，需要重新计算
-                available_reward = max_reasonable_tp - current_price
-                actual_rr = available_reward / risk_amount if risk_amount > 0 else 0
-                
-                if actual_rr >= min_risk_reward:
-                    take_profit_price = max_reasonable_tp
-                else:
-                    # 无法满足最小盈亏比
-                    return {
-                        'is_viable': False,
-                        'stop_loss': stop_loss_price,
-                        'take_profit': take_profit_price,
-                        'risk_reward_ratio': actual_rr,
-                        'message': f"止盈位置超出阻力位，实际盈亏比 {actual_rr:.2f} 不足 {min_risk_reward}"
-                    }
-                    
-        else:  # short
-            # 空头：止损放在阻力位上方
-            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.02)
-            dynamic_resistance = price_data['levels_analysis'].get('dynamic_resistance', current_price * 1.02)
-            
-            # 选择较近的阻力作为止损参考
-            stop_loss_candidate = max(resistance_level, dynamic_resistance)
-            
-            # 添加安全缓冲（1%）
-            stop_loss_price = stop_loss_candidate * 1.01
-            
-            # 计算满足最小盈亏比的止盈位置
-            risk_amount = stop_loss_price - current_price
-            min_reward_amount = risk_amount * min_risk_reward
-            take_profit_price = current_price - min_reward_amount
-            
-            # 检查止盈位置是否合理（不低于支撑位）
-            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.95)
-            dynamic_support = price_data['levels_analysis'].get('dynamic_support', current_price * 0.95)
-            
-            min_reasonable_tp = max(support_level, dynamic_support)
-            
-            if take_profit_price < min_reasonable_tp:
-                # 止盈位置超出合理范围，需要重新计算
-                available_reward = current_price - min_reasonable_tp
-                actual_rr = available_reward / risk_amount if risk_amount > 0 else 0
-                
-                if actual_rr >= min_risk_reward:
-                    take_profit_price = min_reasonable_tp
-                else:
-                    # 无法满足最小盈亏比
-                    return {
-                        'is_viable': False,
-                        'stop_loss': stop_loss_price,
-                        'take_profit': take_profit_price,
-                        'risk_reward_ratio': actual_rr,
-                        'message': f"止盈位置超出支撑位，实际盈亏比 {actual_rr:.2f} 不足 {min_risk_reward}"
-                    }
-        
-        # 验证最终的盈亏比
-        final_rr = calculate_risk_reward_ratio(current_price, stop_loss_price, take_profit_price, side)
-        
-        if final_rr >= min_risk_reward:
-            return {
-                'is_viable': True,
-                'stop_loss': stop_loss_price,
-                'take_profit': take_profit_price,
-                'risk_reward_ratio': final_rr,
-                'message': f"找到可行位置，盈亏比: {final_rr:.2f}"
-            }
-        else:
-            return {
-                'is_viable': False,
-                'stop_loss': stop_loss_price,
-                'take_profit': take_profit_price,
-                'risk_reward_ratio': final_rr,
-                'message': f"无法满足最小盈亏比，实际: {final_rr:.2f}"
-            }
-            
-    except Exception as e:
-        logger.log_error(f"optimal_levels_finding_{get_base_currency(symbol)}", str(e))
-        return {
-            'is_viable': False,
-            'stop_loss': 0,
-            'take_profit': 0,
-            'risk_reward_ratio': 0,
-            'message': f"寻找最优位置失败: {str(e)}"
-        }
-
-def calculate_market_structure_levels(symbol: str, side: str, current_price: float, price_data: dict) -> dict:
-    """基于市场结构计算止损止盈位置"""
-    config = SYMBOL_CONFIGS[symbol]
-    
-    try:
-        levels_analysis = price_data['levels_analysis']
-        
-        if side == 'long':
-            # 多头交易
-            stop_loss = levels_analysis.get('static_support', current_price * 0.98)
-            take_profit = levels_analysis.get('static_resistance', current_price * 1.03)
-            
-            # 使用动态支撑阻力作为备选
-            dynamic_sl = levels_analysis.get('dynamic_support', current_price * 0.98)
-            dynamic_tp = levels_analysis.get('dynamic_resistance', current_price * 1.03)
-            
-            # 选择更保守的止损（较高的）和更现实的止盈（较低的）
-            stop_loss = max(stop_loss, dynamic_sl)
-            take_profit = min(take_profit, dynamic_tp)
-            
-        else:  # short
-            # 空头交易
-            stop_loss = levels_analysis.get('static_resistance', current_price * 1.02)
-            take_profit = levels_analysis.get('static_support', current_price * 0.97)
-            
-            # 使用动态支撑阻力作为备选
-            dynamic_sl = levels_analysis.get('dynamic_resistance', current_price * 1.02)
-            dynamic_tp = levels_analysis.get('dynamic_support', current_price * 0.97)
-            
-            # 选择更保守的止损（较低的）和更现实的止盈（较高的）
-            stop_loss = min(stop_loss, dynamic_sl)
-            take_profit = max(take_profit, dynamic_tp)
-        
-        # 添加安全缓冲
-        if side == 'long':
-            stop_loss = stop_loss * 0.995  # 额外0.5%缓冲
-            take_profit = take_profit * 0.995  # 避免正好在阻力位
-        else:
-            stop_loss = stop_loss * 1.005  # 额外0.5%缓冲
-            take_profit = take_profit * 1.005  # 避免正好在支撑位
-        
-        return {
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'message': '基于市场结构计算'
-        }
-        
-    except Exception as e:
-        logger.log_error(f"market_structure_levels_{get_base_currency(symbol)}", str(e))
-        # 备用计算
-        if side == 'long':
-            return {
-                'stop_loss': current_price * 0.98,
-                'take_profit': current_price * 1.03,
-                'message': '备用计算'
-            }
-        else:
-            return {
-                'stop_loss': current_price * 1.02,
-                'take_profit': current_price * 0.97,
-                'message': '备用计算'
-            }
-
-
-
-
 
 def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
     """使用OKX算法订单设置保本止损"""
@@ -1602,40 +1774,21 @@ def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
             logger.log_warning("⚠️ 剩余仓位太小，无法设置保本止损")
             return False
         
-        entry_price = current_position['entry_price']
-        side = current_position['side']
-        
-        # 根据持仓方向确定条件单参数
-        if side == 'long':
-            # 多头持仓：设置止损卖出单，触发价格为开仓价
-            algo_order_type = 'conditional'  # 条件单
-            trigger_action = 'sell'  # 触发后卖出
-            trigger_price = entry_price  # 触发价格设为开仓价（保本）
-            order_type = 'market'  # 市价单
-            
-            logger.log_info(f"🛡️ 设置多头保本止损: 触发价{trigger_price:.2f}, 数量{remaining_size}张")
-            
-        else:  # short
-            # 空头持仓：设置止损买入单，触发价格为开仓价
-            algo_order_type = 'conditional'  # 条件单
-            trigger_action = 'buy'  # 触发后买入
-            trigger_price = entry_price  # 触发价格设为开仓价（保本）
-            order_type = 'market'  # 市价单
-            
-            logger.log_info(f"🛡️ 设置空头保本止损: 触发价{trigger_price:.2f}, 数量{remaining_size}张")
+        sl_price = current_position['entry_price']      # 保本止损，所以止损价设置为开仓价
+        existing_order_side = current_position['side']  # 持有仓位的方向
+        logger.log_info(f"🛡️ 设置空头保本止损: 触发价{sl_price:.2f}, 数量{remaining_size}张")
         
         # 取消该交易对现有的所有条件单（避免重复）
         cancel_existing_algo_orders(symbol)
         
         # 创建算法订单
-        result = create_algo_order(
+        result = sl_tp_algo_order_set(
         symbol=symbol,  # ✅ 修正参数名
-        side=trigger_action,
-        sz=remaining_size,
-        trigger_price=trigger_price
+        side= existing_order_side,
+        amount = remaining_size,
+        stop_loss_price = sl_price
         )
-
-        if result:
+        if result['success']:
             logger.log_info("✅ 保本止损设置成功")
             return True
         else:
@@ -1879,12 +2032,16 @@ def generate_technical_analysis_text(price_data):
     return analysis_text
 
 def verify_position_exists(symbol: str, position_info: dict) -> bool:
-    """验证持仓是否真实存在"""
+    """验证持仓是否真实存在 - 增强版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         # 方法1：通过账户余额验证
         balance = exchange.fetch_balance()
         total_balance = balance['total'].get('USDT', 0)
+        
+        if total_balance <= 0:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常")
+            return False
         
         # 方法2：尝试获取更详细的持仓信息
         positions = exchange.fetch_positions([config.symbol])
@@ -1892,13 +2049,37 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
             if (pos['symbol'] == config.symbol and 
                 float(pos.get('contracts', 0)) > 0 and
                 pos.get('side') == position_info['side']):
-                return True
+                
+                # 🆕 额外验证：检查持仓的详细信息
+                if (pos.get('entryPrice') and 
+                    float(pos['entryPrice']) > 0 and
+                    pos.get('marginMode') in ['isolated', 'cross']):
+                    return True
         
-        # 方法3：如果上述方法都失败，记录详细日志
+        # 方法3：使用私有API获取持仓
+        try:
+            params = {
+                'instType': 'SWAP',
+                'instId': get_correct_inst_id(symbol)
+            }
+            response = exchange.private_get_account_positions(params)
+            
+            if response['code'] == '0' and response['data']:
+                for pos in response['data']:
+                    if (pos['instId'] == get_correct_inst_id(symbol) and
+                        float(pos.get('pos', 0)) > 0 and
+                        pos.get('posSide') == 'net' and
+                        ((position_info['side'] == 'long' and pos.get('posSide') == 'long') or 
+                         (position_info['side'] == 'short' and pos.get('posSide') == 'short'))):
+                        return True
+        except Exception as api_error:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 私有API持仓查询失败: {str(api_error)}")
+        
+        # 方法4：如果上述方法都失败，记录详细日志
         logger.log_warning(f"🔍 {get_base_currency(symbol)}: 持仓验证失败 - 详细持仓信息:")
         for pos in positions:
             if pos['symbol'] == config.symbol:
-                logger.log_warning(f"  - 合约: {pos.get('contracts')}, 方向: {pos.get('side')}, 模式: {pos.get('marginMode')}")
+                logger.log_warning(f"  - 合约: {pos.get('contracts')}, 方向: {pos.get('side')}, 模式: {pos.get('marginMode')}, 入场价: {pos.get('entryPrice')}")
         
         return False
         
@@ -1906,54 +2087,6 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
         logger.log_error(f"position_verification_{get_base_currency(symbol)}", f"持仓验证失败: {str(e)}")
         return False
 
-
-def get_current_position(symbol: str) -> Optional[dict]:
-    """Get current position status - 增强版持仓检测"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        positions = exchange.fetch_positions([config.symbol])
-        if not positions:
-            return None
-        
-        for pos in positions:
-            if pos['symbol'] == config.symbol:
-                contracts = float(pos['contracts']) if pos['contracts'] else 0
-                side = pos.get('side')
-                
-                # 🆕 增强验证：确保持仓真实存在
-                if (contracts > 0 and 
-                    side in ['long', 'short'] and 
-                    pos.get('marginMode') in ['isolated', 'cross'] and
-                    pos.get('entryPrice') and 
-                    float(pos['entryPrice']) > 0):
-                    
-                    # 🆕 额外验证：通过余额检查
-                    try:
-                        balance = exchange.fetch_balance()
-                        total_balance = balance['total'].get('USDT', 0)
-                        if total_balance <= 0:
-                            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 账户余额异常，跳过持仓")
-                            continue
-                    except:
-                        pass
-                    
-                    return {
-                        'side': side,
-                        'size': contracts,
-                        'entry_price': float(pos['entryPrice']),
-                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
-                        'leverage': float(pos['leverage']) if pos['leverage'] else config.leverage,
-                        'symbol': pos['symbol'],
-                        'margin_mode': pos.get('marginMode', ''),
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-
-        return None
-
-    except Exception as e:
-        logger.log_error(f"position_fetch_{get_base_currency(symbol)}", f"Failed to fetch positions: {str(e)}")
-        return None
-    
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
     """设置移动止损"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2001,177 +2134,176 @@ def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -
         logger.log_error(f"trailing_stop_setup_{get_base_currency(symbol)}", f"移动止损设置失败: {str(e)}")
         return False
 
-def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float):
-    """设置移动止损订单 - 先设置新的，再取消旧的"""
+def check_existing_algo_orders(symbol: str, position: dict) -> dict:
+    """检查现有的策略委托订单，返回详细的订单分析 - 修复版本"""
+    config = SYMBOL_CONFIGS[symbol]
+    try:
+        algo_orders_analysis = {
+            'has_stop_loss': False,
+            'has_take_profit': False,
+            'stop_loss_orders': [],
+            'take_profit_orders': [],
+            'oco_orders': [],
+            'total_covered_size': 0,
+            'remaining_size': position['size']
+        }
+        
+        # 🆕 首先验证持仓是否存在
+        if not verify_position_exists(symbol, position):
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过订单检查")
+            return algo_orders_analysis
+        
+        logger.log_info(f"✅ {get_base_currency(symbol)}: 持仓验证成功")
+        
+        # 🆕 修复：使用正确的算法订单类型参数
+        try:
+            # 检查条件单
+            conditional_params = {
+                'instType': 'SWAP',
+                'instId': get_correct_inst_id(symbol),
+                'ordType': 'conditional'  # 🆕 修复：使用正确的参数名
+            }
+            
+            conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
+            
+            if conditional_response['code'] == '0' and conditional_response['data']:
+                inst_id = get_correct_inst_id(symbol)
+                
+                for order in conditional_response['data']:
+                    if order['instId'] == inst_id:
+                        order_size = float(order.get('sz', 0))
+                        
+                        # 判断是止损单还是止盈单
+                        if 'slTriggerPx' in order and order['slTriggerPx'] and float(order['slTriggerPx']) > 0:
+                            algo_orders_analysis['has_stop_loss'] = True
+                            algo_orders_analysis['stop_loss_orders'].append({
+                                'algoId': order['algoId'],
+                                'size': order_size,
+                                'triggerPrice': float(order['slTriggerPx']),
+                                'orderType': 'conditional'
+                            })
+                            algo_orders_analysis['total_covered_size'] += order_size
+                        
+                        if 'tpTriggerPx' in order and order['tpTriggerPx'] and float(order['tpTriggerPx']) > 0:
+                            algo_orders_analysis['has_take_profit'] = True
+                            algo_orders_analysis['take_profit_orders'].append({
+                                'algoId': order['algoId'],
+                                'size': order_size,
+                                'triggerPrice': float(order['tpTriggerPx']),
+                                'orderType': 'conditional'
+                            })
+                            algo_orders_analysis['total_covered_size'] += order_size
+                            
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 条件单检查失败: {str(e)}")
+        
+        # 🆕 修复：检查OCO订单
+        try:
+            oco_params = {
+                'instType': 'SWAP',
+                'instId': get_correct_inst_id(symbol),
+                'ordType': 'oco'  # 🆕 检查OCO订单
+            }
+            
+            oco_response = exchange.private_get_trade_orders_algo_pending(oco_params)
+            
+            if oco_response['code'] == '0' and oco_response['data']:
+                inst_id = get_correct_inst_id(symbol)
+                
+                for order in oco_response['data']:
+                    if order['instId'] == inst_id:
+                        order_size = float(order.get('sz', 0))
+                        
+                        algo_orders_analysis['oco_orders'].append({
+                            'algoId': order['algoId'],
+                            'size': order_size,
+                            'stopLossPrice': float(order.get('slTriggerPx', 0)),
+                            'takeProfitPrice': float(order.get('tpTriggerPx', 0)),
+                            'orderType': 'oco'
+                        })
+                        algo_orders_analysis['total_covered_size'] += order_size
+                        algo_orders_analysis['has_stop_loss'] = True
+                        algo_orders_analysis['has_take_profit'] = True
+                        
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: OCO订单检查失败: {str(e)}")
+        
+        # 🆕 修复：计算剩余仓位时考虑浮点数精度
+        remaining_size = position['size'] - algo_orders_analysis['total_covered_size']
+        
+        # 🆕 添加精度容差（使用品种的最小交易单位）
+        min_amount = getattr(config, 'min_amount', 0.01)
+        precision_tolerance = min_amount * 0.1  # 使用最小交易单位的10%作为容差
+        
+        if abs(remaining_size) < precision_tolerance:
+            remaining_size = 0
+        
+        algo_orders_analysis['remaining_size'] = max(0, remaining_size)
+        
+        logger.log_info(f"📊 {get_base_currency(symbol)}: 策略委托分析 - 止损: {algo_orders_analysis['has_stop_loss']}, "
+                      f"止盈: {algo_orders_analysis['has_take_profit']}, "
+                      f"已覆盖: {algo_orders_analysis['total_covered_size']:.6f}/{position['size']:.6f}张, "
+                      f"剩余: {algo_orders_analysis['remaining_size']:.6f}张")
+        
+        return algo_orders_analysis
+            
+    except Exception as e:
+        logger.log_error(f"check_existing_algo_orders_{get_base_currency(symbol)}", f"检查策略委托订单失败: {str(e)}")
+        return {
+            'has_stop_loss': False,
+            'has_take_profit': False,
+            'stop_loss_orders': [],
+            'take_profit_orders': [],
+            'oco_orders': [],
+            'total_covered_size': 0,
+            'remaining_size': position['size']
+        }
+
+# 🆕 --- 核心修改：智能化移动止损，不再取消止盈单 ---
+def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float) -> bool:
+    """
+    设置移动止损订单 - 智能版
+    
+    此函数现在将:
+    1. 检查现有的 *止损单*。
+    2. 取消 *只* 取消旧的止损单 (保留止盈单)。
+    3. 创建新的止损单。
+    """
     config = SYMBOL_CONFIGS[symbol]
     try:
         side = current_position['side']
         position_size = current_position['size']
         
-        if side == 'long':
-            # 多头：止损卖出
-            trigger_action = 'sell'
+        # 1. 检查现有的策略订单
+        orders_analysis = check_existing_algo_orders(symbol, current_position)
+        
+        # 2. 如果有旧的止损单，只取消它们
+        if orders_analysis['has_stop_loss'] and orders_analysis['stop_loss_orders']:
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 发现旧的止损单，正在取消...")
+            cancel_specific_algo_orders(symbol, orders_analysis['stop_loss_orders'], 'conditional')
+            time.sleep(1) # 等待交易所处理取消
         else:
-            # 空头：止损买入
-            trigger_action = 'buy'
-        
-        # 先创建新的移动止损条件单
-        result = create_algo_order(
+            logger.log_info(f"ℹ️ {get_base_currency(symbol)}: 未发现旧止损单，直接创建新单。")
+
+        # 3. 创建新的移动止损条件单
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 创建新移动止损单于 {stop_price:.2f}")
+        result = sl_tp_algo_order_set(
             symbol=symbol,
-            side=trigger_action,
-            sz=position_size,
-            trigger_price=stop_price
+            side=side,
+            amount=position_size,
+            stop_loss_price=stop_price,
         )
-        
-        if result:
-            logger.log_info(f"✅ 新移动止损设置成功: {stop_price:.2f}")
-            
-            # 等待新订单处理完成
-            time.sleep(1)
-            
-            # 现在取消旧的止损单
-            cancel_existing_algo_orders(symbol)
-            
+        if result['success']:
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 新移动止损设置成功: {stop_price:.2f}")
             return True
         else:
-            logger.log_error("移动止损设置失败")
+            logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", "移动止损设置失败")
             return False
             
     except Exception as e:
-        logger.log_error("set_trailing_stop_order", str(e))
+        logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", str(e))
         return False
-
-
-def adjust_take_profit_dynamically(symbol: str, current_position: dict, price_data: dict) -> bool:
-    """动态调整止盈位置"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        current_price = price_data['price']
-        entry_price = current_position['entry_price']
-        side = current_position['side']
-        
-        # 计算当前盈利比例
-        if side == 'long':
-            profit_ratio = (current_price - entry_price) / entry_price
-        else:
-            profit_ratio = (entry_price - current_price) / entry_price
-        
-        # 根据盈利幅度调整止盈
-        if profit_ratio >= 0.10:  # 盈利10%以上
-            # 重新计算更激进的止盈
-            new_take_profit = calculate_intelligent_take_profit(
-                symbol, side, entry_price, price_data, risk_reward_ratio=3.0
-            )
-            
-            # 取消旧的止盈单
-            cancel_existing_take_profit_orders(symbol)
-            
-            # 设置新的止盈单
-            if side == 'long':
-                return create_take_profit_algo_order(symbol, 'sell', current_position['size'], new_take_profit)
-            else:
-                return create_take_profit_algo_order(symbol, 'buy', current_position['size'], new_take_profit)
-                
-        return False
-        
-    except Exception as e:
-        logger.log_error(f"dynamic_take_profit_{get_base_currency(symbol)}", f"动态止盈调整失败: {str(e)}")
-        return False
-
-def cancel_existing_take_profit_orders(symbol: str):
-    """取消现有的止盈订单"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        params = {
-            'instType': 'SWAP',
-            'algoOrdType': 'conditional'
-        }
-        
-        response = exchange.private_get_trade_orders_algo_pending(params)
-        
-        if response['code'] == '0' and response['data']:
-            inst_id = get_correct_inst_id(symbol)
-            
-            for order in response['data']:
-                if order['instId'] == inst_id and 'tpTriggerPx' in order:
-                    # 取消止盈条件单
-                    cancel_params = {
-                        'algoId': order['algoId'],
-                        'instId': order['instId'],
-                        'algoOrdType': 'conditional'
-                    }
-                    cancel_response = exchange.privatePostTradeCancelAlgoOrder(cancel_params)
-                    if cancel_response['code'] == '0':
-                        logger.log_info(f"✅ {get_base_currency(symbol)}: 取消现有止盈单: {order['algoId']}")
-                    else:
-                        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 取消止盈单失败: {cancel_response}")
-        else:
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 没有找到待取消的止盈单")
-                    
-    except Exception as e:
-        logger.log_error(f"cancel_take_profit_orders_{get_base_currency(symbol)}", str(e))
-
-
-def calculate_intelligent_take_profit(symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0) -> float:
-    """计算智能止盈价格"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        current_price = price_data['price']
-        df = price_data['full_data']
-        
-        if side == 'long':
-            # 多头止盈计算
-            # 方法1: 基于阻力位
-            resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * 1.05)
-            
-            # 方法2: 基于ATR
-            atr = calculate_atr(df)
-            atr_take_profit = current_price + (atr * risk_reward_ratio)
-            
-            # 方法3: 基于固定风险回报比
-            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 0.98))
-            rr_take_profit = entry_price + (risk * risk_reward_ratio)
-            
-            # 取最合理的止盈价格
-            take_profit_price = min(resistance_level, atr_take_profit, rr_take_profit)
-            
-            # 确保止盈价格合理
-            min_take_profit = current_price * 1.01  # 至少1%盈利
-            take_profit_price = max(take_profit_price, min_take_profit)
-            
-        else:  # short
-            # 空头止盈计算
-            # 方法1: 基于支撑位
-            support_level = price_data['levels_analysis'].get('static_support', current_price * 0.95)
-            
-            # 方法2: 基于ATR
-            atr = calculate_atr(df)
-            atr_take_profit = current_price - (atr * risk_reward_ratio)
-            
-            # 方法3: 基于固定风险回报比
-            risk = abs(entry_price - price_data.get('stop_loss', entry_price * 1.02))
-            rr_take_profit = entry_price - (risk * risk_reward_ratio)
-            
-            # 取最合理的止盈价格
-            take_profit_price = max(support_level, atr_take_profit, rr_take_profit)
-            
-            # 确保止盈价格合理
-            max_take_profit = current_price * 0.99  # 至少1%盈利
-            take_profit_price = min(take_profit_price, max_take_profit)
-        
-        take_profit_ratio = abs(take_profit_price - entry_price) / entry_price * 100
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 智能止盈计算 - 入场{entry_price:.2f}, 止盈{take_profit_price:.2f} (盈利{take_profit_ratio:.2f}%)")
-        
-        return take_profit_price
-        
-    except Exception as e:
-        logger.log_error(f"take_profit_calculation_{get_base_currency(symbol)}", f"止盈计算失败: {str(e)}")
-        # 备用止盈计算
-        if side == 'long':
-            return entry_price * 1.03  # 默认3%止盈
-        else:
-            return entry_price * 0.97  # 默认3%止盈
-
+    # ✅ --- 修改结束 ---
 
 def safe_json_parse(json_str):
     """Safely parse JSON, handle non-standard format situations"""
@@ -2431,41 +2563,6 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         logger.log_error("analysis_preparation", f"API调用失败: {str(prep_error)}")
         return create_fallback_signal(price_data)
 
-def check_market_conditions(symbol: str) -> bool:
-    """Check if market conditions are suitable for trading."""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        ticker = exchange.fetch_ticker(config.symbol)
-        spread = (ticker['ask'] - ticker['bid']) / ticker['bid']
-        
-        # If spread is too wide, avoid trading
-        if spread > 0.002:  # 0.2%
-            logger.log_warning(f"⚠️ Wide spread: {spread:.4%}, avoiding trade.")
-            return False
-            
-        return True
-    except Exception as e:
-        logger.log_error("market_conditions", str(e))
-        return False
-
-def check_trading_frequency():
-    """Check if we are trading too frequently."""
-    global signal_history
-    
-    if len(signal_history) < 3:
-        return True
-    
-    recent_signals = [s['signal'] for s in signal_history[-3:]]
-    signal_changes = sum(1 for i in range(1, len(recent_signals)) 
-                      if recent_signals[i] != recent_signals[i-1])
-    
-    # If there are too many signal changes, pause trading
-    if signal_changes >= 2:
-        logger.log_info("⚠️ Too frequent signal changes, pausing trading.")
-        return False
-    
-    return True
-
 def execute_profit_taking(symbol: str, current_position: dict, profit_taking_signal: dict, price_data: dict):
     """执行多级止盈逻辑 - 永续合约市价平仓"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2482,7 +2579,17 @@ def execute_profit_taking(symbol: str, current_position: dict, profit_taking_sig
             close_size = getattr(config, 'min_amount', 0.01)
             
         logger.log_info(f"💰 执行部分止盈: 平仓{close_size:.2f}张合约 ({take_profit_ratio:.1%}仓位)")
-        
+
+        # 🆕 记录止盈操作到持仓历史
+        add_to_position_history(symbol, {
+            'side': current_position['side'],
+            'size': close_size,
+            'entry_price': current_position['entry_price'],
+            'action': 'partial_close',
+            'close_reason': f'profit_taking_level_{profit_taking_signal["level"]}',
+            'take_profit_ratio': take_profit_ratio
+        })
+
         if not config.test_mode:
             # 记录止盈订单参数 - 永续合约市价平仓
             if current_position['side'] == 'long':
@@ -2599,236 +2706,6 @@ def calculate_kline_based_stop_loss(side, entry_price, price_data, max_stop_loss
         else:
             return current_price * (1 + 0.02)  # 2%止损
 
-def validate_and_adjust_prices(side, calculated_stop_loss, current_price, bid_price, ask_price):
-    """验证并调整价格参数"""
-    try:
-        # 验证止损价格
-        if side == 'buy':
-            # 多头：止损必须低于当前价格
-            if calculated_stop_loss >= current_price:
-                logger.log_warning(f"⚠️ 多头止损价格调整: {calculated_stop_loss:.2f} >= {current_price:.2f}")
-                calculated_stop_loss = current_price * 0.98
-                logger.log_info(f"🔄 调整后止损: {calculated_stop_loss:.2f}")
-            
-            # 计算限价单价格（确保高于卖一价）
-            limit_price = max(ask_price * 1.001, current_price * 1.001)
-            
-        else:  # sell
-            # 空头：止损必须高于当前价格
-            if calculated_stop_loss <= current_price:
-                logger.log_warning(f"⚠️ 空头止损价格调整: {calculated_stop_loss:.2f} <= {current_price:.2f}")
-                calculated_stop_loss = current_price * 1.02
-                logger.log_info(f"🔄 调整后止损: {calculated_stop_loss:.2f}")
-            
-            # 计算限价单价格（确保低于买一价）
-            limit_price = min(bid_price * 0.999, current_price * 0.999)
-        
-        logger.log_info(f"✅ 价格验证完成: 限价{limit_price:.2f}, 止损{calculated_stop_loss:.2f}")
-        return limit_price, calculated_stop_loss
-        
-    except Exception as e:
-        logger.log_error("price_validation", str(e))
-        # 备用价格计算
-        if side == 'buy':
-            return current_price * 1.001, current_price * 0.98
-        else:
-            return current_price * 0.999, current_price * 1.02
-
-
-def validate_stop_loss_for_order(side, stop_loss_price, current_price):
-    """验证止损价格是否符合订单规则"""
-    try:
-        if side == 'buy':
-            # 多头：止损价格必须低于当前价格
-            if stop_loss_price >= current_price:
-                logger.log_error("stop_loss_validation", 
-                               f"多头止损价格无效: {stop_loss_price:.2f} >= {current_price:.2f}")
-                # 自动调整为合理的止损价格
-                adjusted_stop_loss = current_price * 0.98
-                logger.log_warning(f"🔄 自动调整止损价格为: {adjusted_stop_loss:.2f}")
-                return adjusted_stop_loss
-            else:
-                return stop_loss_price
-        else:  # sell - 这是平仓方向，不是开仓方向
-            # 空头持仓的止损是买入平仓，但止损价格应该高于当前价格（对空头不利）
-            if stop_loss_price <= current_price:
-                logger.log_error("stop_loss_validation", 
-                               f"空头止损价格无效: {stop_loss_price:.2f} <= {current_price:.2f}")
-                # 自动调整为合理的止损价格
-                adjusted_stop_loss = current_price * 1.02
-                logger.log_warning(f"🔄 自动调整止损价格为: {adjusted_stop_loss:.2f}")
-                return adjusted_stop_loss
-            else:
-                return stop_loss_price
-                
-    except Exception as e:
-        logger.log_error("stop_loss_validation", str(e))
-        # 备用：使用默认止损
-        if side == 'buy':
-            return current_price * 0.98
-        else:
-            return current_price * 1.02
-
-def calculate_limit_price(side, current_price, ticker):
-    """计算限价单价格"""
-    try:
-        if side == 'buy':
-            # 开多仓：使用卖一价或稍高价格确保成交
-            ask_price = ticker['ask']
-            limit_price = ask_price * 1.001  # 比卖一价高0.1%
-            logger.log_info(f"📊 多头限价单价格: {limit_price:.2f} (卖一价: {ask_price:.2f})")
-        else:  # sell
-            # 开空仓：使用买一价或稍低价格确保成交
-            bid_price = ticker['bid']
-            limit_price = bid_price * 0.999  # 比买一价低0.1%
-            logger.log_info(f"📊 空头限价单价格: {limit_price:.2f} (买一价: {bid_price:.2f})")
-        
-        return limit_price
-        
-    except Exception as e:
-        logger.log_error("limit_price_calculation", str(e))
-        # 备用计算：使用当前价格
-        return current_price
-
-def set_stop_loss_and_take_profit(symbol: str, position: dict, stop_loss_price: float, take_profit_price: float) -> bool:
-    """设置止损和止盈 - 使用OKX策略委托接口"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        position_side = position['side']  # 'long' or 'short'
-        position_size = position['size']
-        
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 设置止损止盈 - 持仓{position_side}, 止损{stop_loss_price:.2f}, 止盈{take_profit_price:.2f}")
-        
-        # 根据持仓方向确定委托方向
-        if position_side == 'long':
-            # 多头持仓：止损是卖出，止盈也是卖出
-            side = 'sell'
-            # 使用条件单分别设置止损和止盈
-            sl_success = create_algo_order(
-                symbol=symbol,
-                side='sell',  # 止损平仓
-                sz=position_size,
-                trigger_price=stop_loss_price,
-                order_type='conditional'
-            )
-            
-            tp_success = create_algo_order(
-                symbol=symbol,
-                side='sell',  # 止盈平仓
-                sz=position_size,
-                trigger_price=take_profit_price,
-                order_type='conditional'
-            )
-            
-        else:  # short
-            # 空头持仓：止损是买入，止盈也是买入
-            side = 'buy'
-            # 使用条件单分别设置止损和止盈
-            sl_success = create_algo_order(
-                symbol=symbol,
-                side='buy',  # 止损平仓
-                sz=position_size,
-                trigger_price=stop_loss_price,
-                order_type='conditional'
-            )
-            
-            tp_success = create_algo_order(
-                symbol=symbol,
-                side='buy',  # 止盈平仓
-                sz=position_size,
-                trigger_price=take_profit_price,
-                order_type='conditional'
-            )
-        
-        if sl_success and tp_success:
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 止损止盈设置成功")
-            return True
-        else:
-            logger.log_error(f"stop_loss_take_profit_failed_{get_base_currency(symbol)}", "止损止盈设置失败")
-            return False
-            
-    except Exception as e:
-        logger.log_error(f"set_stop_loss_take_profit_{get_base_currency(symbol)}", f"止损止盈设置异常: {str(e)}")
-        return False
-
-def check_existing_algo_orders(symbol: str, position: dict) -> dict:
-    """检查现有的策略委托订单，返回详细的订单分析 - 修复版本"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        algo_orders_analysis = {
-            'has_stop_loss': False,
-            'has_take_profit': False,
-            'stop_loss_orders': [],
-            'take_profit_orders': [],
-            'oco_orders': [],
-            'total_covered_size': 0,
-            'remaining_size': position['size']
-        }
-        
-        # 🆕 首先验证持仓是否存在
-        if not verify_position_exists(symbol, position):
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过订单检查")
-            return algo_orders_analysis
-        
-        # 检查条件单（单向止盈止损）
-        try:
-            conditional_params = {
-                'instType': 'SWAP',
-                'algoOrdType': 'conditional'
-            }
-            
-            conditional_response = exchange.private_get_trade_orders_algo_pending(conditional_params)
-            
-            if conditional_response['code'] == '0' and conditional_response['data']:
-                inst_id = get_correct_inst_id(symbol)
-                
-                for order in conditional_response['data']:
-                    if order['instId'] == inst_id:
-                        order_size = float(order.get('sz', 0))
-                        
-                        # 判断是止损单还是止盈单
-                        if 'slTriggerPx' in order and order['slTriggerPx']:
-                            algo_orders_analysis['has_stop_loss'] = True
-                            algo_orders_analysis['stop_loss_orders'].append({
-                                'algoId': order['algoId'],
-                                'size': order_size,
-                                'triggerPrice': float(order['slTriggerPx'])
-                            })
-                            algo_orders_analysis['total_covered_size'] += order_size
-                        
-                        if 'tpTriggerPx' in order and order['tpTriggerPx']:
-                            algo_orders_analysis['has_take_profit'] = True
-                            algo_orders_analysis['take_profit_orders'].append({
-                                'algoId': order['algoId'],
-                                'size': order_size,
-                                'triggerPrice': float(order['tpTriggerPx'])
-                            })
-                            algo_orders_analysis['total_covered_size'] += order_size
-        except Exception as e:
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 条件单检查失败: {str(e)}")
-        
-        # 🆕 计算剩余需要设置的数量
-        algo_orders_analysis['remaining_size'] = max(0, position['size'] - algo_orders_analysis['total_covered_size'])
-        
-        logger.log_info(f"📊 {get_base_currency(symbol)}: 策略委托分析 - 止损: {algo_orders_analysis['has_stop_loss']}, "
-                      f"止盈: {algo_orders_analysis['has_take_profit']}, "
-                      f"已覆盖: {algo_orders_analysis['total_covered_size']}/{position['size']}张, "
-                      f"剩余: {algo_orders_analysis['remaining_size']}张")
-        
-        return algo_orders_analysis
-            
-    except Exception as e:
-        logger.log_error(f"check_existing_algo_orders_{get_base_currency(symbol)}", f"检查策略委托订单失败: {str(e)}")
-        return {
-            'has_stop_loss': False,
-            'has_take_profit': False,
-            'stop_loss_orders': [],
-            'take_profit_orders': [],
-            'oco_orders': [],
-            'total_covered_size': 0,
-            'remaining_size': position['size']
-        }
-
 def cancel_specific_algo_orders(symbol: str, algo_orders: list, order_type: str = 'conditional'):
     """取消特定的策略委托订单"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2859,21 +2736,32 @@ def cancel_specific_algo_orders(symbol: str, algo_orders: list, order_type: str 
         return 0
 
 def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data: dict, orders_analysis: dict):
-    """设置缺失的止损止盈订单"""
+    """设置缺失的止损止盈订单 - 修复方向逻辑"""
     config = SYMBOL_CONFIGS[symbol]
     try:
         current_price = price_data['price']
         position_side = position['side']
         remaining_size = orders_analysis['remaining_size']
         
+        # 🆕 修复：添加精度容差检查
+        min_amount = getattr(config, 'min_amount', 0.01)
+        precision_tolerance = min_amount * 0.1
+        
+        # 如果剩余仓位小于精度容差，认为已完全覆盖
+        if abs(remaining_size) < precision_tolerance:
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 止盈止损已完全覆盖持仓（精度容差内）")
+            return True
+            
         if remaining_size <= 0:
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 止损止盈已完全覆盖持仓，无需设置")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 止盈止损已完全覆盖持仓")
             return True
         
         # 计算止损价格
         risk_config = config.get_risk_config()
         stop_loss_config = risk_config['stop_loss']
-        
+        take_profit_price = None
+        stop_loss_price = None
+
         if position_side == 'long':
             if stop_loss_config['kline_based_stop_loss']:
                 stop_loss_price = calculate_kline_based_stop_loss(
@@ -2886,7 +2774,6 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
             take_profit_price = calculate_intelligent_take_profit(
                 symbol, 'long', position['entry_price'], price_data, risk_reward_ratio=2.0
             )
-            
         else:  # short
             if stop_loss_config['kline_based_stop_loss']:
                 stop_loss_price = calculate_kline_based_stop_loss(
@@ -2903,114 +2790,22 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
         # 根据缺失情况设置相应的订单
         success = True
         
-        # 情况1：完全没有止损止盈，设置双向止盈止损
-        if not orders_analysis['has_stop_loss'] and not orders_analysis['has_take_profit']:
-            logger.log_info(f"🆕 {get_base_currency(symbol)}: 设置双向止盈止损 - 数量{remaining_size}张")
+        # 没有止损/止盈，设置止盈止损
+        if not orders_analysis['has_stop_loss'] or not orders_analysis['has_take_profit']:
+            logger.log_info(f"🆕 {get_base_currency(symbol)}: 设置止盈止损 - 数量{remaining_size}张")
             
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            
-            if not result:
+            result = sl_tp_algo_order_set(
+                symbol=symbol,
+                side=position_side,  # 🆕 使用正确的平仓方向
+                amount=remaining_size,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price
+            )
+
+            if not result['success']:
                 success = False
-                logger.log_error(f"oco_order_failed_{get_base_currency(symbol)}", "双向止盈止损设置失败")
-        
-        # 情况2：只有止损没有止盈，设置止盈单
-        elif orders_analysis['has_stop_loss'] and not orders_analysis['has_take_profit']:
-            logger.log_info(f"🎯 {get_base_currency(symbol)}: 设置止盈单 - 数量{remaining_size}张")
-            
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=take_profit_price,
-                    order_type='conditional'
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=take_profit_price,
-                    order_type='conditional'
-                )
-            
-            if not result:
-                success = False
-                logger.log_error(f"take_profit_order_failed_{get_base_currency(symbol)}", "止盈单设置失败")
-        
-        # 情况3：只有止盈没有止损，设置止损单
-        elif not orders_analysis['has_stop_loss'] and orders_analysis['has_take_profit']:
-            logger.log_info(f"🛡️ {get_base_currency(symbol)}: 设置止损单 - 数量{remaining_size}张")
-            
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='conditional'
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='conditional'
-                )
-            
-            if not result:
-                success = False
-                logger.log_error(f"stop_loss_order_failed_{get_base_currency(symbol)}", "止损单设置失败")
-        
-        # 情况4：部分覆盖，补充剩余数量的双向止盈止损
-        elif orders_analysis['remaining_size'] > 0:
-            logger.log_info(f"📦 {get_base_currency(symbol)}: 补充设置剩余仓位止盈止损 - 数量{remaining_size}张")
-            
-            if position_side == 'long':
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='sell',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            else:  # short
-                result = create_algo_order(
-                    symbol=symbol,
-                    side='buy',
-                    sz=remaining_size,
-                    trigger_price=stop_loss_price,
-                    order_type='oco',
-                    stop_loss_price=stop_loss_price,
-                    take_profit_price=take_profit_price
-                )
-            
-            if not result:
-                success = False
-                logger.log_error(f"supplementary_order_failed_{get_base_currency(symbol)}", "补充订单设置失败")
-        
+                logger.log_error(f"{get_base_currency(symbol)}:止盈止损设置失败")
+
         if success:
             logger.log_info(f"✅ {get_base_currency(symbol)}: 缺失止盈止损设置完成")
             logger.log_info(f"📊 {get_base_currency(symbol)}: 止损价 {stop_loss_price:.2f}, 止盈价 {take_profit_price:.2f}")
@@ -3022,6 +2817,7 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
     except Exception as e:
         logger.log_error(f"setup_missing_stop_loss_take_profit_{get_base_currency(symbol)}", f"设置缺失止盈止损失败: {str(e)}")
         return False
+
 
 def check_and_set_stop_loss(symbol: str, position: dict, price_data: dict):
     """检查并设置止损和止盈订单 - 增强版本"""
@@ -3104,7 +2900,10 @@ def optimize_existing_orders(symbol: str, position: dict, price_data: dict):
         return False
 
 def close_position_safely(symbol: str, position: dict, reason: str = "反向开仓平仓") -> bool:
-    """安全平仓函数，返回是否成功"""
+    """
+    安全平仓函数 - 统一版本，支持市价平仓和限价平仓
+    返回是否成功
+    """
     config = SYMBOL_CONFIGS[symbol]
     try:
         # 🆕 双重验证：重新获取持仓信息
@@ -3124,71 +2923,113 @@ def close_position_safely(symbol: str, position: dict, reason: str = "反向开�
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
             return True
         
-        position_size = position['size']
-        logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
+        position_side = current_position['side']  # 'long' or 'short'
+        position_size = current_position['size']
         
-        if position['side'] == 'long':
-            # 平多仓
-            close_params = {
-                'reduceOnly': True
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: {reason} - 平{position_size}张")
+
+        # 🆕 记录平仓前的持仓信息到历史
+        add_to_position_history(symbol, {
+            'side': position_side,
+            'size': position_size,
+            'entry_price': current_position['entry_price'],
+            'action': 'close',
+            'close_reason': reason
+        })
+
+        # 🆕 取消该品种的所有策略委托订单
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 平仓前取消所有策略委托订单")
+        cancel_existing_algo_orders(symbol)
+        time.sleep(1)  # 等待取消操作完成
+
+        # 🆕 使用全能平仓逻辑
+        try:
+            # 1. 确定平仓方向（与原持仓方向相反）
+            close_side = 'sell' if position_side in ('buy', 'long') else 'buy'
+            action_name = f"{'多头' if position_side in ('buy', 'long') else '空头'}市价平仓"
+            
+            # 2. 获取必要参数
+            inst_id = get_correct_inst_id(symbol)
+            current_price = get_current_price(symbol)
+            
+            if current_price == 0:
+                error_msg = "无法获取当前价格，无法执行平仓操作"
+                logger.log_error(f"❌ {get_base_currency(symbol)}: {error_msg}")
+                return False
+            
+            # 3. 处理平仓数量
+            if position_size <= 0:
+                error_msg = "持仓数量无效，无法平仓"
+                logger.log_error(f"❌ {get_base_currency(symbol)}: {error_msg}")
+                return False
+
+            # 4. 生成自定义订单ID
+            cl_ord_id = generate_cl_ord_id(close_side)
+            
+            # 5. 构建ccxt标准化订单参数
+            order_params = {
+                'symbol': config.symbol,
+                'type': 'market',
+                'side': close_side,
+                'amount': position_size,
+                'params': {
+                    'tdMode': config.margin_mode,
+                    'reduceOnly': True,
+                    'tag': create_order_tag()
+                }
             }
             
-            # 记录订单参数
-            log_order_params("平多仓", close_params, "close_position_safely")
-            log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
+            # 6. 打印订单信息
+            logger.log_info(f"📤 {get_base_currency(symbol)}: {action_name}参数:")
+            logger.log_info(f"  方向: {close_side}, 数量: {position_size}, 类型: market")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行{action_name}: {position_size} 张")
             
+            # 7. 执行平仓订单（使用ccxt标准化接口）
             if not config.test_mode:
-                # 执行平仓
-                order = exchange.create_market_order(
-                    config.symbol,
-                    'sell',
-                    position_size,
-                    params=close_params
+                response = exchange.create_order(
+                    symbol=order_params['symbol'],
+                    type=order_params['type'],
+                    side=order_params['side'],
+                    amount=order_params['amount'],
+                    price=None,
+                    params=order_params['params']
                 )
                 
-                # 验证订单是否创建成功
-                if order and order.get('id'):
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功，ID: {order['id']}")
+                # 8. 处理API响应
+                logger.log_info(f"📥 {get_base_currency(symbol)}: {action_name}响应:")
+                logger.log_info(f"  订单ID: {response.get('id', 'Unknown')}, 状态: {response.get('status', 'Unknown')}")
+                
+                # 修复：改进订单状态检查逻辑
+                order_id = response.get('id')
+                if not order_id:
+                    error_msg = f"订单创建失败: {response}"
+                    logger.log_error(f"❌ {get_base_currency(symbol)}: {action_name}失败: {error_msg}")
+                    # 🆕 尝试备用方法
+                    return close_position_fallback(symbol, position, reason)
+                
+                # 对于市价单，只要订单创建成功就认为成功
+                logger.log_info(f"✅ {get_base_currency(symbol)}: {action_name}订单创建成功: {order_id}")
+            else:
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 测试模式 - {action_name}模拟成功")
+                order_id = "test_order_id"
+
+            # 9. 重置加仓状态
+            reset_scaling_status(symbol)
+            
+            # 10. 等待并验证平仓结果
+            return verify_position_closed(symbol, position_size, position_side)
                     
-                    # 等待并验证平仓结果
-                    return verify_position_closed(symbol, position_size, 'long')
-                else:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平多仓订单提交失败")
-                    return False
-            else:
-                logger.log_info("测试模式 - 模拟平多仓成功")
-                return True
-                
-        else:  # short
-            # 平空仓
-            close_params = {
-                'reduceOnly': True
-            }
-            
-            log_order_params("平空仓", close_params, "close_position_safely")
-            log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                order = exchange.create_market_order(
-                    config.symbol,
-                    'buy',
-                    position_size,
-                    params=close_params
-                )
-                
-                if order and order.get('id'):
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功，ID: {order['id']}")
-                    return verify_position_closed(symbol, position_size, 'short')
-                else:
-                    logger.log_error(f"❌ {get_base_currency(symbol)}: 平空仓订单提交失败")
-                    return False
-            else:
-                logger.log_info("测试模式 - 模拟平空仓成功")
-                return True
+        except Exception as inner_e:
+            error_msg = f"{get_base_currency(symbol)}: 平仓异常: {str(inner_e)}"
+            logger.log_error(f"close_position_inner_{get_base_currency(symbol)}", error_msg)
+            logger.log_error(f"close_position_traceback_{get_base_currency(symbol)}", traceback.format_exc())
+            # 🆕 尝试备用方法
+            return close_position_fallback(symbol, position, reason)
                 
     except Exception as e:
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
-        return False
+        # 🆕 尝试备用方法
+        return close_position_fallback(symbol, position, reason)
 
 def verify_position_closed(symbol: str, expected_size: float, side: str) -> bool:
     """验证持仓是否已平"""
@@ -3225,30 +3066,58 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
     """
     创建订单并同时设置止损止盈 - 使用OKX新的attachAlgoOrds API
     支持市价单和限价单
-    
-    Args:
-        symbol: 交易品种
-        side: 交易方向 'buy' 或 'sell'
-        amount: 订单数量
-        order_type: 订单类型 'market' 或 'limit'
-        limit_price: 限价单价格（仅限价单需要）
-        stop_loss_price: 止损价格
-        take_profit_price: 止盈价格
-        
-    Returns:
-        API响应结果
     """
     config = SYMBOL_CONFIGS[symbol]
     try:
+        # 🆕 新增：检查仓位是否有效
+        min_amount = getattr(config, 'min_amount', 0.01)
+        if amount < min_amount:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 仓位大小 {amount:.4f} 小于最小交易量 {min_amount}，跳过开仓")
+            return None
+        
         inst_id = get_correct_inst_id(symbol)
         
+        # 🆕 修复：根据品种调整合约数量精度
+        # 获取品种特定的最小交易单位
+        min_amount = getattr(config, 'min_amount', 0.01)
+        
+        # 🆕 特殊处理：某些品种要求整数张合约
+        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
+        base_currency = get_base_currency(symbol)
+        
+        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH']:
+            # 这些品种要求整数张合约
+            adjusted_amount = max(1, int(round(amount)))  # 至少1张，四舍五入到整数
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 整数张合约调整 - 从 {amount:.4f} 调整为 {adjusted_amount} 张")
+        else:
+            # 其他品种使用原有的精度调整
+            if min_amount > 0:
+                # 向下取整到最小交易单位的整数倍
+                adjusted_amount = (amount // min_amount) * min_amount
+                if adjusted_amount < min_amount:
+                    adjusted_amount = min_amount
+            else:
+                adjusted_amount = amount
+        
+        # 确保调整后的数量不小于最小交易量
+        adjusted_amount = max(adjusted_amount, min_amount)
+        
+        # 如果调整后的数量与原数量不同，记录警告
+        if abs(adjusted_amount - amount) > 0.001:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 订单数量从 {amount:.4f} 调整为 {adjusted_amount:.4f} 以满足交易所精度要求")
+        
+        # 🆕 额外检查：确保调整后的数量仍然有效
+        if adjusted_amount <= 0:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 调整后的合约数量无效: {adjusted_amount}")
+            return None
+
         # 基础参数
         params = {
             'instId': inst_id,
             'tdMode': config.margin_mode,
             'side': side,
             'ordType': order_type,
-            'sz': str(amount),
+            'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
         }
         
         # 🆕 修复：确保价格参数是字符串格式
@@ -3275,7 +3144,7 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
                     'slTriggerPx': sl_price_str,
                     'slOrdPx': '-1',  # 市价止损
                     'algoOrdType': 'conditional',  # 条件单类型
-                    'sz': str(amount),  # 止损止盈数量与主订单相同
+                    'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
                     'side': 'buy' if side == 'sell' else 'sell'  # 止损止盈方向与开仓方向相反
                 }
             ]
@@ -3284,54 +3153,16 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         order_type_name = "市价单" if order_type == 'market' else "限价单"
         log_order_params(f"{order_type_name}带止损止盈", params, "create_order_with_sl_tp")
         
-        # 🆕 修复：安全地格式化日志，处理字符串和数字类型
-        if order_type == 'market':
-            logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行市价{side}开仓: {amount} 张")
-        else:
-            # 安全格式化限价单价格
-            try:
-                if isinstance(limit_price, str):
-                    price_display = limit_price
-                else:
-                    price_display = f"{limit_price:.2f}"
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行限价{side}开仓: {amount} 张 @ {price_display}")
-            except Exception as format_error:
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行限价{side}开仓: {amount} 张 @ {limit_price}")
+        logger.log_info(f"🎯 {get_base_currency(symbol)}: 执行{order_type_name}{side}开仓: {adjusted_amount:.4f} 张")
         
-        # 🆕 修复：安全地格式化止损止盈价格日志
         if stop_loss_price is not None:
-            try:
-                if isinstance(stop_loss_price, str):
-                    sl_display = stop_loss_price
-                else:
-                    sl_display = f"{stop_loss_price:.2f}"
-                logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {sl_display}")
-            except Exception:
-                logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {stop_loss_price}")
+            logger.log_info(f"🛡️ {get_base_currency(symbol)}: 止损价格: {stop_loss_price:.2f}")
                 
         if take_profit_price is not None:
-            try:
-                if isinstance(take_profit_price, str):
-                    tp_display = take_profit_price
-                else:
-                    tp_display = f"{take_profit_price:.2f}"
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {tp_display}")
-            except Exception:
-                logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {take_profit_price}")
-        
-        # 打印原始请求数据（仅限价单详细打印）
-        if order_type == 'limit':
-            logger.log_info(f"🚀 {get_base_currency(symbol)}: 原始请求数据:")
-            logger.log_info(f"   接口: POST /api/v5/trade/order")
-            logger.log_info(f"   完整参数: {json.dumps(params, indent=2, ensure_ascii=False)}")
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 止盈价格: {take_profit_price:.2f}")
         
         # 使用CCXT的私有API方法调用/trade/order接口
         response = exchange.private_post_trade_order(params)
-        
-        # 打印原始响应数据（仅限价单详细打印）
-        if order_type == 'limit':
-            logger.log_info(f"📥 {get_base_currency(symbol)}: 原始响应数据:")
-            logger.log_info(f"   完整响应: {json.dumps(response, indent=2, ensure_ascii=False)}")
         
         log_api_response(response, "create_order_with_sl_tp")
         
@@ -3347,10 +3178,10 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         logger.log_error(f"order_creation_exception_{get_base_currency(symbol)}", f"{order_type_name}开仓失败: {str(e)}")
         import traceback
         logger.log_error(f"order_traceback_{get_base_currency(symbol)}", f"详细错误信息: {traceback.format_exc()}")
-        return None
-    
+        return None    
+
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
-    """执行智能交易 - 改进版，使用动态盈亏比"""
+    """执行智能交易 - 添加整体仓位管理"""
     global position
     config = SYMBOL_CONFIGS[symbol]
     
@@ -3358,40 +3189,143 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     if signal_data['signal'] == 'HOLD':
         logger.log_info(f"⏸️ {get_base_currency(symbol)}: 保持观望，不执行交易")
         return
-
-    # 🆕 步骤1: 计算动态盈亏比阈值
-    dynamic_min_rr = calculate_dynamic_risk_reward_threshold(symbol, price_data)
-    logger.log_info(f"🎯 {get_base_currency(symbol)}: 使用动态盈亏比阈值: {dynamic_min_rr:.2f}")
-
-    current_price = price_data['price']
-    side = 'long' if signal_data['signal'] == 'BUY' else 'short'
-
-    # 🆕 步骤2: 计算自适应止损
-    stop_loss_price = calculate_adaptive_stop_loss(symbol, side, current_price, price_data)
-
-    # 🆕 步骤3: 计算现实止盈
-    trend_strength = price_data.get('trend_strength', 'CONSOLIDATION')
-    tp_result = calculate_aggressive_take_profit(
-        symbol, side, current_price, stop_loss_price, 
-        price_data, dynamic_min_rr, trend_strength
-    )
-
-    take_profit_price = tp_result['take_profit']
-    actual_rr = tp_result['actual_risk_reward']
-
-    # 🆕 修复：添加价格关系验证
-    if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, side):
-        logger.log_error(f"price_validation_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
+    
+    # 验证价格数据完整性
+    if not price_data or 'price' not in price_data:
+        logger.log_error(f"invalid_price_data_{get_base_currency(symbol)}", "价格数据无效")
         return
 
-    # 🆕 修复：添加盈亏比有效性检查
-    if actual_rr <= 0:
-        logger.log_error(f"invalid_rr_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 无效盈亏比 {actual_rr:.2f}，放弃开仓")
+    current_price = price_data['price']
+    signal_side = 'long' if signal_data['signal'] == 'BUY' else 'short'
+    current_position = get_current_position(symbol)
+    
+    # 🆕 修复：始终使用信号方向来计算止损止盈
+    position_side = signal_side  # 始终使用信号方向
+    
+    # 🆕 修复：正确判断加仓条件
+    is_scaling = current_position and current_position['size'] > 0 and current_position['side'] == signal_side
+    
+    # 🆕 修复：如果持仓方向与信号方向相反，应该先平仓
+    if current_position and current_position['side'] != signal_side:
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 持仓方向{current_position['side']}与信号方向{signal_side}相反，先平仓")
+        close_success = close_position_safely(symbol, current_position, f"反向信号平仓: {signal_side}")
+        if close_success:
+            # 平仓成功后，重置持仓状态
+            current_position = None
+            reset_scaling_status(symbol)
+        else:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开仓")
+            return
+    
+    # 🆕 现在使用正确的方向计算止损止盈
+    stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
+    
+    # 🆕 修复：预先定义变量
+    tp_result = None
+    actual_rr = 0
+    dynamic_min_rr = 1.2
+    
+    if is_scaling:
+        try:
+            # 🆕 加仓时：获取持仓历史，计算基于整体仓位的止损止盈
+            position_history = get_position_history(symbol)
+            overall_levels = calculate_overall_stop_loss_take_profit(
+                symbol, position_history, current_price, price_data
+            )
+            
+            stop_loss_price = overall_levels['stop_loss']
+            take_profit_price = overall_levels['take_profit']
+            
+            logger.log_info(f"📊 {get_base_currency(symbol)}: 加仓整体止损止盈 - 平均成本:{overall_levels['weighted_entry']:.2f}, 总仓位:{overall_levels['total_size']}张")
+            
+            # 🆕 修复：在加仓情况下计算 actual_rr
+            if position_side == 'long':
+                risk = current_price - stop_loss_price
+                reward = take_profit_price - current_price
+            else:
+                risk = stop_loss_price - current_price
+                reward = current_price - take_profit_price
+            actual_rr = reward / risk if risk > 0 else 0
+            
+            # 🆕 修复：创建模拟的 tp_result
+            tp_result = {
+                'is_acceptable': True,  # 加仓时默认接受
+                'actual_risk_reward': actual_rr
+            }
+            
+        except Exception as e:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 加仓止损计算失败: {str(e)}")
+            is_scaling = False
+    
+    if not is_scaling:
+        # 首次开仓或非加仓：使用原有逻辑
+        stop_loss_price = calculate_adaptive_stop_loss(symbol, position_side, current_price, price_data)
+        
+        # 动态盈亏比
+        trend_strength = price_data['trend_strength']
+        
+        tp_result = calculate_aggressive_take_profit(
+            symbol, position_side, current_price, stop_loss_price, 
+            price_data, dynamic_min_rr, trend_strength
+        )
+        take_profit_price = tp_result['take_profit']
+        actual_rr = tp_result['actual_risk_reward']
+
+    # 🆕 修复：添加详细的价格关系验证日志
+    logger.log_info(f"🔍 {get_base_currency(symbol)}: 价格关系验证 - 方向:{position_side}, 入场:{current_price:.2f}, 止损:{stop_loss_price:.2f}, 止盈:{take_profit_price:.2f}")
+    
+    if not validate_price_relationship(current_price, stop_loss_price, take_profit_price, position_side):
+        logger.log_error(f"price_validation_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 价格关系验证失败，放弃开仓")
+        
+        # 🆕 尝试自动修正价格
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 尝试自动修正价格...")
+        if position_side == 'long':
+            # 多头修正
+            corrected_stop_loss = current_price * 0.98
+            corrected_take_profit = current_price * 1.03
+        else:
+            # 空头修正
+            corrected_stop_loss = current_price * 1.02
+            corrected_take_profit = current_price * 0.97
+        
+        if validate_price_relationship(current_price, corrected_stop_loss, corrected_take_profit, position_side):
+            stop_loss_price = corrected_stop_loss
+            take_profit_price = corrected_take_profit
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 价格自动修正成功")
+            
+            # 🆕 修复：价格修正后重新计算 actual_rr 和 tp_result
+            if position_side == 'long':
+                risk = current_price - stop_loss_price
+                reward = take_profit_price - current_price
+            else:
+                risk = stop_loss_price - current_price
+                reward = current_price - take_profit_price
+            actual_rr = reward / risk if risk > 0 else 0
+            
+            # 🆕 修复：重新创建 tp_result
+            tp_result = {
+                'is_acceptable': actual_rr >= dynamic_min_rr * 0.8,  # 使用宽松条件
+                'actual_risk_reward': actual_rr,
+                'take_profit': take_profit_price
+            }
+            
+        else:
+            logger.log_error(f"price_correction_failed_{get_base_currency(symbol)}", "价格自动修正失败")
+            return
+
+    # 🆕 修复：添加安全性检查
+    if tp_result is None:
+        logger.log_error(f"tp_result_missing_{get_base_currency(symbol)}", "❌ tp_result 未定义，放弃开仓")
+        return
+        
+    if 'actual_risk_reward' not in tp_result or tp_result['actual_risk_reward'] <= 0:
+        logger.log_error(f"invalid_rr_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 无效盈亏比 {tp_result.get('actual_risk_reward', '未定义')}，放弃开仓")
         return
     
     # 🆕 步骤4: 放宽接受条件
-    if not tp_result['is_acceptable']:
+    if not tp_result.get('is_acceptable', True):
         # 即使不满足完整阈值，如果盈亏比合理也可以考虑
+        actual_rr = tp_result.get('actual_risk_reward', 0)
         if actual_rr >= 0.8:  # 最低可接受盈亏比
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 盈亏比{actual_rr:.2f}略低于阈值{dynamic_min_rr:.2f}，但仍可接受")
         else:
@@ -3401,6 +3335,17 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     # 计算仓位
     position_size = calculate_enhanced_position(symbol, signal_data, price_data, get_current_position(symbol))
 
+    # 🆕 新增：严格检查仓位有效性
+    min_amount = getattr(config, 'min_amount', 0.01)
+    if position_size < min_amount:
+        logger.log_warning(f"⏸️ {get_base_currency(symbol)}: 计算仓位 {position_size:.4f} 小于最小交易量 {min_amount}，放弃开仓")
+        return
+    
+    # 🆕 资金充足性检查
+    if not check_sufficient_margin(symbol, position_size, current_price):
+        logger.log_error("资金不足",f"❌ {get_base_currency(symbol)}: 放弃开仓")
+        return
+    
     # 记录交易分析
     trade_analysis = f"""
     🎯 {get_base_currency(symbol)} 改进版交易分析:
@@ -3411,7 +3356,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     ├── 实际盈亏比: {actual_rr:.2f}:1
     ├── 目标阈值: {dynamic_min_rr:.2f}:1
     ├── 仓位大小: {position_size:.2f}张
-    └── 状态: {'✅ 满足开仓条件' if tp_result['is_acceptable'] else '⚠️ 条件放宽'}
+    └── 状态: {'✅ 满足开仓条件' if tp_result.get('is_acceptable', False) else '⚠️ 条件放宽'}
     """
     logger.log_info(trade_analysis)
 
@@ -3467,7 +3412,16 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
             if order_result and order_result.get('code') == '0':
                 order_id = order_result['data'][0]['ordId']
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交-{position_size:.2f}张, 订单ID: {order_id}")  
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交-{position_size:.2f}张, 订单ID: {order_id}")
+                # 🆕 记录开仓操作到持仓历史
+                add_to_position_history(symbol, {
+                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
+                    'size': position_size,
+                    'entry_price': current_price,
+                    'action': 'open',
+                    'order_id': order_id,
+                    'signal_confidence': signal_data['confidence']
+                })
             else:
                 logger.log_error(f"buy_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
                 return
@@ -3497,6 +3451,15 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
             if order_result and order_result.get('code') == '0':
                 order_id = order_result['data'][0]['ordId']
                 logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开空仓提交-{position_size:.2f}张, 订单ID: {order_id}")  
+                # 🆕 记录开仓操作到持仓历史
+                add_to_position_history(symbol, {
+                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
+                    'size': position_size,
+                    'entry_price': current_price,
+                    'action': 'open',
+                    'order_id': order_id,
+                    'signal_confidence': signal_data['confidence']
+                })
             else:
                 logger.log_error(f"sell_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开空仓提交失败")
                 return
@@ -3506,6 +3469,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
 
         import traceback
         traceback.print_exc()
+
 
 def filter_signal(signal_data, price_data):
     """过滤信号 - 增强版，考虑盈亏比因素"""
@@ -3531,6 +3495,7 @@ def filter_signal(signal_data, price_data):
     return signal_data
 
 
+# 🆕 --- 核心修改：升级主循环以包含持仓管理 ---
 def trading_bot(symbol: str):
     """
     主要交易逻辑循环 - 现在接受 symbol 参数
@@ -3547,6 +3512,9 @@ def trading_bot(symbol: str):
     logger.log_info(f"=====================================")
 
     try:
+        # 添加执行时间记录
+        start_time = time.time()
+
         # 1. 获取市场和价格数据 (使用 symbol)
         df, price_data = fetch_ohlcv(symbol)
 
@@ -3557,29 +3525,97 @@ def trading_bot(symbol: str):
         # 2. 获取当前持仓 (使用 symbol)
         current_position = get_current_position(symbol)
 
-        # 3. 使用DeepSeek分析市场
+        # 记录数据状态
+        data_status = f"数据: {len(df)}条K线 | 价格: {price_data['price']:.2f}"
+        if current_position:
+            data_status += f" | 持仓: {current_position['side']} {current_position['size']}张"
+        logger.log_info(f"📊 {get_base_currency(symbol)}: {data_status}")
+
+        # 3. [新] 持仓管理模块
+        # 如果有持仓，优先处理持仓（止盈、移动止损、安全检查）
+        if current_position:
+            logger.log_info(f"ℹ️ {get_base_currency(symbol)}: 检测到持仓 {current_position['side']} {current_position['size']}张，进入持仓管理模式...")
+
+            # 3a. 检查多级止盈
+            # position_manager 是在文件全局范围创建的
+            profit_signal = position_manager.check_profit_taking(symbol, current_position, price_data)
+            
+            if profit_signal:
+                logger.log_info(f"💰 {get_base_currency(symbol)}: 触发多级止盈: {profit_signal['description']}")
+                # 执行部分平仓
+                execute_profit_taking(symbol, current_position, profit_signal, price_data)
+                # 标记此级别已执行
+                position_manager.mark_level_executed(symbol, current_position, profit_signal['level'])
+                
+                # 执行完止盈后，仓位发生变化，结束本轮循环
+                # 等待下一个tick（60秒后）再用新仓位和新价格重新评估
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 部分止盈完成，结束本轮。")
+                return
+
+            # 3b. 检查移动止损 (如果没有触发多级止盈)
+            trailing_stop_activated = setup_trailing_stop(symbol, current_position, price_data)
+            if trailing_stop_activated:
+                logger.log_info(f"🛡️ {get_base_currency(symbol)}: 移动止损已激活或更新。")
+                # 移动止损已设置，本轮管理结束
+                # 我们不 'return'，因为我们还想在下面检查止损单是否丢失
+            
+            # 3c. [鲁棒性检查] 检查并设置缺失的止损/止盈
+            # 这可以防止因重启、API错误、或移动止损操作不当导致持仓"裸奔"
+            # 它会智能地补上缺失的止损单或止盈单
+            logger.log_info(f"🛡️ {get_base_currency(symbol)}: 运行安全检查，确保止损止盈单在交易所存在...")
+            check_and_set_stop_loss(symbol, current_position, price_data)
+
+            # 3d. [可选] 动态调整止盈 (如果需要更激进的策略)
+            # adjust_take_profit_dynamically(symbol, current_position, price_data)
+
+        # --- 持仓管理结束 ---
+
+        # 4. 使用DeepSeek分析市场
+        # (如果上面没有持仓，或持仓管理未返回，则继续获取新信号)
         signal_data = analyze_with_deepseek(symbol, price_data)
         
         if not signal_data:
             logger.log_warning(f"❌ Could not get signal for {get_base_currency(symbol)}.")
             return
 
-        # 4. 过滤信号
+        # 5. 过滤信号
         filtered_signal = filter_signal(signal_data, price_data)
         
-        # 5. 添加到历史记录
+        # 6. 添加到历史记录 (轻量级数据)
+        light_price_data = price_data.copy()
+        if 'full_data' in light_price_data:
+            del light_price_data['full_data'] # 优化内存
+            
         add_to_signal_history(symbol, filtered_signal)
-        add_to_price_history(symbol, price_data)
+        add_to_price_history(symbol, light_price_data)
 
-        # 6. 记录信号
+        # 7. 记录信号
         logger.log_info(f"📊 {get_base_currency(symbol)} 交易信号: {filtered_signal['signal']} | 信心: {filtered_signal['confidence']}")
         logger.log_info(f"📝 原因: {filtered_signal['reason']}")
 
-        # 7. 执行智能交易
+        # 8. 执行智能交易
+        # (此函数负责开仓、反向平仓、或在持仓时加仓)
         execute_intelligent_trade(symbol, filtered_signal, price_data)
+
+        # 记录执行时间
+        execution_time = time.time() - start_time
+        logger.log_info(f"⏱️ {get_base_currency(symbol)}: 本轮执行完成，耗时 {execution_time:.2f}秒")
+        
+        # 在交易循环的适当位置添加监控
+        monitor_scaling_status(symbol)
         
     except Exception as e:
         logger.log_error(f"trading_bot_{get_base_currency(symbol)}", str(e))
+# ✅ --- 修改结束 ---
+        import traceback
+        logger.log_error(f"trading_bot_traceback_{get_base_currency(symbol)}", traceback.format_exc())
+
+def signal_handler(signum, frame):
+    """信号处理函数"""
+    logger.log_warning(f"🛑 接收到信号 {signum}，程序退出")
+    cleanup_resources()
+    sys.exit(0)
+
 
 def health_check(symbol: str):
     """Check the health of the system for specific symbol."""
@@ -3630,122 +3666,184 @@ def health_check(symbol: str):
     
     return overall_status
 
-def close_position_due_to_trend_reversal(symbol: str, position: dict, price_data: dict, reason: str):
-    """因趋势反转而平仓"""
+def close_position_fallback(symbol: str, position: dict, reason: str) -> bool:
+    """备用平仓方法 - 使用不同的API方式"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        order_tag = create_order_tag()
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 使用备用平仓方法 - {reason}")
+        
         position_size = position['size']
+        position_side = position['side']
+        margin_mode = position.get('margin_mode', config.margin_mode)
         
-        logger.log_warning(f"🔄 执行趋势反转平仓: {reason}")
+        # 🆕 修复：根据保证金模式设置posSide
+        close_params = {
+            'tdMode': margin_mode,
+            'reduceOnly': True,
+            'tag': create_order_tag()
+        }
         
-        if position['side'] == 'long':
-            # 平多仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details(symbol,'sell', position_size, 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
+        if margin_mode == 'isolated':
+            close_params['posSide'] = position_side
+        else:
+            close_params['posSide'] = 'net'
+        
+        # 🆕 方法1: 使用标准CCXT平仓
+        try:
+            if position_side == 'long':
+                order = exchange.create_order(
                     config.symbol,
+                    'market',
                     'sell',
                     position_size,
-                    params=close_params
+                    None,
+                    close_params
                 )
-        else:  # short
-            # 平空仓
-            close_params = {
-                'reduceOnly': True,
-                'tag': order_tag
-            }
-            log_order_params("趋势反转平仓", close_params, "close_position_due_to_trend_reversal")
-            log_perpetual_order_details(symbol,'buy', position_size, 'market', reduce_only=True)
-            
-            if not config.test_mode:
-                exchange.create_market_order(
+            else:
+                order = exchange.create_order(
                     config.symbol,
+                    'market', 
                     'buy',
                     position_size,
-                    params=close_params
+                    None,
+                    close_params
                 )
+            
+            if order and order.get('id'):
+                logger.log_info(f"✅ {get_base_currency(symbol)}: 备用平仓方法成功，订单ID: {order['id']}")
+                reset_scaling_status(symbol)
+                return True
+                
+        except Exception as e1:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 备用平仓方法失败: {str(e1)}")
         
-        logger.log_info("✅ 趋势反转平仓执行完成")
-        return False  # 表示持仓已平
+        return False
         
     except Exception as e:
-        logger.log_error("trend_reversal_close", f"趋势反转平仓失败: {str(e)}")
-        return True  # 平仓失败，保持持仓
+        logger.log_error(f"close_position_fallback_{get_base_currency(symbol)}", f"备用平仓方法异常: {str(e)}")
+        return False
 
-def close_position_with_reason(symbol: str, position: dict, reason: str):
-    """根据原因平仓 - 修复版本"""
+def close_position_with_reason(symbol: str, position: dict, reason: str) -> bool:
+    """根据原因平仓 - 增强版本"""
     config = SYMBOL_CONFIGS[symbol]
     try:
-        # 🆕 首先验证持仓是否真实存在
-        if not verify_position_exists(symbol, position):
-            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓验证失败，跳过平仓操作")
-            return True  # 返回True表示处理完成（虽然没真正平仓）
+        # 🆕 重新获取最新持仓信息，避免数据过时
+        current_position = get_current_position(symbol)
+        if not current_position:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 实际无持仓，无需平仓")
+            return True
+            
+        # 🆕 验证持仓方向是否匹配
+        if current_position['side'] != position['side']:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓方向不匹配，重新获取持仓信息")
+            position = current_position
         
-        order_tag = create_order_tag()
-        position_size = position['size']
-        
-        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason}")
-        
+        # 🆕 验证持仓数量
+        position_size = current_position['size']
+        if position_size <= 0:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 持仓数量为0，无需平仓")
+            return True
+            
+        logger.log_warning(f"🔄 {get_base_currency(symbol)}: 执行平仓 - {reason} - {position_size}张")
+
+        # 🆕 记录平仓前的持仓信息到历史
+        add_to_position_history(symbol, {
+            'side': position['side'],
+            'size': position_size,
+            'entry_price': position['entry_price'],
+            'action': 'close',
+            'close_reason': reason
+        })
+
+        # 🆕 取消该品种的所有策略委托订单
+        logger.log_info(f"🔄 {get_base_currency(symbol)}: 平仓前取消所有策略委托订单")
+        cancel_existing_algo_orders(symbol)
+        time.sleep(1)  # 等待取消操作完成
+
         if position['side'] == 'long':
             # 平多仓
             close_params = {
                 'reduceOnly': True,
-                'tag': order_tag
+                'tag': create_order_tag()
             }
-            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            
+            # 记录订单参数
+            log_order_params("平多仓", close_params, "close_position_with_reason")
             log_perpetual_order_details(symbol, 'sell', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
-                # 🆕 添加异常处理
                 try:
-                    exchange.create_market_order(
+                    # 🆕 使用更安全的订单创建方式
+                    order = exchange.create_order(
                         config.symbol,
+                        'market',
                         'sell',
                         position_size,
-                        params=close_params
+                        None,
+                        close_params
                     )
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功")
+                    
+                    # 🆕 验证订单是否创建成功
+                    if order and order.get('id'):
+                        reset_scaling_status(symbol)
+                        logger.log_info(f"✅ {get_base_currency(symbol)}: 平多仓订单提交成功，ID: {order['id']}")
+                        
+                        # 等待并验证平仓结果
+                        return verify_position_closed(symbol, position_size, 'long')
+                    else:
+                        logger.log_error(f"❌ {get_base_currency(symbol)}: 平多仓订单提交失败，响应: {order}")
+                        return False
+                        
                 except Exception as order_error:
                     logger.log_error(f"close_long_position_{get_base_currency(symbol)}", 
-                                   f"平多仓失败: {str(order_error)}")
-                    return False
+                                   f"平多仓异常: {str(order_error)}")
+                    # 🆕 尝试备用方法
+                    return close_position_fallback(symbol, position, reason)
+            else:
+                logger.log_info("测试模式 - 模拟平多仓成功")
+                return True
+                
         else:  # short
             # 平空仓
             close_params = {
                 'reduceOnly': True,
-                'tag': order_tag
+                'tag': create_order_tag()
             }
-            log_order_params("趋势反转平仓", close_params, "close_position_with_reason")
+            
+            log_order_params("平空仓", close_params, "close_position_with_reason")
             log_perpetual_order_details(symbol, 'buy', position_size, 'market', reduce_only=True)
             
             if not config.test_mode:
                 try:
-                    exchange.create_market_order(
+                    order = exchange.create_order(
                         config.symbol,
+                        'market',
                         'buy',
                         position_size,
-                        params=close_params
+                        None,
+                        close_params
                     )
-                    logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功")
+                    
+                    if order and order.get('id'):
+                        reset_scaling_status(symbol)
+                        logger.log_info(f"✅ {get_base_currency(symbol)}: 平空仓订单提交成功，ID: {order['id']}")
+                        return verify_position_closed(symbol, position_size, 'short')
+                    else:
+                        logger.log_error(f"❌ {get_base_currency(symbol)}: 平空仓订单提交失败，响应: {order}")
+                        return False
+                        
                 except Exception as order_error:
                     logger.log_error(f"close_short_position_{get_base_currency(symbol)}", 
-                                   f"平空仓失败: {str(order_error)}")
-                    return False
-        
-        logger.log_info(f"✅ {get_base_currency(symbol)}: 平仓执行完成")
-        return True
-        
+                                   f"平空仓异常: {str(order_error)}")
+                    return close_position_fallback(symbol, position, reason)
+            else:
+                logger.log_info("测试模式 - 模拟平空仓成功")
+                return True
+                
     except Exception as e:
         logger.log_error(f"close_position_{get_base_currency(symbol)}", f"平仓失败: {str(e)}")
-        return False
-
+        # 🆕 尝试备用方法
+        return close_position_fallback(symbol, position, reason)
 
 def check_existing_positions_on_startup():
     """启动时检查所有交易品种的现有持仓 - 修复版本"""
@@ -3754,7 +3852,7 @@ def check_existing_positions_on_startup():
     for symbol, config in SYMBOL_CONFIGS.items():
         try:
             logger.log_info(f"📊 检查 {get_base_currency(symbol)} 的持仓状态...")
-            
+
             # 获取当前持仓
             current_position = get_current_position(symbol)
             
@@ -3905,6 +4003,50 @@ def log_performance_metrics(symbol: str):
     }
     logger.log_performance(performance_metrics)
 
+
+def analyze_position_history(symbol: str) -> dict:
+    """分析持仓历史，提供统计数据"""
+    try:
+        history = get_position_history(symbol)
+        if not history:
+            return {'total_trades': 0, 'message': '无历史数据'}
+        
+        # 统计信息
+        total_trades = len(history)
+        open_trades = [h for h in history if h.get('action') in ['open', 'add']]
+        close_trades = [h for h in history if h.get('action') in ['close', 'partial_close']]
+        
+        # 计算盈利情况
+        profitable_trades = 0
+        total_profit = 0
+        
+        for trade in close_trades:
+            if trade.get('realized_pnl', 0) > 0:
+                profitable_trades += 1
+            total_profit += trade.get('realized_pnl', 0)
+        
+        win_rate = profitable_trades / len(close_trades) if close_trades else 0
+        
+        analysis = {
+            'total_trades': total_trades,
+            'open_trades': len(open_trades),
+            'closed_trades': len(close_trades),
+            'win_rate': f"{win_rate:.1%}",
+            'total_profit': total_profit,
+            'avg_profit_per_trade': total_profit / len(close_trades) if close_trades else 0,
+            'recent_activity': history[-5:] if len(history) >= 5 else history
+        }
+        
+        logger.log_info(f"📈 {get_base_currency(symbol)} 持仓历史分析: "
+                       f"总交易{total_trades}次, 胜率{analysis['win_rate']}, "
+                       f"总盈利{total_profit:.2f} USDT")
+        
+        return analysis
+        
+    except Exception as e:
+        logger.log_error(f"analyze_position_history_{get_base_currency(symbol)}", f"持仓历史分析失败: {str(e)}")
+        return {'error': str(e)}
+
 def main():
     """
     主程序入口 - 支持多交易品种
@@ -3916,7 +4058,16 @@ def main():
     # print("所有可用的私有API方法:")
     # private_methods = [method for method in dir(exchge) if method.startswith('private')]
     # for method in private_methods:
+
     #     print(method)
+    # 添加信号处理
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # 🆕 加载持仓历史数据
+    logger.log_info("📂 加载历史数据...")
+    load_position_history()
 
     # 1. 动态加载交易品种列表
     symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
@@ -3988,6 +4139,7 @@ def main():
         logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
+
     # 🆕 启动时持仓检查
     check_existing_positions_on_startup()      
 
@@ -4006,70 +4158,83 @@ def main():
     last_perf_log = 0
     perf_log_interval = first_config.perf_log_interval
 
-    while True:
-        try:
-            current_time = time.time()
-            
-            # Health check - 修复这里
-            if current_time - last_health_check >= health_check_interval:
-                logger.log_info("🔍 Running scheduled health check...")
-                
-                # 对每个交易品种执行健康检查
-                health_ok = True
-                for symbol in SYMBOL_CONFIGS.keys():
-                    if not health_check(symbol):
-                        health_ok = False
-                        break
-                
-                if not health_ok:
-                    consecutive_errors += 1
-                    # 安全地获取配置限制
-                    try:
-                        max_errors = first_config.max_consecutive_errors
-                    except (AttributeError, TypeError):
-                        max_errors = 5  # 默认值
-                    
-                    if consecutive_errors >= max_errors:
-                        logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                        break
-                else:
-                    consecutive_errors = 0
-                last_health_check = current_time
-        
-            # Configuration reload check - every 5 minutes
-            if current_time - last_config_check >= config_check_interval:
-                last_config_check = current_time
+    # 在定时任务中添加持仓历史分析
+    last_position_analysis = 0
+    position_analysis_interval = 3600  # 每小时分析一次
 
-            # Run trading bot for all symbols
-            for symbol in symbols_to_trade:
-                trading_bot(symbol)
-            
-            # Log performance for each symbol
-            for symbol in symbols_to_trade:
-                log_performance_metrics(symbol)
-
-            # Wait for next cycle
-            time.sleep(60)
-        
-        except KeyboardInterrupt:
-            logger.log_warning("\n🛑 User interrupted the program.")
-            break
-
-        except Exception as e:
-            logger.log_error("main_loop", f"Error: {str(e)}")
-            consecutive_errors += 1
-    
-            # 安全地获取配置限制
+    try:
+        while True:
             try:
-                max_errors = first_config.max_consecutive_errors
-            except (AttributeError, TypeError):
-                max_errors = 5  # 默认值
+                current_time = time.time()
                 
-            if consecutive_errors >= max_errors:
-                logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                break
-            time.sleep(60)
+                # 定期分析持仓历史
+                if current_time - last_position_analysis >= position_analysis_interval:
+                    for symbol in symbols_to_trade:
+                        analyze_position_history(symbol)
+                    last_position_analysis = current_time
+                    
+                # Health check - 修复这里
+                if current_time - last_health_check >= health_check_interval:
+                    logger.log_info("🔍 Running scheduled health check...")
+                    
+                    # 对每个交易品种执行健康检查
+                    health_ok = True
+                    for symbol in SYMBOL_CONFIGS.keys():
+                        if not health_check(symbol):
+                            health_ok = False
+                            break
+                    
+                    if not health_ok:
+                        consecutive_errors += 1
+                        # 安全地获取配置限制
+                        try:
+                            max_errors = first_config.max_consecutive_errors
+                        except (AttributeError, TypeError):
+                            max_errors = 5  # 默认值
+                        
+                        if consecutive_errors >= max_errors:
+                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                            break
+                    else:
+                        consecutive_errors = 0
+                    last_health_check = current_time
+            
+                # Configuration reload check - every 5 minutes
+                if current_time - last_config_check >= config_check_interval:
+                    last_config_check = current_time
 
+                # Run trading bot for all symbols
+                for symbol in symbols_to_trade:
+                    trading_bot(symbol)
+                
+                # Log performance for each symbol
+                for symbol in symbols_to_trade:
+                    log_performance_metrics(symbol)
+
+                # Wait for next cycle
+                time.sleep(60)
+            
+            except KeyboardInterrupt:
+                logger.log_warning("\n🛑 User interrupted the program.")
+                break
+
+            except Exception as e:
+                logger.log_error("main_loop", f"Error: {str(e)}")
+                consecutive_errors += 1
+                # 安全地获取配置限制
+                try:
+                    max_errors = first_config.max_consecutive_errors
+                except (AttributeError, TypeError):
+                    max_errors = 5  # 默认值
+                    
+                if consecutive_errors >= max_errors:
+                    logger.log_warning("🚨 Too many consecutive errors, exiting.")
+                    break
+                time.sleep(60)
+
+    finally:
+        cleanup_resources()
+        logger.log_info("👋 程序退出")
 
 if __name__ == "__main__":
     main()
