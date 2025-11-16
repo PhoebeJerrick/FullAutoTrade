@@ -486,6 +486,3 @@ def print_version_banner(config: 'TradingConfig'): # 接受一个 TradingConfig 
     print(f"📅 Build Time: {version_info['build_time']}")
     print(f"🌿 Branch: {version_info['branch']}")
     print("=" * 50)
-
-# 在模块加载时打印版本信息
-print_version_banner()

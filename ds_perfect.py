@@ -20,7 +20,7 @@ import requests
 from datetime import datetime, timedelta
 
 # Trading parameter configuration - combining advantages of both versions
-from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS # ✅ 仅导入类和字典
+from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS, print_version_banner # ✅ 仅导入类和字典
 # Global logger
 from trade_logger import logger
 
@@ -4480,6 +4480,11 @@ def main():
         logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
+    # 所有的配置实例都带有相同的版本信息
+    version_config = SYMBOL_CONFIGS[symbols_to_trade[0]]
+    
+    # ✅ 正确的调用方式
+    print_version_banner(version_config)
 
     # 🆕 启动时持仓检查
     check_existing_positions_on_startup()      
