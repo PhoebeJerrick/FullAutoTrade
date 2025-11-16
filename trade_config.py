@@ -14,11 +14,11 @@ VERSION_CONFIG = {
 # --- NEW: Multi-Symbol Configuration Structure ---
 MULTI_SYMBOL_CONFIGS = {
     # 默认/参考配置 (BTC)
-    'BTC/USDT:USDT': {
-        'leverage': int(os.getenv('BTC_LEVERAGE', 50)),
-        'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
-        'max_position_ratio': 10,
-    },
+    # 'BTC/USDT:USDT': {
+    #     'leverage': int(os.getenv('BTC_LEVERAGE', 50)),
+    #     'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
+    #     'max_position_ratio': 10,
+    # },
     # # ETH 配置
     # 'ETH/USDT:USDT': {
     #     'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
@@ -32,11 +32,11 @@ MULTI_SYMBOL_CONFIGS = {
     #     'max_position_ratio': 5,
     # },
     # LTC 配置 (示例)
-    'LTC/USDT:USDT': {
-        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
-        'max_position_ratio': 5,
-    },
+    # 'LTC/USDT:USDT': {
+    #     'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
+    #     'max_position_ratio': 5,
+    # },
     # # BCH 配置 (示例)
     # 'BCH/USDT:USDT': {
     #     'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
@@ -68,26 +68,31 @@ MULTI_SYMBOL_CONFIGS = {
         'max_position_ratio': 5,
     },
     
-    'UNI/USDT:USDT': {
-        # 警告：请根据您的策略修改这些值
-        'leverage': int(os.getenv('UNI_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('UNI_BASE_USDT_AMOUNT', 80)),
-        'max_position_ratio': 7,
-    },
+    # 'UNI/USDT:USDT': {
+    #     # 警告：请根据您的策略修改这些值
+    #     'leverage': int(os.getenv('UNI_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('UNI_BASE_USDT_AMOUNT', 80)),
+    #     'max_position_ratio': 7,
+    # },
     
-    'OKB/USDT:USDT': {
-        # 警告：请根据您的策略修改这些值
-        'leverage': int(os.getenv('OKB_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('OKB_BASE_USDT_AMOUNT', 80)),
-        'max_position_ratio': 8,
-    },
-    
+    # 'OKB/USDT:USDT': {
+    #     # 警告：请根据您的策略修改这些值
+    #     'leverage': int(os.getenv('OKB_LEVERAGE', 15)),
+    #     'base_usdt_amount': float(os.getenv('OKB_BASE_USDT_AMOUNT', 80)),
+    #     'max_position_ratio': 8,
+    # },
     # 'HYPE/USDT:USDT': {
     #     # 警告：请根据您的策略修改这些值
     #     'leverage': int(os.getenv('HYPE_LEVERAGE', 10)),
     #     'base_usdt_amount': float(os.getenv('HYPE_BASE_USDT_AMOUNT', 30)),
     #     'max_position_ratio': 3,
-    # },
+    # },    
+    'WCT/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('WCT_LEVERAGE', 10)),
+        'base_usdt_amount': float(os.getenv('WCT_BASE_USDT_AMOUNT', 70)),
+        'max_position_ratio': 3,
+    },
 }
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
