@@ -1784,31 +1784,32 @@ def get_market_trend(df):
     except Exception as e:
         logger.log_error("trend_analysis", str(e))
         return {}
+
+def get_correct_inst_id(symbol: str) -> str:
+    """
+    将 CCXT 格式的永续合约符号转换为 OKX 交易所要求的 InstId (例如: BTC/USDT:USDT -> BTC-USDT-SWAP)。
+
+    Args:
+        symbol: CCXT 标准格式的交易品种符号。
+
+    Returns:
+        OKX 要求的合约 ID。
+    """
+    if not symbol or ':' not in symbol:
+        # 如果格式不正确，直接返回符号，让交易所 API 报错（安全回退）
+        return symbol 
+
+    # 1. 移除合约类型后缀 (:USDT)，得到基础交易对部分
+    #    例如: 'ASTR/USDT:USDT' -> 'ASTR/USDT'
+    base_quote = symbol.split(':')[0]
     
-def get_correct_inst_id(symbol: str):
-    """获取正确的合约ID"""
-    # 对于 BTC/USDT:USDT，正确的instId是 BTC-USDT-SWAP
-    config = SYMBOL_CONFIGS[symbol]
-    symbol = config.symbol
-    if symbol == 'BTC/USDT:USDT':
-        return 'BTC-USDT-SWAP'
-    elif symbol == 'ETH/USDT:USDT':
-        return 'ETH-USDT-SWAP'
-    elif symbol == 'SOLUSDT:USDT':
-        return 'SOL-USDT-SWAP'
-    elif symbol == 'BCH/USDT:USDT':
-        return 'BCH-USDT-SWAP'
-    elif symbol == 'LTC/USDT:USDT':
-        return 'LTC-USDT-SWAP'
-    elif symbol == 'DASH/USDT:USDT':
-        return 'DASH-USDT-SWAP'
-    elif symbol == 'ZEC/USDT:USDT':
-        return 'ZEC-USDT-SWAP'
-    elif symbol == 'ZEN/USDT:USDT':
-        return 'ZEN-USDT-SWAP'
-    else:
-        # 通用处理
-        return symbol.replace('/', '-').replace(':USDT', '-SWAP')
+    # 2. 将分隔符 '/' 替换为 OKX 要求的 '-' (连字符)
+    #    例如: 'ASTR/USDT' -> 'ASTR-USDT'
+    inst_id_base = base_quote.replace('/', '-')
+    
+    # 3. 加上 OKX 永续合约的后缀
+    #    例如: 'ASTR-USDT' -> 'ASTR-USDT-SWAP'
+    return f"{inst_id_base}-SWAP"
 
 def log_api_response(response, function_name=""):
     """记录API响应"""
@@ -2766,7 +2767,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         - Sentiment data delay → Reduce weight, use real-time technical indicators as main
         3. **Risk Management** (Weight 10%): Consider position, profit/loss status and stop loss position
         4. **Trend Following**: Take immediate action when clear trend appears, do not over-wait
-        5. Because trading BTC, long position weight can be slightly higher
+        5. Because trading coins like btc, long position weight can be slightly higher
         6. **Signal Clarity**:
         - Strong uptrend → BUY signal
         - Strong downtrend → SELL signal

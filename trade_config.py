@@ -61,6 +61,33 @@ MULTI_SYMBOL_CONFIGS = {
     #     'base_usdt_amount': float(os.getenv('ZEN_BASE_USDT_AMOUNT', 60)),
     #     'max_position_ratio': 7,
     # },
+    'ASTER/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('ASTER_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('ASTER_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 5,
+    },
+    
+    'UNI/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('UNI_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('UNI_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 7,
+    },
+    
+    'OKB/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('OKB_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('OKB_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    
+    # 'HYPE/USDT:USDT': {
+    #     # 警告：请根据您的策略修改这些值
+    #     'leverage': int(os.getenv('HYPE_LEVERAGE', 10)),
+    #     'base_usdt_amount': float(os.getenv('HYPE_BASE_USDT_AMOUNT', 30)),
+    #     'max_position_ratio': 3,
+    # },
 }
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
