@@ -79,7 +79,19 @@ class TradingConfig:
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
         self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
-        
+
+        # 🆕 --- 交易所合约规则 (将在 setup_exchange 中被动态填充) ---
+        # 合约面值 (e.g., 1.0 for BTC)
+        self.contract_size = 1.0
+        # 最小下单量 (e.g., 0.01 for BTC, 1 for BCH)
+        self.min_amount = 0.01 
+        # 数量精度步长 (e.g., 0.01 for BTC, 1 for BCH)
+        self.amount_precision_step = 0.01 
+        # 价格精度步长 (e.g., 0.1 for BTC)
+        self.price_precision_step = 0.1
+        # 是否只支持整数张合约
+        self.requires_integer = False
+
         # Exchange settings
         self.exchange_name = 'okx'
         self.default_type = 'swap'
@@ -299,11 +311,17 @@ class TradingConfig:
         self._last_update = time.time()
         print("🔄 Configuration reloaded from environment variables")
 
-    def update_contract_info(self, contract_size, min_amount):
-        """Update contract information from exchange"""
+    def update_exchange_rules(self, contract_size: float, min_amount: float, amount_step: float, price_step: float, requires_integer: bool):
+        """
+        Update all contract and precision information from exchange market data.
+        这是连接交易所获取数据和交易逻辑的关键步骤。
+        """
         self.contract_size = contract_size
         self.min_amount = min_amount
-    
+        self.amount_precision_step = amount_step  # 🆕 修正点：更新数量精度步长
+        self.price_precision_step = price_step    # 🆕 修正点：更新价格精度步长
+        self.requires_integer = requires_integer  # 🆕 修正点：更新是否为整数合约
+
     def get_position_config(self):
         """Get position management configuration"""
         return self.position_management

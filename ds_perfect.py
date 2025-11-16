@@ -856,18 +856,27 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             # 注意：scaling_position 已经是合约张数，不需要再次转换
             contract_size = scaling_position
             
-            # 🆕 修复：根据品种调整最终合约数量
-            base_currency = get_base_currency(symbol)
-            
-            # 需要整数张合约的品种
-            integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-            if base_currency in integer_only_currencies:
-                # 确保至少1张，向上取整到整数
-                contract_size = max(1, math.ceil(contract_size))
-                logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+            # 🆕 --- 动态精度处理 (针对加仓) ---
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
 
-            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
+            if config.requires_integer:
+                # 整数合约品种 (向上取整)
+                contract_size = max(min_size, math.ceil(contract_size))
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (加仓) 调整为整数张合约: {contract_size} 张")
+            else:
+                # 非整数合约品种 (向下取整到有效步长)
+                if step_size > 0:
+                    contract_size = math.floor(contract_size / step_size) * step_size
+                else:
+                    contract_size = round(contract_size, 8) # Fallback
+                
+                # 确保不小于最小交易量
+                if contract_size < min_size:
+                    logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (加仓) 计算合约 {contract_size} 小于最小 {min_size}，调整为最小交易量")
+                    contract_size = min_size
             
+            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
             return contract_size
         
         # 非加仓情况，继续标准计算
@@ -931,29 +940,27 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         nominal_value = final_usdt * config.leverage
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
         
-        contract_size = round(contract_size, 2)  # 精度处理
+        # 🆕 --- 动态精度处理 (替换原有逻辑) ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
+
+        if config.requires_integer:
+            # 整数合约品种 (向上取整)
+            # (注意：开仓时我们更倾向于向上取整以满足最小保证金，这与加仓不同)
+            contract_size = max(min_size, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (开仓) 调整为整数张合约: {contract_size} 张")
+        else:
+            # 非整数合约品种 (向下取整到有效步长)
+            if step_size > 0:
+                contract_size = math.floor(contract_size / step_size) * step_size
+            else:
+                contract_size = round(contract_size, 8) # Fallback
+
+            # 确保不小于最小交易量
+            if contract_size < min_size:
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算合约 {contract_size:.6f} 小于最小 {min_size:.6f}，调整为最小交易量")
+                contract_size = min_size   
         
-        # 在返回 contract_size 之前添加精度检查
-        min_contracts = getattr(config, 'min_amount', 0.01)
-        if min_contracts > 0:
-            # 向下取整到最小交易单位的整数倍
-            contract_size = (contract_size // min_contracts) * min_contracts
-            if contract_size < min_contracts:
-                contract_size = min_contracts
-
-        # 确保最小交易量
-        contract_size = max(contract_size, min_contracts)      
-
-        # 🆕 修复：根据品种调整最终合约数量
-        base_currency = get_base_currency(symbol)
-        
-        # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-        if base_currency in integer_only_currencies:
-            # 确保至少1张，向上取整到整数
-            contract_size = max(1, math.ceil(contract_size))
-            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
-
         # 🆕 最终保证金验证
         final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
         if final_margin < MIN_BASE_MARGIN:
@@ -961,15 +968,22 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             required_nominal_value = MIN_BASE_MARGIN * config.leverage
             contract_size = required_nominal_value / (price_data['price'] * config.contract_size)
             
-            # 再次应用精度调整
-            if min_contracts > 0:
-                contract_size = (contract_size // min_contracts) * min_contracts
-                if contract_size < min_contracts:
-                    contract_size = min_contracts
-            
-            # 整数合约调整
-            if base_currency in integer_only_currencies:
-                contract_size = max(1, math.ceil(contract_size))
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
+
+            if config.requires_integer:
+                # (保证金修正时，必须向上取整以满足要求)
+                contract_size = max(min_size, math.ceil(contract_size))
+            else:
+                # (保证金修正时，也应向上取整到下一个步长)
+                if step_size > 0:
+                    contract_size = math.ceil(contract_size / step_size) * step_size
+                else:
+                    contract_size = round(contract_size, 8)
+                
+                # 确保不小于最小交易量
+                if contract_size < min_size:
+                    contract_size = min_size
             
             final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
             logger.log_info(f"🔄 {get_base_currency(symbol)}: 最终调整保证金为 {final_margin:.2f} USDT")
@@ -1089,12 +1103,20 @@ def setup_exchange(symbol: str):
         market_info = markets[symbol]
         
         # 动态更新配置实例的合约信息
-        config.contract_size = float(market_info.get('contractSize', 1.0))
-        config.min_amount = market_info['limits']['amount']['min']
-        
+        config.update_exchange_rules(
+            contract_size=float(market_info.get('contractSize', 1.0)),
+            min_amount=market_info['limits']['amount']['min'],
+            amount_step=market_info['precision']['amount'],
+            price_step=market_info['precision']['price'],
+            requires_integer=(market_info['precision']['amount'] == 1)
+        )
+
         logger.log_info(f"✅ Contract {get_base_currency(symbol)}: 1 contract = {config.contract_size} base asset")
         logger.log_info(f"📏 Min trade {get_base_currency(symbol)}: {config.min_amount} contracts")
-        
+        logger.log_info(f"📐 Amount step {get_base_currency(symbol)}: {config.amount_precision_step}")
+        logger.log_info(f"💰 Price step {get_base_currency(symbol)}: {config.price_precision_step}")
+        logger.log_info(f"🔢 Integer only: {config.requires_integer}")
+        # -----------------------------------------------
         # 2. 设置杠杆（使用更安全的方式）
         leverage = getattr(config, 'leverage', 50)
         logger.log_info(f"⚙️ Setting leverage for {get_base_currency(symbol)} to {leverage}x...")
@@ -1511,30 +1533,26 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
 
         # ------------------- 核心修改结束 -------------------
+        # 🆕 --- 修正的动态精度处理 ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
 
-        # Precision handling: OKX BTC contract minimum trading unit is 0.01 contracts
-        contract_size = round(contract_size, 2)  # Keep 2 decimal places
+        if config.requires_integer:
+            # 1. 优先处理整数合约：向上取整，并确保不小于最小
+            contract_size = max(min_size, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 调整为整数张合约: {contract_size} 张")
+        else:
+            # 2. 非整数合约：向下取整到步长
+            if step_size > 0:
+                contract_size = math.floor(contract_size / step_size) * step_size
+            else:
+                contract_size = round(contract_size, 8) # Fallback
 
-        # 在返回 contract_size 之前添加精度检查
-        min_contracts = getattr(config, 'min_amount', 0.01)
-        if min_contracts > 0:
-            # 向下取整到最小交易单位的整数倍
-            contract_size = (contract_size // min_contracts) * min_contracts
-            if contract_size < min_contracts:
-                contract_size = min_contracts
-
-        # 确保最小交易量
-        contract_size = max(contract_size, min_contracts)
-
-        # 🆕 修复：根据品种调整最终合约数量
-        base_currency = get_base_currency(symbol)
-        
-        # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-        if base_currency in integer_only_currencies:
-            # 确保至少1张，向上取整到整数
-            contract_size = max(1, math.ceil(contract_size))
-            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+            # 确保不小于最小交易量
+            if contract_size < min_size:
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算合约 {contract_size:.6f} 小于最小 {min_size:.6f}，调整为最小交易量")
+                contract_size = min_size
+        # --- 修正结束 ---
 
         calculation_summary = f"""
             📊 仓位计算详情:
@@ -1555,11 +1573,23 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         return contract_size
 
     except Exception as e:
-        logger.log_error("Position calculation failed, using base position", str(e))
-        # Emergency backup calculation
-        base_usdt = posMngmt['base_usdt_amount']
-        contract_size = (base_usdt * config.leverage) / (price_data['price'] * getattr(config, 'contract_size', 0.01))
-        return round(max(contract_size, getattr(config, 'min_amount', 0.01)), 2)
+            logger.log_error("Position calculation failed, using base position", str(e))
+            # 🆕 --- 修正的备用计算 ---
+            # Emergency backup calculation
+            base_usdt = posMngmt['base_usdt_amount']
+            contract_size = (base_usdt * config.leverage) / (price_data['price'] * getattr(config, 'contract_size', 0.01))
+            
+            # 同样应用动态精度
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
+
+            if config.requires_integer:
+                contract_size = max(min_size, math.ceil(contract_size))
+            else:
+                if step_size > 0:
+                    contract_size = math.floor(contract_size / step_size) * step_size
+                contract_size = max(min_size, contract_size)
+            return contract_size
 
 
 def calculate_technical_indicators(df):
@@ -3383,34 +3413,29 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
             return None
         
         inst_id = get_correct_inst_id(symbol)
+
+        # 🆕 --- 动态合约数量精度调整 ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
         
-        # 🆕 修复：根据品种调整合约数量精度
-        # 获取品种特定的最小交易单位
-        min_amount = getattr(config, 'min_amount', 0.01)
-        
-        # 🆕 特殊处理：某些品种要求整数张合约
-        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'ZEC/USDT:USDT', 'ZEN/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
-        base_currency = get_base_currency(symbol)
-        
-        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH', 'ZEC', 'ZEN']:
-            # 这些品种要求整数张合约
-            adjusted_amount = max(1, int(round(amount)))  # 至少1张，四舍五入到整数
+        if config.requires_integer:
+            # 整数合约品种 (向上取整, 确保不小于最小量)
+            adjusted_amount = max(min_size, math.ceil(amount)) 
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 整数张合约调整 - 从 {amount:.4f} 调整为 {adjusted_amount} 张")
         else:
-            # 其他品种使用原有的精度调整
-            if min_amount > 0:
-                # 向下取整到最小交易单位的整数倍
-                adjusted_amount = (amount // min_amount) * min_amount
-                if adjusted_amount < min_amount:
-                    adjusted_amount = min_amount
+            # 非整数合约品种 (向下取整到有效步长)
+            if step_size > 0:
+                adjusted_amount = math.floor(amount / step_size) * step_size
             else:
-                adjusted_amount = amount
-        
-        # 确保调整后的数量不小于最小交易量
-        adjusted_amount = max(adjusted_amount, min_amount)
-        
+                adjusted_amount = round(amount, 8) # Fallback
+            
+            # 确保不小于最小交易量
+            if adjusted_amount < min_size:
+                 adjusted_amount = min_size
+
         # 如果调整后的数量与原数量不同，记录警告
-        if abs(adjusted_amount - amount) > 0.001:
+        # (使用步长的 1% 作为浮点数比较的容差)
+        if abs(adjusted_amount - amount) > (step_size * 0.01):
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 订单数量从 {amount:.4f} 调整为 {adjusted_amount:.4f} 以满足交易所精度要求")
         
         # 🆕 额外检查：确保调整后的数量仍然有效
@@ -3427,23 +3452,30 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
             'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
         }
         
-        # 🆕 修复：确保价格参数是字符串格式
+        # 🆕 --- 动态价格精度调整 ---
+        price_step = config.price_precision_step
+
         if order_type == 'limit':
-            if limit_price is None:
-                logger.log_error("limit_order_missing_price", f"❌ {get_base_currency(symbol)}: 限价单必须提供limit_price参数")
-                return None
-            # 确保是字符串格式
-            if isinstance(limit_price, str):
-                params['px'] = limit_price
-            else:
-                params['px'] = str(round(limit_price, 2))
-        
-        # 添加止损止盈参数（如果提供了止损止盈价格）
-        if stop_loss_price is not None and take_profit_price is not None:
-            # 🆕 修复：确保止损止盈价格是字符串格式
-            sl_price_str = stop_loss_price if isinstance(stop_loss_price, str) else str(round(stop_loss_price, 2))
-            tp_price_str = take_profit_price if isinstance(take_profit_price, str) else str(round(take_profit_price, 2))
+            # ...
+            # 动态调整限价单价格
+            if price_step > 0:
+                # OKX 通常要求价格是 price_step 的倍数
+                limit_price = round(limit_price / price_step) * price_step
             
+            params['px'] = str(limit_price)
+        
+
+        # 添加止损止盈参数
+        if stop_loss_price is not None and take_profit_price is not None:
+            
+            # 动态调整止损止盈价格
+            if price_step > 0:
+                stop_loss_price = round(stop_loss_price / price_step) * price_step
+                take_profit_price = round(take_profit_price / price_step) * price_step
+
+            sl_price_str = str(stop_loss_price)
+            tp_price_str = str(take_profit_price)
+
             params['attachAlgoOrds'] = [
                 {
                     'tpTriggerPx': tp_price_str,
