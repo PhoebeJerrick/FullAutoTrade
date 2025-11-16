@@ -916,9 +916,18 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
         
+        # 🆕 新增：确保头仓保证金不小于5 USDT
+        MIN_BASE_MARGIN = 5.0  # 最小头仓保证金5 USDT
+        if final_usdt < MIN_BASE_MARGIN:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算保证金{final_usdt:.2f} USDT小于{MIN_BASE_MARGIN} USDT，调整为最小保证金")
+            final_usdt = MIN_BASE_MARGIN
+            
+            # 再次检查是否超过最大限制
+            if final_usdt > max_usdt:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 最小保证金{MIN_BASE_MARGIN} USDT超过最大限制{max_usdt:.2f} USDT，无法开仓")
+                return 0
+        
         # 转换为合约张数
-        # 此时 final_usdt 代表我们希望投入的 *保证金*
-        # 保证金 * 杠杆 = 名义总价值
         nominal_value = final_usdt * config.leverage
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
         
@@ -945,7 +954,27 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             contract_size = max(1, math.ceil(contract_size))
             logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
 
-        # 详细日志 (更新日志术语)
+        # 🆕 最终保证金验证
+        final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+        if final_margin < MIN_BASE_MARGIN:
+            # 如果最终保证金仍然小于最小值，重新计算合约数量
+            required_nominal_value = MIN_BASE_MARGIN * config.leverage
+            contract_size = required_nominal_value / (price_data['price'] * config.contract_size)
+            
+            # 再次应用精度调整
+            if min_contracts > 0:
+                contract_size = (contract_size // min_contracts) * min_contracts
+                if contract_size < min_contracts:
+                    contract_size = min_contracts
+            
+            # 整数合约调整
+            if base_currency in integer_only_currencies:
+                contract_size = max(1, math.ceil(contract_size))
+            
+            final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 最终调整保证金为 {final_margin:.2f} USDT")
+
+        # 详细日志
         calculation_details = f"""
         🎯 增强版仓位计算详情:
         账户余额: {usdt_balance:.2f} USDT
@@ -957,9 +986,14 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         建议保证金: {suggested_usdt:.2f} USDT → 最终保证金: {final_usdt:.2f} USDT
         名义总价值 (保证金 * 杠杆): {nominal_value:.2f} USDT
         合约数量: {contract_size:.2f}张
+        🛡️ 实际保证金: {final_margin:.2f} USDT
         """
         logger.log_info(calculation_details)
         
+        # 🆕 最终检查：如果保证金仍然不足，返回0
+        if final_margin < MIN_BASE_MARGIN:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求，放弃开仓")
+            return 0
 
         return contract_size
         
@@ -1458,6 +1492,16 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
 
+        # 🆕 新增：确保头仓保证金不小于5 USDT
+        MIN_BASE_MARGIN = 5.0
+        if final_usdt < MIN_BASE_MARGIN:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算保证金{final_usdt:.2f} USDT小于{MIN_BASE_MARGIN} USDT，调整为最小保证金")
+            final_usdt = MIN_BASE_MARGIN
+            
+            if final_usdt > max_usdt:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 最小保证金{MIN_BASE_MARGIN} USDT超过最大限制{max_usdt:.2f} USDT")
+                return 0
+            
         # ------------------- 核心修改开始 -------------------
         
         # Correct contract quantity calculation!
@@ -1491,7 +1535,7 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
             # 确保至少1张，向上取整到整数
             contract_size = max(1, math.ceil(contract_size))
             logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
-            
+
         calculation_summary = f"""
             📊 仓位计算详情:
             基础保证金: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
@@ -1502,14 +1546,19 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
             """
         logger.log_info(calculation_summary)
 
+        # 🆕 最终保证金验证
+        final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+        if final_margin < MIN_BASE_MARGIN:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求")
+            return 0
+        
         return contract_size
 
     except Exception as e:
         logger.log_error("Position calculation failed, using base position", str(e))
         # Emergency backup calculation
         base_usdt = posMngmt['base_usdt_amount']
-        contract_size = (base_usdt * config.leverage) / (
-                    price_data['price'] * getattr(config, 'contract_size', 0.01))
+        contract_size = (base_usdt * config.leverage) / (price_data['price'] * getattr(config, 'contract_size', 0.01))
         return round(max(contract_size, getattr(config, 'min_amount', 0.01)), 2)
 
 
