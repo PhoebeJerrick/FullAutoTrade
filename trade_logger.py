@@ -15,7 +15,7 @@ class TradingLogger:
             print("Warning: CURRENT_ACCOUNT not found, using 'default' instead")
         
         # 生成日志文件路径
-        self.log_file = f'../Output/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        self.log_file = f'../Output/{CURRENT_ACCOUNT}/{CURRENT_ACCOUNT}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         self.setup_logging(log_level)
     
     def setup_logging(self, log_level):
