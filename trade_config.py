@@ -6,9 +6,9 @@ from typing import Tuple, List, Dict, Any
 
 # --- 简单版本配置 ---
 VERSION_CONFIG = {
-    'version': '1.0.2',  # 基础版本号
+    'version': '1.0.3',  # 基础版本号
     'auto_increment': True,  # 是否自动基于Git提交递增
-    'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
+    # 'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
 }
 
 # --- NEW: Multi-Symbol Configuration Structure ---
@@ -19,18 +19,18 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
         'max_position_ratio': 10,
     },
-    # ETH 配置
-    'ETH/USDT:USDT': {
-        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
-        'max_position_ratio': 8,
-    },
-    # SOL 配置 (示例)
-    'SOL/USDT:USDT': {
-        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
-        'max_position_ratio': 5,
-    },
+    # # ETH 配置
+    # 'ETH/USDT:USDT': {
+    #     'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
+    #     'max_position_ratio': 8,
+    # },
+    # # SOL 配置 (示例)
+    # 'SOL/USDT:USDT': {
+    #     'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
+    #     'max_position_ratio': 5,
+    # },
     # LTC 配置 (示例)
     'LTC/USDT:USDT': {
         'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
@@ -43,10 +43,22 @@ MULTI_SYMBOL_CONFIGS = {
     #     'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
     #     'max_position_ratio': 7,
     # },
-    # # DASH 配置 (示例)
-    # 'DASH/USDT:USDT': {
-    #     'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
-    #     'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
+    # DASH 配置 (示例)
+    'DASH/USDT:USDT': {
+        'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    # ZEC 配置 (示例)
+    'ZEC/USDT:USDT': {
+        'leverage': int(os.getenv('ZEC_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('ZEC_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    # # ZEN 配置 (示例)
+    # 'ZEN/USDT:USDT': {
+    #     'leverage': int(os.getenv('ZEN_LEVERAGE', 15)),
+    #     'base_usdt_amount': float(os.getenv('ZEN_BASE_USDT_AMOUNT', 60)),
     #     'max_position_ratio': 7,
     # },
 }
@@ -194,7 +206,7 @@ class TradingConfig:
         """获取版本信息"""
         base_version = VERSION_CONFIG['version']
         
-        if VERSION_CONFIG['auto_increment'] and VERSION_CONFIG['git_commit_count_as_build']:
+        if VERSION_CONFIG.get('auto_increment') and VERSION_CONFIG.get('git_commit_count_as_build'):
             commit_count = self._get_git_commit_count()
             short_hash = self._get_git_short_hash()
             branch = self._get_git_branch()
