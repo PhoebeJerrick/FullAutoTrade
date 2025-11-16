@@ -476,21 +476,11 @@ class TradingConfig:
             'version': self.get_version()  # 🆕 包含版本信息
         }
 
-def create_trade_config(symbol: str = None) -> TradingConfig:
-    """创建交易配置实例"""
-    if symbol is None:
-        symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
-    
-    symbol_config = MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS['BTC/USDT:USDT'])
-    return TradingConfig(symbol=symbol, config_data=symbol_config)
-
-# Create global instance
-TRADE_CONFIG = create_trade_config()
-
 # 简单的版本工具函数
-def print_version_banner():
+def print_version_banner(config: 'TradingConfig'): # 接受一个 TradingConfig 实例
     """打印版本横幅"""
-    version_info = TRADE_CONFIG.get_version_details()
+    # 直接使用传入的 config 实例
+    version_info = config.get_version_details() 
     print("=" * 50)
     print(f"🚀 Trading Bot {version_info['full_version']}")
     print(f"📅 Build Time: {version_info['build_time']}")

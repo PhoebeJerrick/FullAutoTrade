@@ -20,7 +20,7 @@ import requests
 from datetime import datetime, timedelta
 
 # Trading parameter configuration - combining advantages of both versions
-from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS # 新代码: 导入类和多品种配置
+from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS # ✅ 仅导入类和字典
 # Global logger
 from trade_logger import logger
 
@@ -4486,7 +4486,6 @@ def main():
 
     logger.log_info(f"🚀 主循环启动，交易品种: {', '.join(symbols_to_trade)}")
     
-    # 原始 TRADE_CONFIG 的引用需要替换为 SYMBOL_CONFIGS 中任一个（例如第一个）
     # 以获取通用的 max_consecutive_errors 等参数。
     first_config = list(SYMBOL_CONFIGS.values())[0]
 
