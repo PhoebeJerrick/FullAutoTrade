@@ -108,7 +108,7 @@ def get_account_config(account_name):
         }
 
 # 获取当前账号配置
-account_config = get_account_config(account)
+account_config = get_account_config(CURRENT_ACCOUNT)
 print(f"🔑 账号配置加载: API_KEY={account_config['api_key'][:10]}...")
 
 def create_order_tag():
