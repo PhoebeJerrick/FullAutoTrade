@@ -41,7 +41,7 @@ POSITION_STATE_FILE = f'../Output/{CURRENT_ACCOUNT}/position_state.json'
 price_history = {}
 signal_history = {}
 #1: 在启动时尝试加载仓位状态，如果失败则为 None
-position = load_position_history()
+position = None
 
 # 全局变量 - 记录每个品种的加仓状态
 SCALING_HISTORY: Dict[str, Dict] = {}
@@ -637,7 +637,6 @@ def save_position_history():
         
     except Exception as e:
         logger.log_error("save_position_history", f"保存仓位状态失败: {e}")
-
 
 
 def load_position_history() -> Optional[Dict[str, Any]]:
@@ -4448,15 +4447,19 @@ def main():
     优化后的主程序 - 基于K线周期的动态调度
     """
     global SYMBOL_CONFIGS, symbols_to_trade
-    
+
+    # 🆕 在程序开始时加载仓位状态
+    global position
+    position = load_position_history()
+    if position is None:
+        logger.log_info("ℹ️ 从空仓位状态开始")
+    else:
+        logger.log_info(f"✅ 成功加载仓位状态")
+
     # 添加信号处理
     import signal
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
-    # 🆕 加载持仓历史数据
-    logger.log_info("📂 加载历史数据...")
-    load_position_history()
 
     if not symbols_to_trade_raw:
         logger.log_error("配置错误", f"❌ 账号 '{CURRENT_ACCOUNT}' 在 ACCOUNT_SYMBOL_MAPPING 中没有对应的交易品种配置。")
