@@ -4420,7 +4420,7 @@ def main():
                 logger.log_info(f"✅ {get_base_currency(symbol)} 配置加载成功")
                 
             except Exception as e:
-                logger.log_error(f"❌ {get_base_currency(symbol)} 配置初始化失败: {str(e)}")
+                logger.log_error(f"❌ {get_base_currency(symbol)}",f"配置初始化失败: {str(e)}")
         else:
             logger.log_error(f"❌ 品种 {symbol} 在 MULTI_SYMBOL_CONFIGS 中未找到配置，跳过。")
 

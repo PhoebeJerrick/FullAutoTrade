@@ -122,12 +122,13 @@ ACCOUNT_SYMBOL_MAPPING = {
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
     
-    def __init__(self, symbol: str, config_data: dict):
+    # 🚀 关键修改点：将 config_data: dict 替换为 **kwargs: Any，以捕获所有传入的关键字参数
+    def __init__(self, symbol: str, **kwargs: Any):
         # 1. 设置品种信息
         self.symbol = symbol
         
-        # 使用传入的配置数据
-        current_config = config_data  # 直接使用传入的配置
+        # 🆕 修复点：将 kwargs（即 **config_dict 展开后的内容）作为当前配置数据
+        current_config = kwargs 
 
         # Trading parameters
         self.leverage = current_config.get('leverage', int(os.getenv('LEVERAGE', 50)))
