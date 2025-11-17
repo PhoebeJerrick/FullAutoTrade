@@ -35,11 +35,13 @@ SYMBOL_CONFIGS: Dict[str, TradingConfig] = {}
 # 当前活跃的交易品种（在 trading_bot 中设置，用于日志和调试）
 CURRENT_SYMBOL: Optional[str] = None
 
+POSITION_STATE_FILE = f'../Output/{CURRENT_ACCOUNT}/position_state.json'
 
 # Global variables to store historical data
 price_history = {}
 signal_history = {}
-position = None
+#1: 在启动时尝试加载仓位状态，如果失败则为 None
+position = load_position_history()
 
 # 全局变量 - 记录每个品种的加仓状态
 SCALING_HISTORY: Dict[str, Dict] = {}
@@ -524,67 +526,52 @@ def cleanup_resources():
         logger.log_error("cleanup_resources", f"资源清理异常: {str(e)}")
 
 def save_position_history():
-    """保存持仓历史到文件"""
-    try:
-        if not POSITION_HISTORY:
-            return
-            
-        # 创建数据目录
-        data_dir = "trading_data"
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+    """
+    将当前的仓位历史状态保存到当前账户的文件夹中。
+    """
+    global position # 引用全局仓位变量
+    
+    # 确保保存路径存在 (此逻辑已在 trade_logger 中实现，但这里冗余一次更安全)
+    save_dir = os.path.dirname(POSITION_STATE_FILE)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
         
-        # 保存每个品种的持仓历史
-        for symbol, history in POSITION_HISTORY.items():
-            if history:
-                filename = f"{data_dir}/{get_base_currency(symbol)}_position_history.json"
-                try:
-                    # 转换 datetime 对象为字符串
-                    serializable_history = []
-                    for record in history:
-                        serializable_record = record.copy()
-                        # 确保所有值都是可序列化的
-                        for key, value in serializable_record.items():
-                            if isinstance(value, (datetime, pd.Timestamp)):
-                                serializable_record[key] = value.strftime('%Y-%m-%d %H:%M:%S')
-                        serializable_history.append(serializable_record)
-                    
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        json.dump(serializable_history, f, indent=2, ensure_ascii=False)
-                    
-                    logger.log_info(f"💾 {get_base_currency(symbol)}: 持仓历史已保存到 {filename}")
-                    
-                except Exception as e:
-                    logger.log_error(f"save_history_{get_base_currency(symbol)}", f"保存持仓历史失败: {str(e)}")
-                    
-    except Exception as e:
-        logger.log_error("save_position_history", f"保存持仓历史异常: {str(e)}")
-
-def load_position_history():
-    """从文件加载持仓历史"""
+    # 只有当 position 不是 None 且有内容时才保存
+    if position is None:
+        return
+        
     try:
-        data_dir = "trading_data"
-        if not os.path.exists(data_dir):
-            return
-            
-        for filename in os.listdir(data_dir):
-            if filename.endswith("_position_history.json"):
-                filepath = os.path.join(data_dir, filename)
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        history = json.load(f)
-                    
-                    # 提取品种名称
-                    symbol_name = filename.replace("_position_history.json", "")
-                    # 这里需要根据文件名映射回完整的symbol，可能需要调整
-                    # 暂时跳过具体映射
-                    logger.log_info(f"📂 加载持仓历史: {filename} ({len(history)} 条记录)")
-                    
-                except Exception as e:
-                    logger.log_warning(f"⚠️ 加载持仓历史文件失败 {filename}: {str(e)}")
-                    
+        # 将 position 对象转换为 JSON 可序列化的格式 (如果 position 是自定义类，需手动转换)
+        serializable_position = position # 假设 position 本身是 dict 或 list
+        
+        with open(POSITION_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(serializable_position, f, indent=4)
+        # logger.log_debug(f"💾 成功保存 {CURRENT_ACCOUNT} 账户的仓位状态。")
+        
     except Exception as e:
-        logger.log_error("load_position_history", f"加载持仓历史异常: {str(e)}")
+        logger.log_error("save_position_history", f"保存仓位状态失败: {e}")
+
+
+
+def load_position_history() -> Optional[Dict[str, Any]]:
+    """
+    从当前账户的文件夹中加载上次保存的仓位历史状态。
+    """
+    global position # 引用全局仓位变量
+    
+    try:
+        if os.path.exists(POSITION_STATE_FILE):
+            with open(POSITION_STATE_FILE, 'r', encoding='utf-8') as f:
+                # 假设 position 存储的是一个字典结构
+                position_data = json.load(f)
+                logger.log_info(f"✅ 成功加载 {CURRENT_ACCOUNT} 账户的仓位状态。")
+                return position_data
+        else:
+            logger.log_info(f"ℹ️ {CURRENT_ACCOUNT} 账户的仓位状态文件不存在，将从空状态开始。")
+            return None
+    except Exception as e:
+        logger.log_error("load_position_history", f"加载仓位状态失败: {e}")
+        return None
 
 def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
     """自适应止损计算 - 修复版本"""
@@ -4563,6 +4550,9 @@ def main():
                 # Log performance for each symbol
                 for symbol in symbols_to_trade:
                     log_performance_metrics(symbol)
+                    
+                # 🚀 更改点 3: 每轮循环结束后保存一次最新的仓位状态
+                save_position_history()
 
                 # Wait for next cycle
                 time.sleep(60)
