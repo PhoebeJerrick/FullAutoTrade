@@ -20,7 +20,10 @@ import requests
 from datetime import datetime, timedelta
 
 # Trading parameter configuration - combining advantages of both versions
-from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS, print_version_banner # ✅ 仅导入类和字典
+from trade_config import (TradingConfig, 
+                          MULTI_SYMBOL_CONFIGS, 
+                          print_version_banner,
+                          ACCOUNT_SYMBOL_MAPPING) # ✅ 仅导入类和字典
 # Global logger
 from trade_logger import logger
 
@@ -150,6 +153,51 @@ exchange = ccxt.okx({
     'secret': account_config['secret'],
     'password': account_config['password'],
 })
+
+# 1. 根据当前账号选择要交易的品种列表
+symbols_to_trade_raw = ACCOUNT_SYMBOL_MAPPING.get(CURRENT_ACCOUNT, [])
+
+if not symbols_to_trade_raw:
+    logger.log_error("配置错误", f"❌ 账号 '{CURRENT_ACCOUNT}' 在 ACCOUNT_SYMBOL_MAPPING 中没有对应的交易品种配置。程序将退出。")
+    # 如果没有找到配置，可以使用 sys.exit(1) 退出，或者使用默认列表
+    # symbols_to_trade_raw = ACCOUNT_SYMBOL_MAPPING.get("default", [])
+
+# 2. 从 MULTI_SYMBOL_CONFIGS 中过滤并初始化 SYMBOL_CONFIGS
+symbols_to_trade: List[str] = [] # 最终用于交易循环的品种列表
+
+logger.log_info(f"⚙️ 账号 '{CURRENT_ACCOUNT}' 准备加载 {len(symbols_to_trade_raw)} 个品种的配置...")
+
+for symbol in symbols_to_trade_raw:
+    config_dict = MULTI_SYMBOL_CONFIGS.get(symbol)
+    if config_dict:
+        try:
+            # 初始化 TradingConfig 实例
+            symbol_config = TradingConfig(symbol, **config_dict)
+            
+            # 运行配置检查 (假设 TradingConfig 有 validate_config 方法)
+            is_valid, errors, warnings = symbol_config.validate_config()
+            if not is_valid:
+                logger.log_error(f"❌ {get_base_currency(symbol)} 配置验证失败: {errors}")
+                continue
+            if warnings:
+                for w in warnings:
+                    logger.log_warning(f"⚠️ {get_base_currency(symbol)} 配置警告: {w}")
+            
+            # 存储到全局配置字典
+            SYMBOL_CONFIGS[symbol] = symbol_config
+            symbols_to_trade.append(symbol)
+            logger.log_info(f"✅ {get_base_currency(symbol)} 配置加载成功")
+            
+        except Exception as e:
+            logger.log_error(f"❌ {get_base_currency(symbol)} 配置初始化失败: {str(e)}")
+    else:
+        logger.log_error(f"❌ 品种 {symbol} 在 MULTI_SYMBOL_CONFIGS 中未找到配置，跳过。")
+
+logger.log_info(f"🚀 账号 '{CURRENT_ACCOUNT}' 最终交易品种列表: {symbols_to_trade}")
+
+if not symbols_to_trade:
+    logger.log_error("❌ 没有有效的交易品种配置，程序将以空列表运行。")
+
 
 def log_order_params(order_type, params, function_name=""):
     """简化版订单参数日志"""
@@ -4410,16 +4458,6 @@ def main():
     logger.log_info("📂 加载历史数据...")
     load_position_history()
 
-    # 1. 动态加载交易品种列表
-    symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
-    if symbols_to_trade_str:
-        symbols_to_trade = [s.strip() for s in symbols_to_trade_str.split(',') if s.strip()]
-    else:
-        symbols_to_trade = list(MULTI_SYMBOL_CONFIGS.keys())
-        
-    if not symbols_to_trade:
-        logger.log_error("config_error", "未找到任何交易品种配置")
-        return
 
     # 2. 初始化所有品种的配置
     for symbol in symbols_to_trade:
