@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 import json
 import requests
 from datetime import datetime, timedelta
+#导入配置中心 (必须在导入 trade_logger之前，但因为 config_center.py 是自初始化的，顺序不严格)
+from cmd_config import CURRENT_ACCOUNT
 
 # Trading parameter configuration - combining advantages of both versions
 from trade_config import (TradingConfig, 
@@ -71,18 +73,6 @@ def get_deepseek_client(symbol: str):
             raise
     return deepseek_client
 
-
-# 添加账号参数支持
-if len(sys.argv) > 1:
-    account = sys.argv[1]
-    logger.log_info(f"🎯 使用交易账号: {account}")
-else:
-    account = "default"
-    logger.log_info("🎯 使用默认交易账号")
-
-# 在全局变量中记录当前账号
-CURRENT_ACCOUNT = account
-
 def get_base_currency(symbol: str) -> str:
     """
     将完整的交易品种名称（例如 'BTC/USDT:USDT'）转换为基础货币简称（例如 'BTC'）。
@@ -120,23 +110,6 @@ def get_account_config(account_name):
 # 获取当前账号配置
 account_config = get_account_config(account)
 print(f"🔑 账号配置加载: API_KEY={account_config['api_key'][:10]}...")
-
-# 修改订单标签函数，包含账号信息
-# def create_order_tag():
-#     """创建符合OKX要求的订单标签"""
-#     # 使用固定格式，避免特殊字符
-#     base_tag = 'DS60bb4a8d3416BCDE'  # 添加前缀确保格式正确
-    
-#     # 简单处理账号名称
-#     account_suffix = CURRENT_ACCOUNT.replace('account', 'A')
-    
-#     tag = f"{base_tag}{account_suffix}"
-    
-#     # 确保不超过32字符
-#     tag = tag[:32]
-    
-#     logger.log_info(f"📝 生成的订单标签: {tag}")
-#     return tag
 
 def create_order_tag():
     """创建与现有持仓兼容的订单标签"""
