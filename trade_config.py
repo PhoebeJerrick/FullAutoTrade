@@ -6,7 +6,7 @@ from typing import Tuple, List, Dict, Any
 
 # --- 简单版本配置 ---
 VERSION_CONFIG = {
-    'version': '1.0.3',  # 基础版本号
+    'version': '1.0.4',  # 基础版本号
     'auto_increment': True,  # 是否自动基于Git提交递增
     # 'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
 }
