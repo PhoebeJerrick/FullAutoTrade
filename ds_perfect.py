@@ -18,9 +18,14 @@ from dotenv import load_dotenv
 import json
 import requests
 from datetime import datetime, timedelta
+#导入配置中心 (必须在导入 trade_logger之前，但因为 config_center.py 是自初始化的，顺序不严格)
+from cmd_config import CURRENT_ACCOUNT
 
 # Trading parameter configuration - combining advantages of both versions
-from trade_config import TradingConfig, MULTI_SYMBOL_CONFIGS # 新代码: 导入类和多品种配置
+from trade_config import (TradingConfig, 
+                          MULTI_SYMBOL_CONFIGS, 
+                          print_version_banner,
+                          ACCOUNT_SYMBOL_MAPPING) # ✅ 仅导入类和字典
 # Global logger
 from trade_logger import logger
 
@@ -30,10 +35,12 @@ SYMBOL_CONFIGS: Dict[str, TradingConfig] = {}
 # 当前活跃的交易品种（在 trading_bot 中设置，用于日志和调试）
 CURRENT_SYMBOL: Optional[str] = None
 
+POSITION_STATE_FILE = f'../Output/{CURRENT_ACCOUNT}/position_state.json'
 
 # Global variables to store historical data
 price_history = {}
 signal_history = {}
+#1: 在启动时尝试加载仓位状态，如果失败则为 None
 position = None
 
 # 全局变量 - 记录每个品种的加仓状态
@@ -48,6 +55,93 @@ load_dotenv(dotenv_path=env_path)
 
 # Initialize DeepSeek client with error handling
 deepseek_client = None
+
+# 在文件顶部添加这些函数
+def get_timeframe_seconds(timeframe: str) -> int:
+    """将时间帧转换为秒数"""
+    timeframe_seconds = {
+        '1m': 60,
+        '5m': 300,
+        '15m': 900,
+        '1h': 3600,
+        '4h': 14400,
+        '1d': 86400
+    }
+    return timeframe_seconds.get(timeframe, 900)  # 默认15分钟
+
+def calculate_next_execution_time(symbol: str) -> float:
+    """计算品种的下一个执行时间（对齐到K线周期）"""
+    config = SYMBOL_CONFIGS[symbol]
+    timeframe_seconds = get_timeframe_seconds(config.timeframe)
+    
+    # 获取当前时间
+    now = datetime.now()
+    current_timestamp = now.timestamp()
+    
+    # 计算当前K线周期的开始时间
+    current_candle_start = (current_timestamp // timeframe_seconds) * timeframe_seconds
+    
+    # 下一个执行时间 = 当前K线周期开始时间 + K线周期 + 延迟（确保K线闭合）
+    next_execution = current_candle_start + timeframe_seconds + 10  # 延迟10秒确保K线闭合
+    
+    # 如果当前时间已经超过计算的下个执行时间（由于处理延迟），调整到下个周期
+    if current_timestamp >= next_execution:
+        next_execution += timeframe_seconds
+    
+    return next_execution
+
+def format_time_until_next_execution(next_execution: float) -> str:
+    """格式化距离下次执行的时间"""
+    now = time.time()
+    seconds_until = next_execution - now
+    
+    if seconds_until <= 0:
+        return "立即执行"
+    elif seconds_until < 60:
+        return f"{int(seconds_until)}秒后"
+    elif seconds_until < 3600:
+        return f"{int(seconds_until/60)}分钟后"
+    else:
+        return f"{int(seconds_until/3600)}小时后"
+
+def get_scheduling_status() -> dict:
+    """获取当前调度状态"""
+    status = {
+        'total_symbols': len(symbol_schedules) if 'symbol_schedules' in globals() else 0,
+        'active_schedules': [],
+        'next_execution': None,
+        'status': 'running'
+    }
+    
+    if 'symbol_schedules' in globals():
+        current_time = time.time()
+        for symbol, schedule in symbol_schedules.items():
+            time_until = schedule['next_execution'] - current_time
+            status['active_schedules'].append({
+                'symbol': get_base_currency(symbol),
+                'timeframe': schedule['timeframe'],
+                'next_execution': schedule['next_execution'],
+                'time_until': time_until,
+                'execution_count': schedule.get('execution_count', 0)
+            })
+        
+        # 找到最近的下次执行时间
+        if status['active_schedules']:
+            next_exec = min([s['next_execution'] for s in status['active_schedules']])
+            status['next_execution'] = next_exec
+            status['time_until_next'] = next_exec - current_time
+    
+    return status
+
+def log_scheduling_status():
+    """记录调度状态"""
+    status = get_scheduling_status()
+    logger.log_info(f"📊 调度状态: {status['total_symbols']}个品种监控中")
+    
+    for schedule in status['active_schedules']:
+        if schedule['time_until'] <= 300:  # 只显示5分钟内的
+            time_str = format_time_until_next_execution(schedule['next_execution'])
+            logger.log_info(f"  {schedule['symbol']}: {time_str} ({schedule['timeframe']})")
 
 def get_deepseek_client(symbol: str):
     global deepseek_client
@@ -67,18 +161,6 @@ def get_deepseek_client(symbol: str):
             logger.log_error("deepseek_client_init", str(e))
             raise
     return deepseek_client
-
-
-# 添加账号参数支持
-if len(sys.argv) > 1:
-    account = sys.argv[1]
-    logger.log_info(f"🎯 使用交易账号: {account}")
-else:
-    account = "default"
-    logger.log_info("🎯 使用默认交易账号")
-
-# 在全局变量中记录当前账号
-CURRENT_ACCOUNT = account
 
 def get_base_currency(symbol: str) -> str:
     """
@@ -115,25 +197,8 @@ def get_account_config(account_name):
         }
 
 # 获取当前账号配置
-account_config = get_account_config(account)
+account_config = get_account_config(CURRENT_ACCOUNT)
 print(f"🔑 账号配置加载: API_KEY={account_config['api_key'][:10]}...")
-
-# 修改订单标签函数，包含账号信息
-# def create_order_tag():
-#     """创建符合OKX要求的订单标签"""
-#     # 使用固定格式，避免特殊字符
-#     base_tag = 'DS60bb4a8d3416BCDE'  # 添加前缀确保格式正确
-    
-#     # 简单处理账号名称
-#     account_suffix = CURRENT_ACCOUNT.replace('account', 'A')
-    
-#     tag = f"{base_tag}{account_suffix}"
-    
-#     # 确保不超过32字符
-#     tag = tag[:32]
-    
-#     logger.log_info(f"📝 生成的订单标签: {tag}")
-#     return tag
 
 def create_order_tag():
     """创建与现有持仓兼容的订单标签"""
@@ -150,6 +215,11 @@ exchange = ccxt.okx({
     'secret': account_config['secret'],
     'password': account_config['password'],
 })
+
+# 1. 根据当前账号选择要交易的品种列表
+symbols_to_trade_raw = ACCOUNT_SYMBOL_MAPPING.get(CURRENT_ACCOUNT, [])
+# 2. 从 MULTI_SYMBOL_CONFIGS 中过滤并初始化 SYMBOL_CONFIGS
+symbols_to_trade: List[str] = [] # 最终用于交易循环的品种列表
 
 def log_order_params(order_type, params, function_name=""):
     """简化版订单参数日志"""
@@ -543,67 +613,51 @@ def cleanup_resources():
         logger.log_error("cleanup_resources", f"资源清理异常: {str(e)}")
 
 def save_position_history():
-    """保存持仓历史到文件"""
-    try:
-        if not POSITION_HISTORY:
-            return
-            
-        # 创建数据目录
-        data_dir = "trading_data"
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
+    """
+    将当前的仓位历史状态保存到当前账户的文件夹中。
+    """
+    global position # 引用全局仓位变量
+    
+    # 确保保存路径存在 (此逻辑已在 trade_logger 中实现，但这里冗余一次更安全)
+    save_dir = os.path.dirname(POSITION_STATE_FILE)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
         
-        # 保存每个品种的持仓历史
-        for symbol, history in POSITION_HISTORY.items():
-            if history:
-                filename = f"{data_dir}/{get_base_currency(symbol)}_position_history.json"
-                try:
-                    # 转换 datetime 对象为字符串
-                    serializable_history = []
-                    for record in history:
-                        serializable_record = record.copy()
-                        # 确保所有值都是可序列化的
-                        for key, value in serializable_record.items():
-                            if isinstance(value, (datetime, pd.Timestamp)):
-                                serializable_record[key] = value.strftime('%Y-%m-%d %H:%M:%S')
-                        serializable_history.append(serializable_record)
-                    
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        json.dump(serializable_history, f, indent=2, ensure_ascii=False)
-                    
-                    logger.log_info(f"💾 {get_base_currency(symbol)}: 持仓历史已保存到 {filename}")
-                    
-                except Exception as e:
-                    logger.log_error(f"save_history_{get_base_currency(symbol)}", f"保存持仓历史失败: {str(e)}")
-                    
-    except Exception as e:
-        logger.log_error("save_position_history", f"保存持仓历史异常: {str(e)}")
-
-def load_position_history():
-    """从文件加载持仓历史"""
+    # 只有当 position 不是 None 且有内容时才保存
+    if position is None:
+        return
+        
     try:
-        data_dir = "trading_data"
-        if not os.path.exists(data_dir):
-            return
-            
-        for filename in os.listdir(data_dir):
-            if filename.endswith("_position_history.json"):
-                filepath = os.path.join(data_dir, filename)
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        history = json.load(f)
-                    
-                    # 提取品种名称
-                    symbol_name = filename.replace("_position_history.json", "")
-                    # 这里需要根据文件名映射回完整的symbol，可能需要调整
-                    # 暂时跳过具体映射
-                    logger.log_info(f"📂 加载持仓历史: {filename} ({len(history)} 条记录)")
-                    
-                except Exception as e:
-                    logger.log_warning(f"⚠️ 加载持仓历史文件失败 {filename}: {str(e)}")
-                    
+        # 将 position 对象转换为 JSON 可序列化的格式 (如果 position 是自定义类，需手动转换)
+        serializable_position = position # 假设 position 本身是 dict 或 list
+        
+        with open(POSITION_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(serializable_position, f, indent=4)
+        # logger.log_debug(f"💾 成功保存 {CURRENT_ACCOUNT} 账户的仓位状态。")
+        
     except Exception as e:
-        logger.log_error("load_position_history", f"加载持仓历史异常: {str(e)}")
+        logger.log_error("save_position_history", f"保存仓位状态失败: {e}")
+
+
+def load_position_history() -> Optional[Dict[str, Any]]:
+    """
+    从当前账户的文件夹中加载上次保存的仓位历史状态。
+    """
+    global position # 引用全局仓位变量
+    
+    try:
+        if os.path.exists(POSITION_STATE_FILE):
+            with open(POSITION_STATE_FILE, 'r', encoding='utf-8') as f:
+                # 假设 position 存储的是一个字典结构
+                position_data = json.load(f)
+                logger.log_info(f"✅ 成功加载 {CURRENT_ACCOUNT} 账户的仓位状态。")
+                return position_data
+        else:
+            logger.log_info(f"ℹ️ {CURRENT_ACCOUNT} 账户的仓位状态文件不存在，将从空状态开始。")
+            return None
+    except Exception as e:
+        logger.log_error("load_position_history", f"加载仓位状态失败: {e}")
+        return None
 
 def calculate_adaptive_stop_loss(symbol: str, side: str, current_price: float, price_data: dict) -> float:
     """自适应止损计算 - 修复版本"""
@@ -856,18 +910,27 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
             # 注意：scaling_position 已经是合约张数，不需要再次转换
             contract_size = scaling_position
             
-            # 🆕 修复：根据品种调整最终合约数量
-            base_currency = get_base_currency(symbol)
-            
-            # 需要整数张合约的品种
-            integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-            if base_currency in integer_only_currencies:
-                # 确保至少1张，向上取整到整数
-                contract_size = max(1, math.ceil(contract_size))
-                logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
+            # 🆕 --- 动态精度处理 (针对加仓) ---
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
 
-            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
+            if config.requires_integer:
+                # 整数合约品种 (向上取整)
+                contract_size = max(min_size, math.ceil(contract_size))
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (加仓) 调整为整数张合约: {contract_size} 张")
+            else:
+                # 非整数合约品种 (向下取整到有效步长)
+                if step_size > 0:
+                    contract_size = math.floor(contract_size / step_size) * step_size
+                else:
+                    contract_size = round(contract_size, 8) # Fallback
+                
+                # 确保不小于最小交易量
+                if contract_size < min_size:
+                    logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (加仓) 计算合约 {contract_size} 小于最小 {min_size}，调整为最小交易量")
+                    contract_size = min_size
             
+            logger.log_info(f"📈 {get_base_currency(symbol)}: 加仓计算完成 - {contract_size:.6f}张")
             return contract_size
         
         # 非加仓情况，继续标准计算
@@ -916,36 +979,70 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
         
+        # 🆕 新增：确保头仓保证金不小于5 USDT
+        MIN_BASE_MARGIN = 5.0  # 最小头仓保证金5 USDT
+        if final_usdt < MIN_BASE_MARGIN:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算保证金{final_usdt:.2f} USDT小于{MIN_BASE_MARGIN} USDT，调整为最小保证金")
+            final_usdt = MIN_BASE_MARGIN
+            
+            # 再次检查是否超过最大限制
+            if final_usdt > max_usdt:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 最小保证金{MIN_BASE_MARGIN} USDT超过最大限制{max_usdt:.2f} USDT，无法开仓")
+                return 0
+        
         # 转换为合约张数
-        # 此时 final_usdt 代表我们希望投入的 *保证金*
-        # 保证金 * 杠杆 = 名义总价值
         nominal_value = final_usdt * config.leverage
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
         
-        contract_size = round(contract_size, 2)  # 精度处理
+        # 🆕 --- 动态精度处理 (替换原有逻辑) ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
+
+        if config.requires_integer:
+            # 整数合约品种 (向上取整)
+            # (注意：开仓时我们更倾向于向上取整以满足最小保证金，这与加仓不同)
+            contract_size = max(min_size, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: (开仓) 调整为整数张合约: {contract_size} 张")
+        else:
+            # 非整数合约品种 (向下取整到有效步长)
+            if step_size > 0:
+                contract_size = math.floor(contract_size / step_size) * step_size
+            else:
+                contract_size = round(contract_size, 8) # Fallback
+
+            # 确保不小于最小交易量
+            if contract_size < min_size:
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算合约 {contract_size:.6f} 小于最小 {min_size:.6f}，调整为最小交易量")
+                contract_size = min_size   
         
-        # 在返回 contract_size 之前添加精度检查
-        min_contracts = getattr(config, 'min_amount', 0.01)
-        if min_contracts > 0:
-            # 向下取整到最小交易单位的整数倍
-            contract_size = (contract_size // min_contracts) * min_contracts
-            if contract_size < min_contracts:
-                contract_size = min_contracts
+        # 🆕 最终保证金验证
+        final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+        if final_margin < MIN_BASE_MARGIN:
+            # 如果最终保证金仍然小于最小值，重新计算合约数量
+            required_nominal_value = MIN_BASE_MARGIN * config.leverage
+            contract_size = required_nominal_value / (price_data['price'] * config.contract_size)
+            
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
 
-        # 确保最小交易量
-        contract_size = max(contract_size, min_contracts)      
+            if config.requires_integer:
+                # (保证金修正时，必须向上取整以满足要求)
+                contract_size = max(min_size, math.ceil(contract_size))
+            else:
+                # (保证金修正时，也应向上取整到下一个步长)
+                if step_size > 0:
+                    contract_size = math.ceil(contract_size / step_size) * step_size
+                else:
+                    contract_size = round(contract_size, 8)
+                
+                # 确保不小于最小交易量
+                if contract_size < min_size:
+                    contract_size = min_size
+            
+            final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 最终调整保证金为 {final_margin:.2f} USDT")
 
-        # 🆕 修复：根据品种调整最终合约数量
-        base_currency = get_base_currency(symbol)
-        
-        # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-        if base_currency in integer_only_currencies:
-            # 确保至少1张，向上取整到整数
-            contract_size = max(1, math.ceil(contract_size))
-            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
-
-        # 详细日志 (更新日志术语)
+        # 详细日志
         calculation_details = f"""
         🎯 增强版仓位计算详情:
         账户余额: {usdt_balance:.2f} USDT
@@ -957,9 +1054,14 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         建议保证金: {suggested_usdt:.2f} USDT → 最终保证金: {final_usdt:.2f} USDT
         名义总价值 (保证金 * 杠杆): {nominal_value:.2f} USDT
         合约数量: {contract_size:.2f}张
+        🛡️ 实际保证金: {final_margin:.2f} USDT
         """
         logger.log_info(calculation_details)
         
+        # 🆕 最终检查：如果保证金仍然不足，返回0
+        if final_margin < MIN_BASE_MARGIN:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求，放弃开仓")
+            return 0
 
         return contract_size
         
@@ -1055,12 +1157,20 @@ def setup_exchange(symbol: str):
         market_info = markets[symbol]
         
         # 动态更新配置实例的合约信息
-        config.contract_size = float(market_info.get('contractSize', 1.0))
-        config.min_amount = market_info['limits']['amount']['min']
-        
+        config.update_exchange_rules(
+            contract_size=float(market_info.get('contractSize', 1.0)),
+            min_amount=market_info['limits']['amount']['min'],
+            amount_step=market_info['precision']['amount'],
+            price_step=market_info['precision']['price'],
+            requires_integer=(market_info['precision']['amount'] == 1)
+        )
+
         logger.log_info(f"✅ Contract {get_base_currency(symbol)}: 1 contract = {config.contract_size} base asset")
         logger.log_info(f"📏 Min trade {get_base_currency(symbol)}: {config.min_amount} contracts")
-        
+        logger.log_info(f"📐 Amount step {get_base_currency(symbol)}: {config.amount_precision_step}")
+        logger.log_info(f"💰 Price step {get_base_currency(symbol)}: {config.price_precision_step}")
+        logger.log_info(f"🔢 Integer only: {config.requires_integer}")
+        # -----------------------------------------------
         # 2. 设置杠杆（使用更安全的方式）
         leverage = getattr(config, 'leverage', 50)
         logger.log_info(f"⚙️ Setting leverage for {get_base_currency(symbol)} to {leverage}x...")
@@ -1458,6 +1568,16 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         max_usdt = usdt_balance * posMngmt['max_position_ratio']
         final_usdt = min(suggested_usdt, max_usdt)
 
+        # 🆕 新增：确保头仓保证金不小于5 USDT
+        MIN_BASE_MARGIN = 5.0
+        if final_usdt < MIN_BASE_MARGIN:
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算保证金{final_usdt:.2f} USDT小于{MIN_BASE_MARGIN} USDT，调整为最小保证金")
+            final_usdt = MIN_BASE_MARGIN
+            
+            if final_usdt > max_usdt:
+                logger.log_error(f"❌ {get_base_currency(symbol)}: 最小保证金{MIN_BASE_MARGIN} USDT超过最大限制{max_usdt:.2f} USDT")
+                return 0
+            
         # ------------------- 核心修改开始 -------------------
         
         # Correct contract quantity calculation!
@@ -1467,31 +1587,27 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         contract_size = nominal_value / (price_data['price'] * config.contract_size)
 
         # ------------------- 核心修改结束 -------------------
+        # 🆕 --- 修正的动态精度处理 ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
 
-        # Precision handling: OKX BTC contract minimum trading unit is 0.01 contracts
-        contract_size = round(contract_size, 2)  # Keep 2 decimal places
+        if config.requires_integer:
+            # 1. 优先处理整数合约：向上取整，并确保不小于最小
+            contract_size = max(min_size, math.ceil(contract_size))
+            logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 调整为整数张合约: {contract_size} 张")
+        else:
+            # 2. 非整数合约：向下取整到步长
+            if step_size > 0:
+                contract_size = math.floor(contract_size / step_size) * step_size
+            else:
+                contract_size = round(contract_size, 8) # Fallback
 
-        # 在返回 contract_size 之前添加精度检查
-        min_contracts = getattr(config, 'min_amount', 0.01)
-        if min_contracts > 0:
-            # 向下取整到最小交易单位的整数倍
-            contract_size = (contract_size // min_contracts) * min_contracts
-            if contract_size < min_contracts:
-                contract_size = min_contracts
+            # 确保不小于最小交易量
+            if contract_size < min_size:
+                logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 计算合约 {contract_size:.6f} 小于最小 {min_size:.6f}，调整为最小交易量")
+                contract_size = min_size
+        # --- 修正结束 ---
 
-        # 确保最小交易量
-        contract_size = max(contract_size, min_contracts)
-
-        # 🆕 修复：根据品种调整最终合约数量
-        base_currency = get_base_currency(symbol)
-        
-        # 需要整数张合约的品种
-        integer_only_currencies = ['BCH', 'LTC', 'DASH', 'ZEC','ZEN']
-        if base_currency in integer_only_currencies:
-            # 确保至少1张，向上取整到整数
-            contract_size = max(1, math.ceil(contract_size))
-            logger.log_warning(f"⚠️ {base_currency}: 调整为整数张合约: {contract_size} 张")
-            
         calculation_summary = f"""
             📊 仓位计算详情:
             基础保证金: {base_usdt} USDT | 信心倍数: {confidence_multiplier}
@@ -1502,15 +1618,32 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
             """
         logger.log_info(calculation_summary)
 
+        # 🆕 最终保证金验证
+        final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
+        if final_margin < MIN_BASE_MARGIN:
+            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求")
+            return 0
+        
         return contract_size
 
     except Exception as e:
-        logger.log_error("Position calculation failed, using base position", str(e))
-        # Emergency backup calculation
-        base_usdt = posMngmt['base_usdt_amount']
-        contract_size = (base_usdt * config.leverage) / (
-                    price_data['price'] * getattr(config, 'contract_size', 0.01))
-        return round(max(contract_size, getattr(config, 'min_amount', 0.01)), 2)
+            logger.log_error("Position calculation failed, using base position", str(e))
+            # 🆕 --- 修正的备用计算 ---
+            # Emergency backup calculation
+            base_usdt = posMngmt['base_usdt_amount']
+            contract_size = (base_usdt * config.leverage) / (price_data['price'] * getattr(config, 'contract_size', 0.01))
+            
+            # 同样应用动态精度
+            step_size = config.amount_precision_step
+            min_size = config.min_amount
+
+            if config.requires_integer:
+                contract_size = max(min_size, math.ceil(contract_size))
+            else:
+                if step_size > 0:
+                    contract_size = math.floor(contract_size / step_size) * step_size
+                contract_size = max(min_size, contract_size)
+            return contract_size
 
 
 def calculate_technical_indicators(df):
@@ -1705,31 +1838,32 @@ def get_market_trend(df):
     except Exception as e:
         logger.log_error("trend_analysis", str(e))
         return {}
+
+def get_correct_inst_id(symbol: str) -> str:
+    """
+    将 CCXT 格式的永续合约符号转换为 OKX 交易所要求的 InstId (例如: BTC/USDT:USDT -> BTC-USDT-SWAP)。
+
+    Args:
+        symbol: CCXT 标准格式的交易品种符号。
+
+    Returns:
+        OKX 要求的合约 ID。
+    """
+    if not symbol or ':' not in symbol:
+        # 如果格式不正确，直接返回符号，让交易所 API 报错（安全回退）
+        return symbol 
+
+    # 1. 移除合约类型后缀 (:USDT)，得到基础交易对部分
+    #    例如: 'ASTR/USDT:USDT' -> 'ASTR/USDT'
+    base_quote = symbol.split(':')[0]
     
-def get_correct_inst_id(symbol: str):
-    """获取正确的合约ID"""
-    # 对于 BTC/USDT:USDT，正确的instId是 BTC-USDT-SWAP
-    config = SYMBOL_CONFIGS[symbol]
-    symbol = config.symbol
-    if symbol == 'BTC/USDT:USDT':
-        return 'BTC-USDT-SWAP'
-    elif symbol == 'ETH/USDT:USDT':
-        return 'ETH-USDT-SWAP'
-    elif symbol == 'SOLUSDT:USDT':
-        return 'SOL-USDT-SWAP'
-    elif symbol == 'BCH/USDT:USDT':
-        return 'BCH-USDT-SWAP'
-    elif symbol == 'LTC/USDT:USDT':
-        return 'LTC-USDT-SWAP'
-    elif symbol == 'DASH/USDT:USDT':
-        return 'DASH-USDT-SWAP'
-    elif symbol == 'ZEC/USDT:USDT':
-        return 'ZEC-USDT-SWAP'
-    elif symbol == 'ZEN/USDT:USDT':
-        return 'ZEN-USDT-SWAP'
-    else:
-        # 通用处理
-        return symbol.replace('/', '-').replace(':USDT', '-SWAP')
+    # 2. 将分隔符 '/' 替换为 OKX 要求的 '-' (连字符)
+    #    例如: 'ASTR/USDT' -> 'ASTR-USDT'
+    inst_id_base = base_quote.replace('/', '-')
+    
+    # 3. 加上 OKX 永续合约的后缀
+    #    例如: 'ASTR-USDT' -> 'ASTR-USDT-SWAP'
+    return f"{inst_id_base}-SWAP"
 
 def log_api_response(response, function_name=""):
     """记录API响应"""
@@ -2687,7 +2821,7 @@ def analyze_with_deepseek(symbol: str, price_data: dict):
         - Sentiment data delay → Reduce weight, use real-time technical indicators as main
         3. **Risk Management** (Weight 10%): Consider position, profit/loss status and stop loss position
         4. **Trend Following**: Take immediate action when clear trend appears, do not over-wait
-        5. Because trading BTC, long position weight can be slightly higher
+        5. Because trading coins like btc, long position weight can be slightly higher
         6. **Signal Clarity**:
         - Strong uptrend → BUY signal
         - Strong downtrend → SELL signal
@@ -3334,34 +3468,29 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
             return None
         
         inst_id = get_correct_inst_id(symbol)
+
+        # 🆕 --- 动态合约数量精度调整 ---
+        step_size = config.amount_precision_step
+        min_size = config.min_amount
         
-        # 🆕 修复：根据品种调整合约数量精度
-        # 获取品种特定的最小交易单位
-        min_amount = getattr(config, 'min_amount', 0.01)
-        
-        # 🆕 特殊处理：某些品种要求整数张合约
-        integer_only_symbols = ['BCH/USDT:USDT', 'LTC/USDT:USDT', 'ZEC/USDT:USDT', 'ZEN/USDT:USDT', 'DASH/USDT:USDT']  # 需要整数张的品种
-        base_currency = get_base_currency(symbol)
-        
-        if symbol in integer_only_symbols or base_currency in ['BCH', 'LTC', 'DASH', 'ZEC', 'ZEN']:
-            # 这些品种要求整数张合约
-            adjusted_amount = max(1, int(round(amount)))  # 至少1张，四舍五入到整数
+        if config.requires_integer:
+            # 整数合约品种 (向上取整, 确保不小于最小量)
+            adjusted_amount = max(min_size, math.ceil(amount)) 
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 整数张合约调整 - 从 {amount:.4f} 调整为 {adjusted_amount} 张")
         else:
-            # 其他品种使用原有的精度调整
-            if min_amount > 0:
-                # 向下取整到最小交易单位的整数倍
-                adjusted_amount = (amount // min_amount) * min_amount
-                if adjusted_amount < min_amount:
-                    adjusted_amount = min_amount
+            # 非整数合约品种 (向下取整到有效步长)
+            if step_size > 0:
+                adjusted_amount = math.floor(amount / step_size) * step_size
             else:
-                adjusted_amount = amount
-        
-        # 确保调整后的数量不小于最小交易量
-        adjusted_amount = max(adjusted_amount, min_amount)
-        
+                adjusted_amount = round(amount, 8) # Fallback
+            
+            # 确保不小于最小交易量
+            if adjusted_amount < min_size:
+                 adjusted_amount = min_size
+
         # 如果调整后的数量与原数量不同，记录警告
-        if abs(adjusted_amount - amount) > 0.001:
+        # (使用步长的 1% 作为浮点数比较的容差)
+        if abs(adjusted_amount - amount) > (step_size * 0.01):
             logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 订单数量从 {amount:.4f} 调整为 {adjusted_amount:.4f} 以满足交易所精度要求")
         
         # 🆕 额外检查：确保调整后的数量仍然有效
@@ -3378,23 +3507,30 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
             'sz': str(adjusted_amount),  # 🆕 使用调整后的数量
         }
         
-        # 🆕 修复：确保价格参数是字符串格式
+        # 🆕 --- 动态价格精度调整 ---
+        price_step = config.price_precision_step
+
         if order_type == 'limit':
-            if limit_price is None:
-                logger.log_error("limit_order_missing_price", f"❌ {get_base_currency(symbol)}: 限价单必须提供limit_price参数")
-                return None
-            # 确保是字符串格式
-            if isinstance(limit_price, str):
-                params['px'] = limit_price
-            else:
-                params['px'] = str(round(limit_price, 2))
-        
-        # 添加止损止盈参数（如果提供了止损止盈价格）
-        if stop_loss_price is not None and take_profit_price is not None:
-            # 🆕 修复：确保止损止盈价格是字符串格式
-            sl_price_str = stop_loss_price if isinstance(stop_loss_price, str) else str(round(stop_loss_price, 2))
-            tp_price_str = take_profit_price if isinstance(take_profit_price, str) else str(round(take_profit_price, 2))
+            # ...
+            # 动态调整限价单价格
+            if price_step > 0:
+                # OKX 通常要求价格是 price_step 的倍数
+                limit_price = round(limit_price / price_step) * price_step
             
+            params['px'] = str(limit_price)
+        
+
+        # 添加止损止盈参数
+        if stop_loss_price is not None and take_profit_price is not None:
+            
+            # 动态调整止损止盈价格
+            if price_step > 0:
+                stop_loss_price = round(stop_loss_price / price_step) * price_step
+                take_profit_price = round(take_profit_price / price_step) * price_step
+
+            sl_price_str = str(stop_loss_price)
+            tp_price_str = str(take_profit_price)
+
             params['attachAlgoOrds'] = [
                 {
                     'tpTriggerPx': tp_price_str,
@@ -4308,46 +4444,68 @@ def analyze_position_history(symbol: str) -> dict:
 
 def main():
     """
-    主程序入口 - 支持多交易品种
+    优化后的主程序 - 基于K线周期的动态调度
     """
-    global SYMBOL_CONFIGS
-    
-    # TEST : 列出所有可用的私有API方法
-    # exchge = ccxt.okx()
-    # print("所有可用的私有API方法:")
-    # private_methods = [method for method in dir(exchge) if method.startswith('private')]
-    # for method in private_methods:
+    global SYMBOL_CONFIGS, symbols_to_trade
 
-    #     print(method)
+    # 🆕 在程序开始时加载仓位状态
+    global position
+    position = load_position_history()
+    if position is None:
+        logger.log_info("ℹ️ 从空仓位状态开始")
+    else:
+        logger.log_info(f"✅ 成功加载仓位状态")
+
     # 添加信号处理
     import signal
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # 🆕 加载持仓历史数据
-    logger.log_info("📂 加载历史数据...")
-    load_position_history()
-
-    # 1. 动态加载交易品种列表
-    symbols_to_trade_str = os.getenv('TRADING_SYMBOLS', '')
-    if symbols_to_trade_str:
-        symbols_to_trade = [s.strip() for s in symbols_to_trade_str.split(',') if s.strip()]
-    else:
-        symbols_to_trade = list(MULTI_SYMBOL_CONFIGS.keys())
-        
-    if not symbols_to_trade:
-        logger.log_error("config_error", "未找到任何交易品种配置")
+    if not symbols_to_trade_raw:
+        logger.log_error("配置错误", f"❌ 账号 '{CURRENT_ACCOUNT}' 在 ACCOUNT_SYMBOL_MAPPING 中没有对应的交易品种配置。")
         return
 
-    # 2. 初始化所有品种的配置
+    logger.log_info(f"⚙️ 账号 '{CURRENT_ACCOUNT}' 准备加载 {len(symbols_to_trade_raw)} 个品种的配置...")
+
+    # 1. 加载品种配置 - 第一轮：从原始列表加载
+    for symbol in symbols_to_trade_raw:
+        config_dict = MULTI_SYMBOL_CONFIGS.get(symbol)
+        if config_dict:
+            try:
+                symbol_config = TradingConfig(symbol, **config_dict)
+                is_valid, errors, warnings = symbol_config.validate_config()
+                if not is_valid:
+                    logger.log_error(f"❌ {get_base_currency(symbol)} 配置验证失败: {errors}")
+                    continue
+                if warnings:
+                    for w in warnings:
+                        logger.log_warning(f"⚠️ {get_base_currency(symbol)} 配置警告: {w}")
+                
+                SYMBOL_CONFIGS[symbol] = symbol_config
+                symbols_to_trade.append(symbol)
+                logger.log_info(f"✅ {get_base_currency(symbol)} 配置加载成功")
+                
+            except Exception as e:
+                logger.log_error(f"❌ {get_base_currency(symbol)} 配置初始化失败: {str(e)}")
+        else:
+            logger.log_error(f"❌ 品种 {symbol} 在 MULTI_SYMBOL_CONFIGS 中未找到配置，跳过。")
+
+    logger.log_info(f"🚀 账号 '{CURRENT_ACCOUNT}' 初步加载 {len(symbols_to_trade)} 个品种")
+
+    # 🆕 2. 第二轮配置验证和初始化 - 这是你提到的关键代码
+    valid_symbols = []
     for symbol in symbols_to_trade:
         try:
             if symbol not in MULTI_SYMBOL_CONFIGS:
                 logger.log_warning(f"⚠️ 跳过未配置的品种: {get_base_currency(symbol)}")
                 continue
                 
-            symbol_config = MULTI_SYMBOL_CONFIGS[symbol]
-            config = TradingConfig(symbol=symbol, config_data=symbol_config)
+            # 这里确保配置对象正确创建
+            if symbol not in SYMBOL_CONFIGS:
+                config_dict = MULTI_SYMBOL_CONFIGS[symbol]
+                config = TradingConfig(symbol=symbol, config_data=config_dict)
+            else:
+                config = SYMBOL_CONFIGS[symbol]
             
             # 验证配置
             is_valid, errors, warnings = config.validate_config(symbol)
@@ -4355,22 +4513,28 @@ def main():
                 logger.log_error(f"config_validation_{get_base_currency(symbol)}", f"配置验证失败: {errors}")
                 continue
                 
+            # 确保配置正确存储
             SYMBOL_CONFIGS[symbol] = config
+            valid_symbols.append(symbol)
+            
             logger.log_info(f"✅ 加载配置: {get_base_currency(symbol)} | 杠杆 {config.leverage}x | 基础金额 {config.position_management['base_usdt_amount']} USDT")
             
         except Exception as e:
             logger.log_error(f"config_loading_{get_base_currency(symbol)}", str(e))
+    
+    # 更新有效的交易品种列表
+    symbols_to_trade = valid_symbols
             
     if not SYMBOL_CONFIGS:
         logger.log_error("program_exit", "所有交易品种配置加载失败")
         return
 
-    # 类型安全检查
+    # 🆕 类型安全检查
     if not SYMBOL_CONFIGS or not isinstance(SYMBOL_CONFIGS, dict):
         logger.log_error("program_exit", "交易品种配置加载失败或类型错误")
         return
         
-    # 确保 first_config 是 TradingConfig 对象
+    # 🆕 确保 first_config 是 TradingConfig 对象
     first_config = None
     for config in SYMBOL_CONFIGS.values():
         if hasattr(config, 'max_consecutive_errors'):
@@ -4387,7 +4551,9 @@ def main():
         
         first_config = DefaultConfig()
 
-    # 3. 设置交易所
+    logger.log_info(f"🎯 最终交易品种列表: {[get_base_currency(s) for s in symbols_to_trade]}")
+
+    # 2. 初始化交易所设置
     for symbol in list(SYMBOL_CONFIGS.keys()):
         if not setup_exchange(symbol):
             logger.log_error("exchange_setup", f"交易所设置失败: {get_base_currency(symbol)}")
@@ -4398,102 +4564,157 @@ def main():
         logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
+    # 3. 打印版本信息
+    version_config = SYMBOL_CONFIGS[symbols_to_trade[0]]
+    print_version_banner(version_config)
 
     # 🆕 启动时持仓检查
-    check_existing_positions_on_startup()      
+    check_existing_positions_on_startup()
 
-    logger.log_info(f"🚀 主循环启动，交易品种: {', '.join(symbols_to_trade)}")
-    
-    # 原始 TRADE_CONFIG 的引用需要替换为 SYMBOL_CONFIGS 中任一个（例如第一个）
-    # 以获取通用的 max_consecutive_errors 等参数。
-    first_config = list(SYMBOL_CONFIGS.values())[0]
+    # 🆕 4. 初始化动态调度系统
+    symbol_schedules = {}
+    for symbol in symbols_to_trade:
+        config = SYMBOL_CONFIGS[symbol]
+        next_execution = calculate_next_execution_time(symbol)
+        
+        symbol_schedules[symbol] = {
+            'next_execution': next_execution,
+            'timeframe': config.timeframe,
+            'timeframe_seconds': get_timeframe_seconds(config.timeframe),
+            'last_execution': 0,
+            'execution_count': 0
+        }
+        
+        next_time_str = datetime.fromtimestamp(next_execution).strftime('%H:%M:%S')
+        logger.log_info(f"⏰ {get_base_currency(symbol)}: 首次执行 {next_time_str} ({config.timeframe}周期)")
 
-    # Initialize control variables
+    logger.log_info(f"🚀 动态调度系统启动，监控 {len(symbols_to_trade)} 个品种")
+
+    # 5. 主循环控制变量
     consecutive_errors = 0
     last_health_check = 0
-    health_check_interval = 3600  # 1 hour
+    health_check_interval = 3600  # 1小时
     last_config_check = 0
-    config_check_interval = first_config.config_check_interval # 使用任一配置的检查间隔
+    config_check_interval = 300   # 5分钟
     last_perf_log = 0
-    perf_log_interval = first_config.perf_log_interval
-
-    # 在定时任务中添加持仓历史分析
+    perf_log_interval = 3600      # 1小时
     last_position_analysis = 0
-    position_analysis_interval = 3600  # 每小时分析一次
+    position_analysis_interval = 3600  # 1小时
 
     try:
         while True:
-            try:
-                current_time = time.time()
-                
-                # 定期分析持仓历史
-                if current_time - last_position_analysis >= position_analysis_interval:
-                    for symbol in symbols_to_trade:
-                        analyze_position_history(symbol)
-                    last_position_analysis = current_time
-                    
-                # Health check - 修复这里
-                if current_time - last_health_check >= health_check_interval:
-                    logger.log_info("🔍 Running scheduled health check...")
-                    
-                    # 对每个交易品种执行健康检查
-                    health_ok = True
-                    for symbol in SYMBOL_CONFIGS.keys():
-                        if not health_check(symbol):
-                            health_ok = False
-                            break
-                    
-                    if not health_ok:
-                        consecutive_errors += 1
-                        # 安全地获取配置限制
-                        try:
-                            max_errors = first_config.max_consecutive_errors
-                        except (AttributeError, TypeError):
-                            max_errors = 5  # 默认值
-                        
-                        if consecutive_errors >= max_errors:
-                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                            break
-                    else:
-                        consecutive_errors = 0
-                    last_health_check = current_time
-            
-                # Configuration reload check - every 5 minutes
-                if current_time - last_config_check >= config_check_interval:
-                    last_config_check = current_time
+            current_time = time.time()
+            executed_this_cycle = False
 
-                # Run trading bot for all symbols
-                for symbol in symbols_to_trade:
-                    trading_bot(symbol)
+            # 🆕 动态调度：检查每个品种的执行时间
+            for symbol in symbols_to_trade:
+                schedule = symbol_schedules[symbol]
                 
-                # Log performance for each symbol
+                if current_time >= schedule['next_execution']:
+                    try:
+                        # 执行交易逻辑
+                        trading_bot(symbol)
+                        schedule['execution_count'] += 1
+                        schedule['last_execution'] = current_time
+                        executed_this_cycle = True
+                        
+                        # 计算下一个执行时间
+                        schedule['next_execution'] = calculate_next_execution_time(symbol)
+                        
+                        next_time_str = datetime.fromtimestamp(schedule['next_execution']).strftime('%H:%M:%S')
+                        time_until_str = format_time_until_next_execution(schedule['next_execution'])
+                        
+                        logger.log_info(f"⏰ {get_base_currency(symbol)}: 下次执行 {next_time_str} ({time_until_str})")
+                        
+                    except Exception as e:
+                        logger.log_error(f"scheduled_execution_{get_base_currency(symbol)}", f"调度执行失败: {str(e)}")
+                        # 出错时仍然设置下一个执行时间，避免阻塞
+                        schedule['next_execution'] = current_time + 60  # 1分钟后重试
+
+            # 🆕 定期健康检查
+            if current_time - last_health_check >= health_check_interval:
+                logger.log_info("🔍 执行定期健康检查...")
+                health_ok = True
+                for symbol in symbols_to_trade:
+                    if not health_check(symbol):
+                        health_ok = False
+                        break
+                
+                if not health_ok:
+                    consecutive_errors += 1
+                    max_errors = getattr(version_config, 'max_consecutive_errors', 5)
+                    if consecutive_errors >= max_errors:
+                        logger.log_error("🚨 连续错误过多，程序退出")
+                        break
+                else:
+                    consecutive_errors = 0
+                last_health_check = current_time
+
+            # 🆕 定期配置检查
+            if current_time - last_config_check >= config_check_interval:
+                last_config_check = current_time
+                # 这里可以添加配置重载逻辑
+
+            # 🆕 定期性能日志
+            if current_time - last_perf_log >= perf_log_interval:
                 for symbol in symbols_to_trade:
                     log_performance_metrics(symbol)
+                last_perf_log = current_time
 
-                # Wait for next cycle
-                time.sleep(60)
-            
-            except KeyboardInterrupt:
-                logger.log_warning("\n🛑 User interrupted the program.")
-                break
+            # 🆕 定期持仓分析
+            if current_time - last_position_analysis >= position_analysis_interval:
+                for symbol in symbols_to_trade:
+                    analyze_position_history(symbol)
+                last_position_analysis = current_time
 
-            except Exception as e:
-                logger.log_error("main_loop", f"Error: {str(e)}")
-                consecutive_errors += 1
-                # 安全地获取配置限制
-                try:
-                    max_errors = first_config.max_consecutive_errors
-                except (AttributeError, TypeError):
-                    max_errors = 5  # 默认值
+            # 🆕 保存仓位状态
+            save_position_history()
+
+            # 🆕 智能睡眠计算
+            if executed_this_cycle:
+                # 如果本轮有执行，短暂睡眠后继续检查
+                sleep_time = 1
+            else:
+                # 计算距离最近的下次执行时间
+                next_executions = [s['next_execution'] for s in symbol_schedules.values()]
+                if next_executions:
+                    next_execution = min(next_executions)
+                    sleep_time = max(1, min(30, next_execution - current_time))
+                else:
+                    sleep_time = 30
+                
+                # 记录调度状态
+                if sleep_time > 5:  # 只在较长睡眠时记录
+                    active_schedules = []
+                    for symbol, schedule in symbol_schedules.items():
+                        time_until = schedule['next_execution'] - current_time
+                        if time_until <= 300:  # 只显示5分钟内的
+                            active_schedules.append(
+                                f"{get_base_currency(symbol)}:{format_time_until_next_execution(schedule['next_execution'])}"
+                            )
                     
-                if consecutive_errors >= max_errors:
-                    logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                    break
-                time.sleep(60)
+                    if active_schedules:
+                        logger.log_debug(f"⏰ 调度状态: {', '.join(active_schedules)}")
 
+            time.sleep(sleep_time)
+
+    except KeyboardInterrupt:
+        logger.log_warning("\n🛑 用户中断程序")
+    except Exception as e:
+        logger.log_error("main_loop", f"主循环异常: {str(e)}")
     finally:
         cleanup_resources()
+        
+        # 🆕 输出调度统计
+        logger.log_info("📊 动态调度统计:")
+        for symbol, schedule in symbol_schedules.items():
+            execution_count = schedule.get('execution_count', 0)
+            timeframe = schedule.get('timeframe', 'unknown')
+            logger.log_info(f"  {get_base_currency(symbol)}: 执行{execution_count}次 ({timeframe}周期)")
+        
         logger.log_info("👋 程序退出")
+
+
 
 if __name__ == "__main__":
     main()

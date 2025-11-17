@@ -32,11 +32,11 @@ MULTI_SYMBOL_CONFIGS = {
     #     'max_position_ratio': 5,
     # },
     # LTC 配置 (示例)
-    'LTC/USDT:USDT': {
-        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
-        'max_position_ratio': 5,
-    },
+    # 'LTC/USDT:USDT': {
+    #     'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+    #     'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
+    #     'max_position_ratio': 5,
+    # },
     # # BCH 配置 (示例)
     # 'BCH/USDT:USDT': {
     #     'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
@@ -55,22 +55,80 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('ZEC_BASE_USDT_AMOUNT', 60)),
         'max_position_ratio': 7,
     },
-    # # ZEN 配置 (示例)
-    # 'ZEN/USDT:USDT': {
-    #     'leverage': int(os.getenv('ZEN_LEVERAGE', 15)),
-    #     'base_usdt_amount': float(os.getenv('ZEN_BASE_USDT_AMOUNT', 60)),
-    #     'max_position_ratio': 7,
-    # },
+    # ZEN 配置 (示例)
+    'ZEN/USDT:USDT': {
+        'leverage': int(os.getenv('ZEN_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('ZEN_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    'ASTER/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('ASTER_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('ASTER_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 5,
+    },
+    
+    'UNI/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('UNI_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('UNI_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 7,
+    },
+    
+    'OKB/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('OKB_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('OKB_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    'HYPE/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('HYPE_LEVERAGE', 10)),
+        'base_usdt_amount': float(os.getenv('HYPE_BASE_USDT_AMOUNT', 30)),
+        'max_position_ratio': 3,
+    },    
+    'WCT/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('WCT_LEVERAGE', 10)),
+        'base_usdt_amount': float(os.getenv('WCT_BASE_USDT_AMOUNT', 70)),
+        'max_position_ratio': 3,
+    },
 }
+
+# 定义不同账号对应的交易品种列表
+# 请确保这里的品种名称与 MULTI_SYMBOL_CONFIGS 中的键一致
+ACCOUNT_SYMBOL_MAPPING = {
+    # 主账号用于交易 BTC, ETH
+    "okxMain": [
+        'BTC/USDT:USDT',
+        'UNI/USDT:USDT',
+        'OKB/USDT:USDT',
+        'HYPE/USDT:USDT',
+    ],
+    # 子账号用于交易 SOL, LTC, BCH
+    "okxSub1": [
+        'DASH/USDT:USDT',
+        'ZEC/USDT:USDT',
+        'ASTER/USDT:USDT',
+        'WCT/USDT:USDT',
+    ],
+    # 默认账号 (如果运行程序时未指定账号)
+    "default": [
+        'BTC/USDT:USDT', # 示例中只保留一个默认品种
+        'DASH/USDT:USDT',
+    ],
+}
+
 class TradingConfig:
     """Dynamic configuration management for trading bot"""
     
-    def __init__(self, symbol: str, config_data: dict):
+    # 🚀 关键修改点：将 config_data: dict 替换为 **kwargs: Any，以捕获所有传入的关键字参数
+    def __init__(self, symbol: str, **kwargs: Any):
         # 1. 设置品种信息
         self.symbol = symbol
         
-        # 使用传入的配置数据
-        current_config = config_data  # 直接使用传入的配置
+        # 🆕 修复点：将 kwargs（即 **config_dict 展开后的内容）作为当前配置数据
+        current_config = kwargs 
 
         # Trading parameters
         self.leverage = current_config.get('leverage', int(os.getenv('LEVERAGE', 50)))
@@ -79,7 +137,19 @@ class TradingConfig:
         self.test_mode = os.getenv('TEST_MODE', 'False').lower() == 'true'
         self.data_points = int(os.getenv('DATA_POINTS', 96))
         self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
-        
+
+        # 🆕 --- 交易所合约规则 (将在 setup_exchange 中被动态填充) ---
+        # 合约面值 (e.g., 1.0 for BTC)
+        self.contract_size = 1.0
+        # 最小下单量 (e.g., 0.01 for BTC, 1 for BCH)
+        self.min_amount = 0.01 
+        # 数量精度步长 (e.g., 0.01 for BTC, 1 for BCH)
+        self.amount_precision_step = 0.01 
+        # 价格精度步长 (e.g., 0.1 for BTC)
+        self.price_precision_step = 0.1
+        # 是否只支持整数张合约
+        self.requires_integer = False
+
         # Exchange settings
         self.exchange_name = 'okx'
         self.default_type = 'swap'
@@ -299,11 +369,17 @@ class TradingConfig:
         self._last_update = time.time()
         print("🔄 Configuration reloaded from environment variables")
 
-    def update_contract_info(self, contract_size, min_amount):
-        """Update contract information from exchange"""
+    def update_exchange_rules(self, contract_size: float, min_amount: float, amount_step: float, price_step: float, requires_integer: bool):
+        """
+        Update all contract and precision information from exchange market data.
+        这是连接交易所获取数据和交易逻辑的关键步骤。
+        """
         self.contract_size = contract_size
         self.min_amount = min_amount
-    
+        self.amount_precision_step = amount_step  # 🆕 修正点：更新数量精度步长
+        self.price_precision_step = price_step    # 🆕 修正点：更新价格精度步长
+        self.requires_integer = requires_integer  # 🆕 修正点：更新是否为整数合约
+
     def get_position_config(self):
         """Get position management configuration"""
         return self.position_management
@@ -426,26 +502,13 @@ class TradingConfig:
             'version': self.get_version()  # 🆕 包含版本信息
         }
 
-def create_trade_config(symbol: str = None) -> TradingConfig:
-    """创建交易配置实例"""
-    if symbol is None:
-        symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT:USDT')
-    
-    symbol_config = MULTI_SYMBOL_CONFIGS.get(symbol, MULTI_SYMBOL_CONFIGS['BTC/USDT:USDT'])
-    return TradingConfig(symbol=symbol, config_data=symbol_config)
-
-# Create global instance
-TRADE_CONFIG = create_trade_config()
-
 # 简单的版本工具函数
-def print_version_banner():
+def print_version_banner(config: 'TradingConfig'): # 接受一个 TradingConfig 实例
     """打印版本横幅"""
-    version_info = TRADE_CONFIG.get_version_details()
+    # 直接使用传入的 config 实例
+    version_info = config.get_version_details() 
     print("=" * 50)
     print(f"🚀 Trading Bot {version_info['full_version']}")
     print(f"📅 Build Time: {version_info['build_time']}")
     print(f"🌿 Branch: {version_info['branch']}")
     print("=" * 50)
-
-# 在模块加载时打印版本信息
-print_version_banner()

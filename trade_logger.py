@@ -2,22 +2,19 @@ import logging
 import os
 import sys
 from datetime import datetime
+from cmd_config import CURRENT_ACCOUNT
 
 class TradingLogger:
-    def __init__(self,log_level=logging.INFO):
-        try:
-            # 局部导入全局变量，避免循环依赖
-            from ds_perfect import CURRENT_ACCOUNT
+    def __init__(self, log_level=logging.INFO):
+            # ❌ 移除旧的 try...except 导入逻辑
+            
+            # 🚀 更改点 2: 直接使用导入的 CURRENT_ACCOUNT (它保证已被设置)
             self.current_account = CURRENT_ACCOUNT
-        except (ImportError, AttributeError):
-            #  fallback：如果导入失败，使用默认账号
-            self.current_account = "default"
-            print("Warning: CURRENT_ACCOUNT not found, using 'default' instead")
-        
-        # 生成日志文件路径
-        self.log_file = f'../Output/trading_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        self.setup_logging(log_level)
-    
+            
+            # 生成日志文件路径 (使用 self.current_account 来构造路径)
+            self.log_file = f'../Output/{self.current_account}/{self.current_account}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+            self.setup_logging(log_level)
+
     def setup_logging(self, log_level):
         """Setup logging with rotation and better formatting"""
         # Create logs directory if it doesn't exist
@@ -120,9 +117,8 @@ class TradingLogger:
         else:
             self.logger.warning(self._format_message(f"HEALTH CHECK: FAILED | {details}"))
 
-# Initialize logger
+#logger 实例创建
 logger = TradingLogger()
-
 # HOW TO USE:
 # Replace print statements:
 # OLD: print(f"Signal generated: {signal_data['signal']}")
