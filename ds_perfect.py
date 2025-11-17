@@ -4374,7 +4374,7 @@ def main():
     主程序入口 - 支持多交易品种
     """
     global SYMBOL_CONFIGS
-    
+    global symbols_to_trade
     # TEST : 列出所有可用的私有API方法
     # exchge = ccxt.okx()
     # print("所有可用的私有API方法:")
