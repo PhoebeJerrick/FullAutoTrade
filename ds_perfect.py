@@ -56,6 +56,93 @@ load_dotenv(dotenv_path=env_path)
 # Initialize DeepSeek client with error handling
 deepseek_client = None
 
+# 在文件顶部添加这些函数
+def get_timeframe_seconds(timeframe: str) -> int:
+    """将时间帧转换为秒数"""
+    timeframe_seconds = {
+        '1m': 60,
+        '5m': 300,
+        '15m': 900,
+        '1h': 3600,
+        '4h': 14400,
+        '1d': 86400
+    }
+    return timeframe_seconds.get(timeframe, 900)  # 默认15分钟
+
+def calculate_next_execution_time(symbol: str) -> float:
+    """计算品种的下一个执行时间（对齐到K线周期）"""
+    config = SYMBOL_CONFIGS[symbol]
+    timeframe_seconds = get_timeframe_seconds(config.timeframe)
+    
+    # 获取当前时间
+    now = datetime.now()
+    current_timestamp = now.timestamp()
+    
+    # 计算当前K线周期的开始时间
+    current_candle_start = (current_timestamp // timeframe_seconds) * timeframe_seconds
+    
+    # 下一个执行时间 = 当前K线周期开始时间 + K线周期 + 延迟（确保K线闭合）
+    next_execution = current_candle_start + timeframe_seconds + 10  # 延迟10秒确保K线闭合
+    
+    # 如果当前时间已经超过计算的下个执行时间（由于处理延迟），调整到下个周期
+    if current_timestamp >= next_execution:
+        next_execution += timeframe_seconds
+    
+    return next_execution
+
+def format_time_until_next_execution(next_execution: float) -> str:
+    """格式化距离下次执行的时间"""
+    now = time.time()
+    seconds_until = next_execution - now
+    
+    if seconds_until <= 0:
+        return "立即执行"
+    elif seconds_until < 60:
+        return f"{int(seconds_until)}秒后"
+    elif seconds_until < 3600:
+        return f"{int(seconds_until/60)}分钟后"
+    else:
+        return f"{int(seconds_until/3600)}小时后"
+
+def get_scheduling_status() -> dict:
+    """获取当前调度状态"""
+    status = {
+        'total_symbols': len(symbol_schedules) if 'symbol_schedules' in globals() else 0,
+        'active_schedules': [],
+        'next_execution': None,
+        'status': 'running'
+    }
+    
+    if 'symbol_schedules' in globals():
+        current_time = time.time()
+        for symbol, schedule in symbol_schedules.items():
+            time_until = schedule['next_execution'] - current_time
+            status['active_schedules'].append({
+                'symbol': get_base_currency(symbol),
+                'timeframe': schedule['timeframe'],
+                'next_execution': schedule['next_execution'],
+                'time_until': time_until,
+                'execution_count': schedule.get('execution_count', 0)
+            })
+        
+        # 找到最近的下次执行时间
+        if status['active_schedules']:
+            next_exec = min([s['next_execution'] for s in status['active_schedules']])
+            status['next_execution'] = next_exec
+            status['time_until_next'] = next_exec - current_time
+    
+    return status
+
+def log_scheduling_status():
+    """记录调度状态"""
+    status = get_scheduling_status()
+    logger.log_info(f"📊 调度状态: {status['total_symbols']}个品种监控中")
+    
+    for schedule in status['active_schedules']:
+        if schedule['time_until'] <= 300:  # 只显示5分钟内的
+            time_str = format_time_until_next_execution(schedule['next_execution'])
+            logger.log_info(f"  {schedule['symbol']}: {time_str} ({schedule['timeframe']})")
+
 def get_deepseek_client(symbol: str):
     global deepseek_client
     config = SYMBOL_CONFIGS[symbol]
@@ -4358,17 +4445,10 @@ def analyze_position_history(symbol: str) -> dict:
 
 def main():
     """
-    主程序入口 - 支持多交易品种
+    优化后的主程序 - 基于K线周期的动态调度
     """
-    global SYMBOL_CONFIGS
-    global symbols_to_trade
-    # TEST : 列出所有可用的私有API方法
-    # exchge = ccxt.okx()
-    # print("所有可用的私有API方法:")
-    # private_methods = [method for method in dir(exchge) if method.startswith('private')]
-    # for method in private_methods:
-
-    # print(method)
+    global SYMBOL_CONFIGS, symbols_to_trade
+    
     # 添加信号处理
     import signal
     signal.signal(signal.SIGINT, signal_handler)
@@ -4379,20 +4459,17 @@ def main():
     load_position_history()
 
     if not symbols_to_trade_raw:
-        logger.log_error("配置错误", f"❌ 账号 '{CURRENT_ACCOUNT}' 在 ACCOUNT_SYMBOL_MAPPING 中没有对应的交易品种配置。程序将退出。")
-        # 如果没有找到配置，可以使用 sys.exit(1) 退出，或者使用默认列表
-        # symbols_to_trade_raw = ACCOUNT_SYMBOL_MAPPING.get("default", [])
+        logger.log_error("配置错误", f"❌ 账号 '{CURRENT_ACCOUNT}' 在 ACCOUNT_SYMBOL_MAPPING 中没有对应的交易品种配置。")
+        return
 
     logger.log_info(f"⚙️ 账号 '{CURRENT_ACCOUNT}' 准备加载 {len(symbols_to_trade_raw)} 个品种的配置...")
 
+    # 1. 加载品种配置 - 第一轮：从原始列表加载
     for symbol in symbols_to_trade_raw:
         config_dict = MULTI_SYMBOL_CONFIGS.get(symbol)
         if config_dict:
             try:
-                # 初始化 TradingConfig 实例
                 symbol_config = TradingConfig(symbol, **config_dict)
-                
-                # 运行配置检查 (假设 TradingConfig 有 validate_config 方法)
                 is_valid, errors, warnings = symbol_config.validate_config()
                 if not is_valid:
                     logger.log_error(f"❌ {get_base_currency(symbol)} 配置验证失败: {errors}")
@@ -4401,30 +4478,31 @@ def main():
                     for w in warnings:
                         logger.log_warning(f"⚠️ {get_base_currency(symbol)} 配置警告: {w}")
                 
-                # 存储到全局配置字典
                 SYMBOL_CONFIGS[symbol] = symbol_config
                 symbols_to_trade.append(symbol)
                 logger.log_info(f"✅ {get_base_currency(symbol)} 配置加载成功")
                 
             except Exception as e:
-                logger.log_error(f"❌ {get_base_currency(symbol)}",f"配置初始化失败: {str(e)}")
+                logger.log_error(f"❌ {get_base_currency(symbol)} 配置初始化失败: {str(e)}")
         else:
             logger.log_error(f"❌ 品种 {symbol} 在 MULTI_SYMBOL_CONFIGS 中未找到配置，跳过。")
 
-    logger.log_info(f"🚀 账号 '{CURRENT_ACCOUNT}' 最终交易品种列表: {symbols_to_trade}")
+    logger.log_info(f"🚀 账号 '{CURRENT_ACCOUNT}' 初步加载 {len(symbols_to_trade)} 个品种")
 
-    if not symbols_to_trade:
-        logger.log_error("❌ 没有有效的交易品种配置，程序将以空列表运行。")
-
-    # 2. 初始化所有品种的配置
+    # 🆕 2. 第二轮配置验证和初始化 - 这是你提到的关键代码
+    valid_symbols = []
     for symbol in symbols_to_trade:
         try:
             if symbol not in MULTI_SYMBOL_CONFIGS:
                 logger.log_warning(f"⚠️ 跳过未配置的品种: {get_base_currency(symbol)}")
                 continue
                 
-            symbol_config = MULTI_SYMBOL_CONFIGS[symbol]
-            config = TradingConfig(symbol=symbol, config_data=symbol_config)
+            # 这里确保配置对象正确创建
+            if symbol not in SYMBOL_CONFIGS:
+                config_dict = MULTI_SYMBOL_CONFIGS[symbol]
+                config = TradingConfig(symbol=symbol, config_data=config_dict)
+            else:
+                config = SYMBOL_CONFIGS[symbol]
             
             # 验证配置
             is_valid, errors, warnings = config.validate_config(symbol)
@@ -4432,22 +4510,28 @@ def main():
                 logger.log_error(f"config_validation_{get_base_currency(symbol)}", f"配置验证失败: {errors}")
                 continue
                 
+            # 确保配置正确存储
             SYMBOL_CONFIGS[symbol] = config
+            valid_symbols.append(symbol)
+            
             logger.log_info(f"✅ 加载配置: {get_base_currency(symbol)} | 杠杆 {config.leverage}x | 基础金额 {config.position_management['base_usdt_amount']} USDT")
             
         except Exception as e:
             logger.log_error(f"config_loading_{get_base_currency(symbol)}", str(e))
+    
+    # 更新有效的交易品种列表
+    symbols_to_trade = valid_symbols
             
     if not SYMBOL_CONFIGS:
         logger.log_error("program_exit", "所有交易品种配置加载失败")
         return
 
-    # 类型安全检查
+    # 🆕 类型安全检查
     if not SYMBOL_CONFIGS or not isinstance(SYMBOL_CONFIGS, dict):
         logger.log_error("program_exit", "交易品种配置加载失败或类型错误")
         return
         
-    # 确保 first_config 是 TradingConfig 对象
+    # 🆕 确保 first_config 是 TradingConfig 对象
     first_config = None
     for config in SYMBOL_CONFIGS.values():
         if hasattr(config, 'max_consecutive_errors'):
@@ -4464,7 +4548,9 @@ def main():
         
         first_config = DefaultConfig()
 
-    # 3. 设置交易所
+    logger.log_info(f"🎯 最终交易品种列表: {[get_base_currency(s) for s in symbols_to_trade]}")
+
+    # 2. 初始化交易所设置
     for symbol in list(SYMBOL_CONFIGS.keys()):
         if not setup_exchange(symbol):
             logger.log_error("exchange_setup", f"交易所设置失败: {get_base_currency(symbol)}")
@@ -4475,109 +4561,157 @@ def main():
         logger.log_error("program_exit", "所有交易品种初始化失败")
         return
         
-    # 所有的配置实例都带有相同的版本信息
+    # 3. 打印版本信息
     version_config = SYMBOL_CONFIGS[symbols_to_trade[0]]
-    
-    # ✅ 正确的调用方式
     print_version_banner(version_config)
 
     # 🆕 启动时持仓检查
-    check_existing_positions_on_startup()      
+    check_existing_positions_on_startup()
 
-    logger.log_info(f"🚀 主循环启动，交易品种: {', '.join(symbols_to_trade)}")
-    
-    # 以获取通用的 max_consecutive_errors 等参数。
-    first_config = list(SYMBOL_CONFIGS.values())[0]
+    # 🆕 4. 初始化动态调度系统
+    symbol_schedules = {}
+    for symbol in symbols_to_trade:
+        config = SYMBOL_CONFIGS[symbol]
+        next_execution = calculate_next_execution_time(symbol)
+        
+        symbol_schedules[symbol] = {
+            'next_execution': next_execution,
+            'timeframe': config.timeframe,
+            'timeframe_seconds': get_timeframe_seconds(config.timeframe),
+            'last_execution': 0,
+            'execution_count': 0
+        }
+        
+        next_time_str = datetime.fromtimestamp(next_execution).strftime('%H:%M:%S')
+        logger.log_info(f"⏰ {get_base_currency(symbol)}: 首次执行 {next_time_str} ({config.timeframe}周期)")
 
-    # Initialize control variables
+    logger.log_info(f"🚀 动态调度系统启动，监控 {len(symbols_to_trade)} 个品种")
+
+    # 5. 主循环控制变量
     consecutive_errors = 0
     last_health_check = 0
-    health_check_interval = 3600  # 1 hour
+    health_check_interval = 3600  # 1小时
     last_config_check = 0
-    config_check_interval = first_config.config_check_interval # 使用任一配置的检查间隔
+    config_check_interval = 300   # 5分钟
     last_perf_log = 0
-    perf_log_interval = first_config.perf_log_interval
-
-    # 在定时任务中添加持仓历史分析
+    perf_log_interval = 3600      # 1小时
     last_position_analysis = 0
-    position_analysis_interval = 3600  # 每小时分析一次
+    position_analysis_interval = 3600  # 1小时
 
     try:
         while True:
-            try:
-                current_time = time.time()
-                
-                # 定期分析持仓历史
-                if current_time - last_position_analysis >= position_analysis_interval:
-                    for symbol in symbols_to_trade:
-                        analyze_position_history(symbol)
-                    last_position_analysis = current_time
-                    
-                # Health check - 修复这里
-                if current_time - last_health_check >= health_check_interval:
-                    logger.log_info("🔍 Running scheduled health check...")
-                    
-                    # 对每个交易品种执行健康检查
-                    health_ok = True
-                    for symbol in SYMBOL_CONFIGS.keys():
-                        if not health_check(symbol):
-                            health_ok = False
-                            break
-                    
-                    if not health_ok:
-                        consecutive_errors += 1
-                        # 安全地获取配置限制
-                        try:
-                            max_errors = first_config.max_consecutive_errors
-                        except (AttributeError, TypeError):
-                            max_errors = 5  # 默认值
-                        
-                        if consecutive_errors >= max_errors:
-                            logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                            break
-                    else:
-                        consecutive_errors = 0
-                    last_health_check = current_time
-            
-                # Configuration reload check - every 5 minutes
-                if current_time - last_config_check >= config_check_interval:
-                    last_config_check = current_time
+            current_time = time.time()
+            executed_this_cycle = False
 
-                # Run trading bot for all symbols
-                for symbol in symbols_to_trade:
-                    trading_bot(symbol)
+            # 🆕 动态调度：检查每个品种的执行时间
+            for symbol in symbols_to_trade:
+                schedule = symbol_schedules[symbol]
                 
-                # Log performance for each symbol
+                if current_time >= schedule['next_execution']:
+                    try:
+                        # 执行交易逻辑
+                        trading_bot(symbol)
+                        schedule['execution_count'] += 1
+                        schedule['last_execution'] = current_time
+                        executed_this_cycle = True
+                        
+                        # 计算下一个执行时间
+                        schedule['next_execution'] = calculate_next_execution_time(symbol)
+                        
+                        next_time_str = datetime.fromtimestamp(schedule['next_execution']).strftime('%H:%M:%S')
+                        time_until_str = format_time_until_next_execution(schedule['next_execution'])
+                        
+                        logger.log_info(f"⏰ {get_base_currency(symbol)}: 下次执行 {next_time_str} ({time_until_str})")
+                        
+                    except Exception as e:
+                        logger.log_error(f"scheduled_execution_{get_base_currency(symbol)}", f"调度执行失败: {str(e)}")
+                        # 出错时仍然设置下一个执行时间，避免阻塞
+                        schedule['next_execution'] = current_time + 60  # 1分钟后重试
+
+            # 🆕 定期健康检查
+            if current_time - last_health_check >= health_check_interval:
+                logger.log_info("🔍 执行定期健康检查...")
+                health_ok = True
+                for symbol in symbols_to_trade:
+                    if not health_check(symbol):
+                        health_ok = False
+                        break
+                
+                if not health_ok:
+                    consecutive_errors += 1
+                    max_errors = getattr(version_config, 'max_consecutive_errors', 5)
+                    if consecutive_errors >= max_errors:
+                        logger.log_error("🚨 连续错误过多，程序退出")
+                        break
+                else:
+                    consecutive_errors = 0
+                last_health_check = current_time
+
+            # 🆕 定期配置检查
+            if current_time - last_config_check >= config_check_interval:
+                last_config_check = current_time
+                # 这里可以添加配置重载逻辑
+
+            # 🆕 定期性能日志
+            if current_time - last_perf_log >= perf_log_interval:
                 for symbol in symbols_to_trade:
                     log_performance_metrics(symbol)
+                last_perf_log = current_time
+
+            # 🆕 定期持仓分析
+            if current_time - last_position_analysis >= position_analysis_interval:
+                for symbol in symbols_to_trade:
+                    analyze_position_history(symbol)
+                last_position_analysis = current_time
+
+            # 🆕 保存仓位状态
+            save_position_history()
+
+            # 🆕 智能睡眠计算
+            if executed_this_cycle:
+                # 如果本轮有执行，短暂睡眠后继续检查
+                sleep_time = 1
+            else:
+                # 计算距离最近的下次执行时间
+                next_executions = [s['next_execution'] for s in symbol_schedules.values()]
+                if next_executions:
+                    next_execution = min(next_executions)
+                    sleep_time = max(1, min(30, next_execution - current_time))
+                else:
+                    sleep_time = 30
+                
+                # 记录调度状态
+                if sleep_time > 5:  # 只在较长睡眠时记录
+                    active_schedules = []
+                    for symbol, schedule in symbol_schedules.items():
+                        time_until = schedule['next_execution'] - current_time
+                        if time_until <= 300:  # 只显示5分钟内的
+                            active_schedules.append(
+                                f"{get_base_currency(symbol)}:{format_time_until_next_execution(schedule['next_execution'])}"
+                            )
                     
-                # 🚀 更改点 3: 每轮循环结束后保存一次最新的仓位状态
-                save_position_history()
+                    if active_schedules:
+                        logger.log_debug(f"⏰ 调度状态: {', '.join(active_schedules)}")
 
-                # Wait for next cycle
-                time.sleep(60)
-            
-            except KeyboardInterrupt:
-                logger.log_warning("\n🛑 User interrupted the program.")
-                break
+            time.sleep(sleep_time)
 
-            except Exception as e:
-                logger.log_error("main_loop", f"Error: {str(e)}")
-                consecutive_errors += 1
-                # 安全地获取配置限制
-                try:
-                    max_errors = first_config.max_consecutive_errors
-                except (AttributeError, TypeError):
-                    max_errors = 5  # 默认值
-                    
-                if consecutive_errors >= max_errors:
-                    logger.log_warning("🚨 Too many consecutive errors, exiting.")
-                    break
-                time.sleep(60)
-
+    except KeyboardInterrupt:
+        logger.log_warning("\n🛑 用户中断程序")
+    except Exception as e:
+        logger.log_error("main_loop", f"主循环异常: {str(e)}")
     finally:
         cleanup_resources()
+        
+        # 🆕 输出调度统计
+        logger.log_info("📊 动态调度统计:")
+        for symbol, schedule in symbol_schedules.items():
+            execution_count = schedule.get('execution_count', 0)
+            timeframe = schedule.get('timeframe', 'unknown')
+            logger.log_info(f"  {get_base_currency(symbol)}: 执行{execution_count}次 ({timeframe}周期)")
+        
         logger.log_info("👋 程序退出")
+
+
 
 if __name__ == "__main__":
     main()
