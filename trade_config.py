@@ -6,7 +6,7 @@ from typing import Tuple, List, Dict, Any
 
 # --- 简单版本配置 ---
 VERSION_CONFIG = {
-    'version': '1.0.4',  # 基础版本号
+    'version': '1.0.5',  # 基础版本号
     'auto_increment': True,  # 是否自动基于Git提交递增
     # 'git_commit_count_as_build': True,  # 使用Git提交次数作为构建号
 }
@@ -19,30 +19,30 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
         'max_position_ratio': 10,
     },
-    # # ETH 配置
-    # 'ETH/USDT:USDT': {
-    #     'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
-    #     'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
-    #     'max_position_ratio': 8,
-    # },
-    # # SOL 配置 (示例)
-    # 'SOL/USDT:USDT': {
-    #     'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
-    #     'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
-    #     'max_position_ratio': 5,
-    # },
+    # ETH 配置
+    'ETH/USDT:USDT': {
+        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    # SOL 配置 (示例)
+    'SOL/USDT:USDT': {
+        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
+        'max_position_ratio': 5,
+    },
     # LTC 配置 (示例)
-    # 'LTC/USDT:USDT': {
-    #     'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
-    #     'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
-    #     'max_position_ratio': 5,
-    # },
-    # # BCH 配置 (示例)
-    # 'BCH/USDT:USDT': {
-    #     'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
-    #     'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
-    #     'max_position_ratio': 7,
-    # },
+    'LTC/USDT:USDT': {
+        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
+        'max_position_ratio': 5,
+    },
+    # BCH 配置 (示例)
+    'BCH/USDT:USDT': {
+        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
     # DASH 配置 (示例)
     'DASH/USDT:USDT': {
         'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
@@ -107,10 +107,10 @@ ACCOUNT_SYMBOL_MAPPING = {
     ],
     # 子账号用于交易 SOL, LTC, BCH
     "okxSub1": [
-        'DASH/USDT:USDT',
-        'ZEC/USDT:USDT',
+        'BCH/USDT:USDT',
+        'ETH/USDT:USDT',
         'ASTER/USDT:USDT',
-        'WCT/USDT:USDT',
+        'LTC/USDT:USDT',
     ],
     # 默认账号 (如果运行程序时未指定账号)
     "default": [
