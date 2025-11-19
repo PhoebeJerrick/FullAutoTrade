@@ -3758,9 +3758,13 @@ def main():
     global sl_tp_strategy
     initialize_sl_tp_strategy(SYMBOL_CONFIGS)
     sl_tp_strategy = get_sl_tp_strategy()
-    tralSlEn = sl_tp_strategy.config.stop_loss.enable_trailing_stop
-    tralTpEn = sl_tp_strategy.config.multi_level_take_profit.enable
-    logger.log_info(f"📜 策略配置已加载 | 移动止损: {tralSlEn} | 多级止盈: {tralTpEn}")
+
+    # 提取配置状态
+    trail_sl_en = sl_tp_strategy.config.stop_loss.enable_trailing_stop
+    multi_tp_en = sl_tp_strategy.config.multi_level_take_profit.enable
+
+    # 打印日志
+    logger.log_info(f"📜 策略配置已加载 | 移动止损: {trail_sl_en} | 多级止盈: {multi_tp_en}")
     
     # 🆕 初始化策略优化器
     global strategy_optimizer
