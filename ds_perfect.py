@@ -408,7 +408,7 @@ def check_sufficient_margin(symbol: str, position_size: float, current_price: fl
         
         # 安全缓冲：要求保证金不超过余额的70%
         if required_margin > usdt_balance * 0.7:
-            logger.log_error("保证金不足", f"❌ {get_base_currency(symbol)}:需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
+            logger.log_error(f"margin_check_{get_base_currency(symbol)}", f"保证金不足: 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
             return False
             
         logger.log_info(f"✅ {get_base_currency(symbol)}: 保证金充足 - 需要{required_margin:.2f} USDT, 可用{usdt_balance:.2f} USDT")
@@ -874,7 +874,7 @@ def calculate_enhanced_position(symbol: str, signal_data: dict, price_data: dict
         
         # 🆕 最终检查：如果保证金仍然不足，返回0
         if final_margin < MIN_BASE_MARGIN:
-            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求，放弃开仓")
+            logger.log_error(f"min_margin_failed_{get_base_currency(symbol)}", f"无法满足最小保证金{MIN_BASE_MARGIN} USDT要求，放弃开仓")
             return 0
 
         return contract_size
@@ -965,7 +965,7 @@ def setup_exchange(symbol: str):
         # 1. 先获取合约规格
         markets = exchange.load_markets()
         if symbol not in markets:
-            logger.log_error("exchange_setup", f"Symbol {get_base_currency(symbol)} not supported by exchange.")
+            logger.log_warning(f"exchange_setup_{get_base_currency(symbol)}", f"交易品种不支持: {get_base_currency(symbol)}")
             return False
             
         market_info = markets[symbol]
@@ -1255,7 +1255,7 @@ def calculate_intelligent_position(symbol: str, signal_data: dict, price_data: d
         # 🆕 最终保证金验证
         final_margin = (contract_size * price_data['price'] * config.contract_size) / config.leverage
         if final_margin < MIN_BASE_MARGIN:
-            logger.log_error(f"❌ {get_base_currency(symbol)}: 无法满足最小保证金{MIN_BASE_MARGIN} USDT要求")
+            logger.log_error(f"min_margin_failed_{get_base_currency(symbol)}", f"无法满足最小保证金{MIN_BASE_MARGIN} USDT要求")
             return 0
         
         return contract_size
@@ -2862,7 +2862,7 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     
     # 🆕 资金充足性检查
     if not check_sufficient_margin(symbol, position_size, current_price):
-        logger.log_error("资金不足",f"❌ {get_base_currency(symbol)}: 放弃开仓")
+        logger.log_error("insufficient_funds", f"{get_base_currency(symbol)}: 资金不足，放弃开仓")
         return
     
     # 记录交易分析
