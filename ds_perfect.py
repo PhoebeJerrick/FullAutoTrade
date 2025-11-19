@@ -18,6 +18,9 @@ from dotenv import load_dotenv
 import json
 import requests
 from datetime import datetime, timedelta
+from AI.ai_ds import analyze_with_deepseek, get_deepseek_analyzer
+
+
 #导入配置中心 (必须在导入 trade_logger之前，但因为 config_center.py 是自初始化的，顺序不严格)
 from cmd_config import CURRENT_ACCOUNT
 
@@ -36,6 +39,9 @@ SYMBOL_CONFIGS: Dict[str, TradingConfig] = {}
 CURRENT_SYMBOL: Optional[str] = None
 
 POSITION_STATE_FILE = f'../Output/{CURRENT_ACCOUNT}/position_state.json'
+
+# AI symbol analyzers save
+SYMBOL_ANALYZERS = {}
 
 # Global variables to store historical data
 price_history = {}
@@ -143,24 +149,6 @@ def log_scheduling_status():
             time_str = format_time_until_next_execution(schedule['next_execution'])
             logger.log_info(f"  {schedule['symbol']}: {time_str} ({schedule['timeframe']})")
 
-def get_deepseek_client(symbol: str):
-    global deepseek_client
-    config = SYMBOL_CONFIGS[symbol]
-    if deepseek_client is None:
-        try:
-            api_key = os.getenv('DEEPSEEK_API_KEY')
-            if not api_key:
-                raise ValueError("DEEPSEEK_API_KEY environment variable is not set")
-            
-            deepseek_client = OpenAI(
-                api_key=api_key,
-                base_url=config.deepseek_base_url
-            )
-            logger.log_info("DeepSeek client initialized successfully")
-        except Exception as e:
-            logger.log_error("deepseek_client_init", str(e))
-            raise
-    return deepseek_client
 
 def get_base_currency(symbol: str) -> str:
     """
@@ -1728,86 +1716,6 @@ def get_support_resistance_levels(df, lookback=20):
         return {}
 
 
-def get_sentiment_indicators(symbol: str):
-    """Get sentiment indicators - simplified version"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        API_URL = config.sentiment_api_url
-        API_KEY = config.sentiment_api_key
-
-        # 从 symbol 中提取币种名称
-        # 格式可能是 "BTC/USDT:USDT" 或 "ETH/USDT:USDT" 等
-        base_currency = symbol.split('/')[0].upper()
-        
-        # Get recent 4-hour data
-        end_time = datetime.now()
-        start_time = end_time - timedelta(hours=4)
-
-        request_body = {
-            "apiKey": API_KEY,
-            "endpoints": ["CO-A-02-01", "CO-A-02-02"],  # Keep only core indicators
-            "startTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "endTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "timeType": "15m",
-            "token": [base_currency]  # 修改这里，使用动态的币种
-        }
-
-        headers = {"Content-Type": "application/json", "X-API-KEY": API_KEY}
-        response = requests.post(API_URL, json=request_body, headers=headers)
-
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("code") == 200 and data.get("data"):
-                time_periods = data["data"][0]["timePeriods"]
-
-                # Find first time period with valid data
-                for period in time_periods:
-                    period_data = period.get("data", [])
-
-                    sentiment = {}
-                    valid_data_found = False
-
-                    for item in period_data:
-                        endpoint = item.get("endpoint")
-                        value = item.get("value", "").strip()
-
-                        if value:  # Only process non-empty values
-                            try:
-                                if endpoint in ["CO-A-02-01", "CO-A-02-02"]:
-                                    sentiment[endpoint] = float(value)
-                                    valid_data_found = True
-                            except (ValueError, TypeError):
-                                continue
-
-                    # If valid data found
-                    if valid_data_found and "CO-A-02-01" in sentiment and "CO-A-02-02" in sentiment:
-                        positive = sentiment['CO-A-02-01']
-                        negative = sentiment['CO-A-02-02']
-                        net_sentiment = positive - negative
-
-                        # Correct time delay calculation
-                        data_delay = int((datetime.now() - datetime.strptime(
-                            period['startTime'], '%Y-%m-%d %H:%M:%S')).total_seconds() // 60)
-
-                        logger.log_warning(f"✅ {get_base_currency(symbol)}: 使用情绪数据时间: {period['startTime']} (延迟: {data_delay} 分钟)")
-
-                        return {
-                            'positive_ratio': positive,
-                            'negative_ratio': negative,
-                            'net_sentiment': net_sentiment,
-                            'data_time': period['startTime'],
-                            'data_delay_minutes': data_delay
-                        }
-
-                logger.log_warning(f"❌ {get_base_currency(symbol)}: 所有时间段数据为空")
-                return None
-
-        return None
-    except Exception as e:
-        logger.log_error(f"sentiment_data_{get_base_currency(symbol)}", str(e))
-        return None
-
-
 def get_market_trend(df):
     """Determine market trend"""
     try:
@@ -2402,27 +2310,6 @@ def add_to_price_history(symbol: str, price_data):
         keep_count = int(max_history * 0.8)
         price_history[symbol] = price_history[symbol][-keep_count:]
 
-def generate_technical_analysis_text(price_data):
-    """Generate technical analysis text"""
-    if 'technical_data' not in price_data:
-        return "Technical indicator data unavailable"
-
-    tech = price_data['technical_data']
-    trend = price_data.get('trend_analysis', {})
-    levels = price_data.get('levels_analysis', {})
-
-    # Check data validity
-    def safe_float(value, default=0):
-        return float(value) if value and pd.notna(value) else default
-
-    analysis_text = f"""
-    【技术指标概览】
-    📈 趋势: {trend.get('overall', 'N/A')} | RSI: {safe_float(tech['rsi']):.1f}
-    📊 均线: 5期{tech.get('sma_5', 0):.2f} | 20期{tech.get('sma_20', 0):.2f} | 50期{tech.get('sma_50', 0):.2f}
-    🎯 关键位: 阻力{levels.get('static_resistance', 0):.2f} | 支撑{levels.get('static_support', 0):.2f}
-    """
-    return analysis_text
-
 def verify_position_exists(symbol: str, position_info: dict) -> bool:
     """验证持仓是否真实存在 - 增强版本"""
     config = SYMBOL_CONFIGS[symbol]
@@ -2696,264 +2583,6 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
         logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", str(e))
         return False
     # ✅ --- 修改结束 ---
-
-def safe_json_parse(json_str):
-    """Safely parse JSON, handle non-standard format situations"""
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        try:
-            # Fix common JSON format issues
-            json_str = json_str.replace("'", '"')
-            json_str = re.sub(r'(\w+):', r'"\1":', json_str)
-            json_str = re.sub(r',\s*}', '}', json_str)
-            json_str = re.sub(r',\s*]', ']', json_str)
-            # 🆕 修复：移除数字中的逗号（如 106,600 -> 106600）
-            json_str = re.sub(r'(\d),(\d)', r'\1\2', json_str)
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.log_error("json_parsing", f"Failed to parse: {json_str}")
-            logger.log_error("json_parsing", f"Error details: {e}")
-            return None
-
-
-def create_fallback_signal(price_data):
-    """Create backup trading signal"""
-    return {
-        "signal": "HOLD",
-        "reason": "Conservative strategy adopted due to temporary unavailability of technical analysis",
-        "stop_loss": price_data['price'] * 0.98,  # -2%
-        "take_profit": price_data['price'] * 1.02,  # +2%
-        "confidence": "LOW",
-        "is_fallback": True
-    }
-
-@retry_on_failure(max_retries=3, delay=2)
-def analyze_with_deepseek(symbol: str, price_data: dict):
-    """Use DeepSeek to analyze market and generate trading signals (enhanced version)"""
-    config = SYMBOL_CONFIGS[symbol]
-    try:
-        # Get the client (will be initialized on the first call)
-        client = get_deepseek_client(symbol)
-    
-        # Generate technical analysis text
-        technical_analysis = generate_technical_analysis_text(price_data)
-
-        # Build K-line data text
-        kline_text = f"【Recent 5 {config.timeframe} K-line Data】\n"
-        for i, kline in enumerate(price_data['kline_data'][-5:]):
-            trend = "Bullish" if kline['close'] > kline['open'] else "Bearish"
-            change = ((kline['close'] - kline['open']) / kline['open']) * 100
-            kline_text += f"K-line {i + 1}: {trend} Open:{kline['open']:.2f} Close:{kline['close']:.2f} Change:{change:+.2f}%\n"
-
-        # Add previous trading signal
-        signal_text = ""
-        if symbol in signal_history and signal_history[symbol]:
-            last_signal = signal_history[symbol][-1]
-            signal_text = f"\n【Previous Trading Signal】\nSignal: {last_signal.get('signal', 'N/A')}\nConfidence: {last_signal.get('confidence', 'N/A')}"
-        # Get sentiment data
-        sentiment_data = get_sentiment_indicators(symbol)
-        # Simplified sentiment text - too much is useless
-        if sentiment_data:
-            sign = '+' if sentiment_data['net_sentiment'] >= 0 else ''
-            sentiment_text = f"【Market Sentiment】Optimistic {sentiment_data['positive_ratio']:.1%} Pessimistic {sentiment_data['negative_ratio']:.1%} Net {sign}{sentiment_data['net_sentiment']:.3f}"
-        else:
-            sentiment_text = "【Market Sentiment】Data temporarily unavailable"
-
-        # Add current position information
-        current_pos = get_current_position(symbol)
-        position_text = "No position" if not current_pos else f"{current_pos['side']} position, Quantity: {current_pos['size']}, P&L: {current_pos['unrealized_pnl']:.2f}USDT"
-        pnl_text = f", Position P&L: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
-
-        # 🆕 Enhanced Trend Reversal Analysis Criteria
-        trend_reversal_criteria = """
-        【Trend Reversal Judgment Criteria - Must meet at least 2 conditions】
-        1. Price breaks through key support/resistance levels + volume amplification
-        2. Break of major moving averages (e.g., 20-period, 50-period)  
-        3. RSI reversal from overbought/oversold areas and forms divergence
-        4. MACD shows clear death cross/golden cross signal
-
-        【Position Management Principles】
-        - Existing position opposite to current signal → Strongly consider closing position
-        - Existing position same as current signal → Continue holding, check stop loss
-        - Signal is HOLD but position exists → Decide whether to hold based on technical indicators
-
-        【Key Technical Levels for {get_base_currency(symbol)}】
-        - Strong Resistance: When price approaches recent high + Bollinger Band upper
-        - Strong Support: When price approaches recent low + Bollinger Band lower
-        - Breakout Confirmation: Requires closing price break + volume > 20-period average
-        - False Breakout: Price breaks but fails to sustain, immediately reverses
-        """
-
-        prompt = f"""
-        You are a professional cryptocurrency trading analyst. Please analyze based on the following {get_base_currency(symbol)} {config.timeframe} period data:  # 修改这里
-
-        {kline_text}
-
-        {technical_analysis}
-
-        {signal_text}
-
-        {sentiment_text}  # Add sentiment analysis
-
-        【Current Market】
-        - Current price: ${price_data['price']:,.2f}
-        - Time: {price_data['timestamp']}
-        - Current K-line high: ${price_data['high']:,.2f}
-        - Current K-line low: ${price_data['low']:,.2f}
-        - Current K-line volume: {price_data['volume']:.2f} {symbol}
-        - Price change: {price_data['price_change']:+.2f}%
-        - Current position: {position_text}{pnl_text}
-
-        {trend_reversal_criteria}  # 🆕 Add enhanced trend reversal criteria
-
-        【Anti-Frequent Trading Important Principles】
-        1. **Trend Continuity Priority**: Do not change overall trend judgment based on single K-line or short-term fluctuations
-        2. **Position Stability**: Maintain existing position direction unless trend clearly reverses strongly
-        3. **Reversal Confirmation**: Require at least 2-3 technical indicators to simultaneously confirm trend reversal before changing signal
-        4. **Cost Awareness**: Reduce unnecessary position adjustments, every trade has costs
-
-        【Trading Guidance Principles - Must Follow】
-        1. **Technical Analysis Dominant** (Weight 60%): Trend, support resistance, K-line patterns are main basis
-        2. **Market Sentiment Auxiliary** (Weight 30%): Sentiment data used to verify technical signals, cannot be used alone as trading reason
-        - Sentiment and technical same direction → Enhance signal confidence
-        - Sentiment and technical divergence → Mainly based on technical analysis, sentiment only as reference
-        - Sentiment data delay → Reduce weight, use real-time technical indicators as main
-        3. **Risk Management** (Weight 10%): Consider position, profit/loss status and stop loss position
-        4. **Trend Following**: Take immediate action when clear trend appears, do not over-wait
-        5. Because trading coins like btc, long position weight can be slightly higher
-        6. **Signal Clarity**:
-        - Strong uptrend → BUY signal
-        - Strong downtrend → SELL signal
-        - Only in narrow range consolidation, no clear direction → HOLD signal
-        7. **Technical Indicator Weight**:
-        - Trend (moving average arrangement) > RSI > MACD > Bollinger Bands
-        - Price breaking key support/resistance levels is important signal
-
-        【Current Technical Condition Analysis】
-        - Overall trend: {price_data['trend_analysis'].get('overall', 'N/A')}
-        - Short-term trend: {price_data['trend_analysis'].get('short_term', 'N/A')}
-        - RSI status: {price_data['technical_data'].get('rsi', 0):.1f} ({'Overbought' if price_data['technical_data'].get('rsi', 0) > 70 else 'Oversold' if price_data['technical_data'].get('rsi', 0) < 30 else 'Neutral'})
-        - MACD direction: {price_data['trend_analysis'].get('macd', 'N/A')}
-
-        【Intelligent Position Management Rules - Must Follow】
-
-        1. **Reduce Over-Conservatism**:
-        - Do not over-HOLD due to slight overbought/oversold in clear trends
-        - RSI in 30-70 range is healthy range, should not be main HOLD reason
-        - Bollinger Band position in 20%-80% is normal fluctuation range
-
-        2. **Trend Following Priority**:
-        - Strong uptrend + any RSI value → Active BUY signal
-        - Strong downtrend + any RSI value → Active SELL signal
-        - Consolidation + no clear direction → HOLD signal
-
-        3. **Breakout Trading Signals**:
-        - Price breaks key resistance + volume amplification → High confidence BUY
-        - Price breaks key support + volume amplification → High confidence SELL
-
-        4. **Position Optimization Logic**:
-        - Existing position and trend continues → Maintain or BUY/SELL signal
-        - Clear trend reversal → Timely reverse signal
-        - Do not over-HOLD because of existing position
-
-        【Important】Please make clear judgments based on technical analysis, avoid missing trend opportunities due to over-caution!
-
-        【Analysis Requirements】
-        Based on above analysis, please provide clear trading signal
-
-        Please reply in following JSON format:
-        {{
-            "signal": "BUY|SELL|HOLD",
-            "reason": "Brief analysis reason (including trend judgment and technical basis)",
-            "stop_loss": specific price,
-            "take_profit": specific price,
-            "confidence": "HIGH|MEDIUM|LOW"
-        }}
-        """
-
-        try:
-            response = client.chat.completions.create(
-    model="deepseek-chat",
-    messages=[
-        {"role": "system",
-         "content": f"""You are a professional trader specializing in {config.timeframe} period trend analysis and trend reversal detection. 
-                Key Responsibilities:
-                1. Analyze trend strength and identify potential reversal points
-                2. Use multiple confirmation criteria for trend reversals
-                3. Provide clear trading signals based on technical analysis
-                4. Consider existing positions in your analysis
-                5. Strictly follow JSON format requirements
-
-                Trend Reversal Focus:
-                - Pay special attention to breakouts of key support/resistance levels
-                - Look for confirmation from multiple indicators (RSI divergence, MACD cross, volume)
-                - Consider the broader market context in your analysis"""},
-            {"role": "user", "content": prompt}
-            ],
-                stream=False,
-                temperature=0.1
-            )
-
-            # Safely parse JSON
-            result = response.choices[0].message.content.strip()
-
-            # 关键：清理非法引号（如 20-"period" → 20-period）
-            cleaned_content = re.sub(r'(\d+)-"(\w+)"', r'\1-\2', result)  # 移除数字后的引号
-            cleaned_content = re.sub(r'"(\w+)"-(\d+)', r'\1-\2', cleaned_content)  # 移除数字前的引号（如果有）
-
-            # Extract JSON part
-            start_idx = cleaned_content.find('{')
-            end_idx = cleaned_content.rfind('}') + 1
-
-            if start_idx != -1 and end_idx != 0:
-                json_str = cleaned_content[start_idx:end_idx]
-                signal_data = safe_json_parse(json_str)
-
-                if signal_data is None:
-                    signal_data = create_fallback_signal(price_data)
-            else:
-                signal_data = create_fallback_signal(price_data)
-
-            # Verify required fields
-            required_fields = ['signal', 'reason', 'stop_loss', 'take_profit', 'confidence']
-            if not all(field in signal_data for field in required_fields):
-                signal_data = create_fallback_signal(price_data)
-
-            # 🆕 新增逻辑: 检查信号，如果不是 HOLD，则打印 DeepSeek 原始回复
-            if signal_data and signal_data.get('signal') != 'HOLD':
-                logger.log_info(f"DeepSeek original reply: {result}") # <-- 只有在 BUY/SELL 时才打印原始 JSON
-
-            # Save signal to history record
-            signal_data['timestamp'] = price_data['timestamp']
-            add_to_signal_history(symbol, signal_data)
-
-            # Signal statistics
-            if symbol in signal_history:
-                signal_count = len([s for s in signal_history[symbol] if s.get('signal') == signal_data['signal']])
-                total_signals = len(signal_history[symbol])
-            else:
-                signal_count = 0
-                total_signals = 0
-            logger.log_info(f"Signal statistics: {signal_data['signal']} (Appeared {signal_count} times in recent {total_signals} signals)")
-
-            # Signal continuity check
-            if symbol in signal_history and len(signal_history[symbol]) >= 3:
-                last_three = [s['signal'] for s in signal_history[symbol][-3:]]
-                if len(set(last_three)) == 1:
-                    logger.log_warning(f"⚠️ Note: Consecutive 3 {signal_data['signal']} signals")
-
-            return signal_data
-
-        except Exception as api_error:
-                # 🔴API call or response processing failed
-                logger.log_error("deepseek_api_call",  f"API调用失败: {str(api_error)}")
-                return create_fallback_signal(price_data)
-            
-    except Exception as prep_error:
-        # 🔴Preparation phase failed
-        logger.log_error("analysis_preparation", f"API调用失败: {str(prep_error)}")
-        return create_fallback_signal(price_data)
 
 def execute_profit_taking(symbol: str, current_position: dict, profit_taking_signal: dict, price_data: dict):
     """执行多级止盈逻辑 - 永续合约市价平仓"""
@@ -3965,14 +3594,25 @@ def trading_bot(symbol: str):
 
         # --- 持仓管理结束 ---
 
-        # 4. 使用DeepSeek分析市场
-        # (如果上面没有持仓，或持仓管理未返回，则继续获取新信号)
-        signal_data = analyze_with_deepseek(symbol, price_data)
+        # 4 使用DeepSeek高级用法进行市场分析
+        analyzer = SYMBOL_ANALYZERS[symbol]
+        symbol_signal_history = signal_history.get(symbol, [])
         
+        signal_data = analyzer.analyze_market(
+            symbol=symbol,
+            price_data=price_data,
+            signal_history=symbol_signal_history,
+            current_position=current_position
+        )
+
         if not signal_data:
             logger.log_warning(f"❌ Could not get signal for {get_base_currency(symbol)}.")
             return
-
+        
+        sentiment_data = analyzer.get_sentiment_indicators(symbol)
+        if sentiment_data:
+            logger.log_info(f"📊 {get_base_currency(symbol)}情绪数据: 正面{sentiment_data['positive_ratio']:.1%}, 负面{sentiment_data['negative_ratio']:.1%}")
+        
         # 5. 过滤信号
         filtered_signal = filter_signal(signal_data, price_data)
         
@@ -4292,8 +3932,16 @@ def analyze_should_hold_position(symbol: str, position: dict, price_data: dict) 
     try:
         config = SYMBOL_CONFIGS[symbol]
         
-        # 获取技术信号
-        signal_data = analyze_with_deepseek(symbol, price_data)
+        # 🆕 使用高级用法
+        analyzer = SYMBOL_ANALYZERS[symbol]
+        symbol_signal_history = signal_history.get(symbol, [])
+        
+        signal_data = analyzer.analyze_market(
+            symbol=symbol,
+            price_data=price_data,
+            signal_history=symbol_signal_history,
+            current_position=position
+        )
         
         # 🆕 修复：使用明确的 None 检查而不是真值判断
         if signal_data is None:
@@ -4524,10 +4172,6 @@ def main():
     
     # 更新有效的交易品种列表
     symbols_to_trade = valid_symbols
-            
-    if not SYMBOL_CONFIGS:
-        logger.log_error("program_exit", "所有交易品种配置加载失败")
-        return
 
     # 🆕 类型安全检查
     if not SYMBOL_CONFIGS or not isinstance(SYMBOL_CONFIGS, dict):
@@ -4567,6 +4211,14 @@ def main():
     # 3. 打印版本信息
     version_config = SYMBOL_CONFIGS[symbols_to_trade[0]]
     print_version_banner(version_config)
+
+    # 初始化 DeepSeek 分析器
+    global SYMBOL_ANALYZERS
+    for symbol in symbols_to_trade:
+        config = SYMBOL_CONFIGS[symbol]
+        SYMBOL_ANALYZERS[symbol] = get_deepseek_analyzer(config)
+        logger.log_info(f"✅ {get_base_currency(symbol)}: DeepSeek分析器初始化完成")
+
 
     # 🆕 启动时持仓检查
     check_existing_positions_on_startup()
