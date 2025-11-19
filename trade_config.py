@@ -200,36 +200,6 @@ class TradingConfig:
             "min_interval_minutes": 30  # 加仓最小时间间隔（分钟）
         }
         
-        # 风险管理和止盈止损配置
-        self.risk_management = {
-            'stop_loss': {
-                'max_stop_loss_ratio': 0.40,
-                'kline_based_stop_loss': True,
-                'min_stop_loss_ratio': 0.02,
-            },
-            'profit_taking': {
-                'enable_multilevel_take_profit': True,
-                'levels': [
-                    {
-                        'profit_multiplier': 1.0,
-                        'take_profit_ratio': 0.40,
-                        'description': '第一目标：盈利100%时止盈40%'
-                    },
-                    {
-                        'profit_multiplier': 2.0,
-                        'take_profit_ratio': 0.30,
-                        'set_breakeven_stop': True,
-                        'description': '第二目标：总盈利200%时再止盈30%，剩余部分保本'
-                    }
-                ]
-            },
-            'dynamic_stop_loss': {
-                'enable_trailing_stop': True,
-                'trailing_activation_ratio': 0.50,
-                'trailing_distance_ratio': 0.20,
-            }
-        }
-        
         # API settings
         self.deepseek_base_url = "https://api.deepseek.com"
         self.sentiment_api_url = "https://service.cryptoracle.network/openapi/v2/endpoint"
@@ -400,11 +370,7 @@ class TradingConfig:
     def get_position_config(self):
         """Get position management configuration"""
         return self.position_management
-    
-    def get_risk_config(self):
-        """Get risk management configuration"""
-        return self.risk_management
-    
+
     def to_dict(self):
         """Convert configuration to dictionary for backward compatibility"""
         config_dict = {
@@ -457,43 +423,7 @@ class TradingConfig:
         if not (0 <= pos_config['max_position_ratio'] <= 100):
             errors.append("最大仓位比例必须在 0-100 之间")
 
-        # 5. 验证风险管理参数
-        risk_config = self.risk_management
-        
-        # 止损比例验证
-        stop_loss = risk_config['stop_loss']
-        if not (0.01 <= stop_loss['max_stop_loss_ratio'] <= 1.0):
-            errors.append("最大止损比例必须在 1%-100% 之间")
-        
-        if not (0.01 <= stop_loss['min_stop_loss_ratio'] <= 0.5):
-            errors.append("最小止损比例必须在 1%-50% 之间")
-
-        # 多级止盈验证
-        profit_taking = risk_config['profit_taking']
-        if profit_taking['enable_multilevel_take_profit']:
-            total_ratio = 0
-            for i, level in enumerate(profit_taking['levels']):
-                if not (0 < level['profit_multiplier'] <= 10):
-                    warnings.append(f"止盈级别 {i+1} 的盈利倍数异常: {level['profit_multiplier']}")
-                
-                if not (0 < level['take_profit_ratio'] <= 1):
-                    errors.append(f"止盈级别 {i+1} 的止盈比例必须在 0-1 之间")
-                
-                total_ratio += level['take_profit_ratio']
-            
-            if total_ratio > 1.0:
-                warnings.append(f"总止盈比例超过100%: {total_ratio:.1%}")
-
-        # 6. 验证动态止损
-        trailing = risk_config['dynamic_stop_loss']
-        if trailing['enable_trailing_stop']:
-            if not (0 < trailing['trailing_activation_ratio'] <= 2.0):
-                warnings.append(f"移动止损激活比例异常: {trailing['trailing_activation_ratio']}")
-            
-            if not (0 < trailing['trailing_distance_ratio'] <= 0.5):
-                warnings.append(f"移动止损距离比例异常: {trailing['trailing_distance_ratio']}")
-
-        # 7. 检查合约信息（如果已设置）
+        # 5. 检查合约信息（如果已设置）
         if hasattr(self, 'contract_size'):
             if self.contract_size <= 0:
                 errors.append("合约大小必须大于0")
@@ -512,8 +442,6 @@ class TradingConfig:
             'timeframe': self.timeframe,
             'test_mode': self.test_mode,
             'base_usdt_amount': self.position_management['base_usdt_amount'],
-            'max_stop_loss_ratio': self.risk_management['stop_loss']['max_stop_loss_ratio'],
-            'enable_multilevel_take_profit': self.risk_management['profit_taking']['enable_multilevel_take_profit'],
             'contract_size': getattr(self, 'contract_size', 'Not set'),
             'min_amount': getattr(self, 'min_amount', 'Not set'),
             'version': self.get_version()  # 🆕 包含版本信息

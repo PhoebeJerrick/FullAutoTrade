@@ -8,7 +8,7 @@ import os
 class StopLossConfig:
     """止损配置"""
     min_stop_loss_ratio: float = 0.02  # 最小止损比例 2%
-    max_stop_loss_ratio: float = 0.40  # 最大止损比例 40%
+    max_stop_loss_ratio: float = 0.30  # 最大止损比例 30%
     kline_based_stop_loss: bool = True  # 是否基于K线结构止损
     atr_multiplier: float = 1.5  # ATR倍数
     enable_trailing_stop: bool = True  # 是否启用移动止损

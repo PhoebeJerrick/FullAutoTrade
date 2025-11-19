@@ -1688,12 +1688,7 @@ class PositionManager:
         if not current_position:
             return None
             
-        # [删除/注释旧代码]
-        # config = SYMBOL_CONFIGS[symbol]
-        # risk_config = config.get_risk_config()
-        # profit_taking_config = risk_config['profit_taking']
-        
-        # [新增] 从 sl_tp_strategy 获取 multi_level_take_profit 配置
+        # 从 sl_tp_strategy 获取 multi_level_take_profit 配置
         ml_tp_config = sl_tp_strategy.config.multi_level_take_profit
         
         # 使用新配置对象的属性访问方式 (.enable 而不是 ['enable'])
@@ -1946,12 +1941,7 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
 
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
     """设置移动止损 - 修复版：使用 st_config.json 配置"""
-    # [删除/注释旧代码]
-    # config = SYMBOL_CONFIGS[symbol]
-    # risk_config = config.get_risk_config()
-    # trailing_config = risk_config['dynamic_stop_loss']
-
-    # [新增] 使用 sl_tp_strategy 读取 st_config.json 中的 stop_loss 配置
+    # 使用 sl_tp_strategy 读取 st_config.json 中的 stop_loss 配置
     sl_config = sl_tp_strategy.config.stop_loss
     
     try:
@@ -2295,32 +2285,32 @@ def setup_missing_stop_loss_take_profit(symbol: str, position: dict, price_data:
             return True
         
         # 计算止损价格
-        risk_config = config.get_risk_config()
-        stop_loss_config = risk_config['stop_loss']
+        # ✅ 使用新配置源
+        sl_config = sl_tp_strategy.config.stop_loss
         take_profit_price = None
         stop_loss_price = None
 
         if position_side == 'long':
-            if stop_loss_config['kline_based_stop_loss']:
+            # 使用 sl_config (来自 st_config.json)
+            if sl_config.kline_based_stop_loss:
                 stop_loss_price = sl_tp_strategy.calculate_kline_based_stop_loss(
-                    'long', current_price, price_data, stop_loss_config['max_stop_loss_ratio']
+                    'long', current_price, price_data, sl_config.max_stop_loss_ratio
                 )
             else:
-                stop_loss_price = current_price * (1 - stop_loss_config['min_stop_loss_ratio'])
+                stop_loss_price = current_price * (1 - sl_config.min_stop_loss_ratio)
                 
-            # 多头止盈计算
             take_profit_price = sl_tp_strategy.calculate_intelligent_take_profit(
                 symbol, 'long', position['entry_price'], price_data, risk_reward_ratio=2.0
             )
         else:  # short
-            if stop_loss_config['kline_based_stop_loss']:
+            # 使用 sl_config (来自 st_config.json)
+            if sl_config.kline_based_stop_loss:
                 stop_loss_price = sl_tp_strategy.calculate_kline_based_stop_loss(
-                    'short', current_price, price_data, stop_loss_config['max_stop_loss_ratio']
+                    'short', current_price, price_data, sl_config.max_stop_loss_ratio
                 )
             else:
-                stop_loss_price = current_price * (1 + stop_loss_config['min_stop_loss_ratio'])
+                stop_loss_price = current_price * (1 + sl_config.min_stop_loss_ratio)
                 
-            # 空头止盈计算
             take_profit_price = sl_tp_strategy.calculate_intelligent_take_profit(
                 symbol, 'short', position['entry_price'], price_data, risk_reward_ratio=2.0
             )
@@ -3768,7 +3758,10 @@ def main():
     global sl_tp_strategy
     initialize_sl_tp_strategy(SYMBOL_CONFIGS)
     sl_tp_strategy = get_sl_tp_strategy()
-
+    tralSlEn = sl_tp_strategy.config.stop_loss.enable_trailing_stop
+    tralTpEn = sl_tp_strategy.config.multi_level_take_profit.enable
+    logger.log_info(f"📜 策略配置已加载 | 移动止损: {tralSlEn} | 多级止盈: {tralTpEn}")
+    
     # 🆕 初始化策略优化器
     global strategy_optimizer
     strategy_optimizer = StrategyOptimizer()
