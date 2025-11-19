@@ -33,6 +33,16 @@ class StopLossTakeProfitStrategy:
         self.config = self.config_manager.current_config
         logger.log_info("🔄 止盈止损策略配置已重新加载")
     
+    def _safe_get_level_value(self, levels: Dict, key: str, default_value: float) -> float:
+        """安全获取支撑阻力位值，避免空值"""
+        try:
+            value = levels.get(key)
+            if value is None or not isinstance(value, (int, float)) or value <= 0:
+                return default_value
+            return float(value)
+        except (TypeError, ValueError):
+            return default_value
+    
     def calculate_adaptive_stop_loss(self, symbol: str, side: str, current_price: float, price_data: dict) -> float:
         """自适应止损计算 - 集成配置管理"""
         config = self.symbol_configs[symbol]
@@ -46,12 +56,12 @@ class StopLossTakeProfitStrategy:
             atr_stop_distance = atr * sl_config.atr_multiplier
             
             # 方法2: 基于支撑阻力位的止损
-            levels = price_data['levels_analysis']
+            levels = price_data.get('levels_analysis', {})
             
             if side == 'long':
-                # 多头：止损在支撑位下方
-                support_level = levels.get('static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
-                dynamic_support = levels.get('dynamic_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                # 🆕 修复：使用安全获取方法
+                support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                dynamic_support = self._safe_get_level_value(levels, 'dynamic_support', current_price * (1 - sl_config.min_stop_loss_ratio))
                 
                 # 选择较近的支撑位
                 structure_stop = min(support_level, dynamic_support)
@@ -66,9 +76,9 @@ class StopLossTakeProfitStrategy:
                 stop_loss = max(stop_loss, min_stop_price)
                 
             else:  # short
-                # 空头：止损在阻力位上方
-                resistance_level = levels.get('static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
-                dynamic_resistance = levels.get('dynamic_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                # 🆕 修复：使用安全获取方法
+                resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                dynamic_resistance = self._safe_get_level_value(levels, 'dynamic_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
                 
                 # 选择较远的阻力位（更严格的止损）
                 structure_stop = max(resistance_level, dynamic_resistance)
@@ -118,38 +128,44 @@ class StopLossTakeProfitStrategy:
             # 计算默认止盈比例
             default_tp_ratio = sl_config.min_stop_loss_ratio * risk_reward_ratio
             
+            # 🆕 修复：在条件分支之前定义 min_profit_ratio
+            min_profit_ratio = sl_config.min_stop_loss_ratio * 0.5  # 最小盈利是止损的一半
+            
             if side == 'long':
                 # 多头止盈计算
-                # 方法1: 基于阻力位
-                resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * (1 + default_tp_ratio * 2))
+                levels = price_data.get('levels_analysis', {})
+                # 🆕 修复：使用安全获取方法
+                resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + default_tp_ratio * 2))
                 
                 # 方法2: 基于ATR
                 atr = self.calculate_atr(df)
                 atr_take_profit = current_price + (atr * risk_reward_ratio)
                 
                 # 方法3: 基于固定风险回报比
-                risk = abs(entry_price - price_data.get('stop_loss', entry_price * (1 - sl_config.min_stop_loss_ratio)))
+                stop_loss_default = entry_price * (1 - sl_config.min_stop_loss_ratio)
+                risk = abs(entry_price - price_data.get('stop_loss', stop_loss_default))
                 rr_take_profit = entry_price + (risk * risk_reward_ratio)
                 
                 # 取最合理的止盈价格
                 take_profit_price = min(resistance_level, atr_take_profit, rr_take_profit)
                 
                 # 确保止盈价格合理
-                min_profit_ratio = sl_config.min_stop_loss_ratio * 0.5  # 最小盈利是止损的一半
                 min_take_profit = current_price * (1 + min_profit_ratio)
                 take_profit_price = max(take_profit_price, min_take_profit)
                 
             else:  # short
                 # 空头止盈计算
-                # 方法1: 基于支撑位
-                support_level = price_data['levels_analysis'].get('static_support', current_price * (1 - default_tp_ratio * 2))
+                levels = price_data.get('levels_analysis', {})
+                # 🆕 修复：使用安全获取方法
+                support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - default_tp_ratio * 2))
                 
                 # 方法2: 基于ATR
                 atr = self.calculate_atr(df)
                 atr_take_profit = current_price - (atr * risk_reward_ratio)
                 
                 # 方法3: 基于固定风险回报比
-                risk = abs(price_data.get('stop_loss', entry_price * (1 + sl_config.min_stop_loss_ratio)) - entry_price)
+                stop_loss_default = entry_price * (1 + sl_config.min_stop_loss_ratio)
+                risk = abs(price_data.get('stop_loss', stop_loss_default) - entry_price)
                 rr_take_profit = entry_price - (risk * risk_reward_ratio)
                 
                 # 取最合理的止盈价格
@@ -181,7 +197,7 @@ class StopLossTakeProfitStrategy:
         tp_config = self.config.take_profit
         
         try:
-            levels = price_data['levels_analysis']
+            levels = price_data.get('levels_analysis', {})
             current_price = price_data['price']
             
             # 首先验证止损价格的合理性
@@ -205,8 +221,9 @@ class StopLossTakeProfitStrategy:
                 
                 # 现实止盈（基于阻力位）
                 default_tp_ratio = sl_config.min_stop_loss_ratio * min_risk_reward
-                resistance_level = levels.get('static_resistance', current_price * (1 + default_tp_ratio))
-                dynamic_resistance = levels.get('dynamic_resistance', current_price * (1 + default_tp_ratio))
+                # 🆕 修复：使用安全获取方法
+                resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + default_tp_ratio))
+                dynamic_resistance = self._safe_get_level_value(levels, 'dynamic_resistance', current_price * (1 + default_tp_ratio))
                 realistic_tp = min(resistance_level, dynamic_resistance)
                 
                 # 选择较近的止盈
@@ -223,8 +240,9 @@ class StopLossTakeProfitStrategy:
                 
                 # 现实止盈（基于支撑位）
                 default_tp_ratio = sl_config.min_stop_loss_ratio * min_risk_reward
-                support_level = levels.get('static_support', current_price * (1 - default_tp_ratio))
-                dynamic_support = levels.get('dynamic_support', current_price * (1 - default_tp_ratio))
+                # 🆕 修复：使用安全获取方法
+                support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - default_tp_ratio))
+                dynamic_support = self._safe_get_level_value(levels, 'dynamic_support', current_price * (1 - default_tp_ratio))
                 realistic_tp = max(support_level, dynamic_support)
                 
                 # 选择较近的止盈
@@ -264,7 +282,7 @@ class StopLossTakeProfitStrategy:
         tp_config = self.config.take_profit
         
         try:
-            levels = price_data['levels_analysis']
+            levels = price_data.get('levels_analysis', {})
             current_price = price_data['price']
             
             # 根据趋势强度调整盈亏比目标
@@ -281,15 +299,20 @@ class StopLossTakeProfitStrategy:
                 theoretical_tp = entry_price + (risk * adjusted_min_rr)
                 
                 # 方法2: 基于主要阻力位
-                primary_resistance = levels.get('primary_resistance', current_price * (1 + sl_config.min_stop_loss_ratio * adjusted_min_rr * 2))
+                # 🆕 修复：使用安全获取方法
+                primary_resistance = self._safe_get_level_value(levels, 'primary_resistance', current_price * (1 + sl_config.min_stop_loss_ratio * adjusted_min_rr * 2))
                 
                 # 方法3: 在强势趋势中，看更远的阻力位
                 if trend_strength in ['STRONG_UPTREND', 'UPTREND']:
                     # 查看次要阻力位（如果有）
                     resistance_levels = levels.get('resistance_levels', [])
-                    if len(resistance_levels) > 1:
+                    if resistance_levels and len(resistance_levels) > 1:
                         # 取第二远的阻力位
-                        secondary_resistance = sorted(resistance_levels)[-2] if len(resistance_levels) >= 2 else primary_resistance * (1 + sl_config.min_stop_loss_ratio * 0.5)
+                        try:
+                            sorted_levels = sorted([x for x in resistance_levels if isinstance(x, (int, float))])
+                            secondary_resistance = sorted_levels[-2] if len(sorted_levels) >= 2 else primary_resistance * (1 + sl_config.min_stop_loss_ratio * 0.5)
+                        except (TypeError, ValueError):
+                            secondary_resistance = primary_resistance * (1 + sl_config.min_stop_loss_ratio * 0.5)
                     else:
                         secondary_resistance = primary_resistance * (1 + sl_config.min_stop_loss_ratio * 0.8)
                     
@@ -315,14 +338,19 @@ class StopLossTakeProfitStrategy:
                 theoretical_tp = entry_price - (risk * adjusted_min_rr)
                 
                 # 方法2: 基于主要支撑位
-                primary_support = levels.get('primary_support', current_price * (1 - sl_config.min_stop_loss_ratio * adjusted_min_rr * 2))
+                # 🆕 修复：使用安全获取方法
+                primary_support = self._safe_get_level_value(levels, 'primary_support', current_price * (1 - sl_config.min_stop_loss_ratio * adjusted_min_rr * 2))
                 
                 # 方法3: 在强势下跌趋势中，看更远的支撑位
                 if trend_strength in ['STRONG_DOWNTREND', 'DOWNTREND']:
                     support_levels = levels.get('support_levels', [])
-                    if len(support_levels) > 1:
+                    if support_levels and len(support_levels) > 1:
                         # 取第二远的支撑位
-                        secondary_support = sorted(support_levels)[1] if len(support_levels) >= 2 else primary_support * (1 - sl_config.min_stop_loss_ratio * 0.5)
+                        try:
+                            sorted_levels = sorted([x for x in support_levels if isinstance(x, (int, float))])
+                            secondary_support = sorted_levels[1] if len(sorted_levels) >= 2 else primary_support * (1 - sl_config.min_stop_loss_ratio * 0.5)
+                        except (TypeError, ValueError):
+                            secondary_support = primary_support * (1 - sl_config.min_stop_loss_ratio * 0.5)
                     else:
                         secondary_support = primary_support * (1 - sl_config.min_stop_loss_ratio * 0.8)
                     
@@ -373,7 +401,9 @@ class StopLossTakeProfitStrategy:
             
             if side == 'long':
                 # 多头止损：取支撑位和ATR止损中的较小值（更严格的止损）
-                support_level = price_data['levels_analysis'].get('static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                levels = price_data.get('levels_analysis', {})
+                # 🆕 修复：使用安全获取方法
+                support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
                 
                 # 基于ATR的止损
                 stop_loss_by_atr = current_price - (atr * sl_config.atr_multiplier)
@@ -391,7 +421,9 @@ class StopLossTakeProfitStrategy:
                 
             else:  # short
                 # 空头止损：取阻力位和ATR止损中的较大值（更严格的止损）
-                resistance_level = price_data['levels_analysis'].get('static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                levels = price_data.get('levels_analysis', {})
+                # 🆕 修复：使用安全获取方法
+                resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
                 
                 # 基于ATR的止损
                 stop_loss_by_atr = current_price + (atr * sl_config.atr_multiplier)
