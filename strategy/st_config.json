@@ -1,0 +1,56 @@
+{
+  "stop_loss": {
+    "min_stop_loss_ratio": 0.02,
+    "max_stop_loss_ratio": 0.4,
+    "kline_based_stop_loss": true,
+    "atr_multiplier": 1.5,
+    "enable_trailing_stop": true,
+    "trailing_activation_ratio": 0.03,
+    "trailing_distance_ratio": 0.015
+  },
+  "take_profit": {
+    "min_risk_reward": 1.2,
+    "max_risk_reward": 3.0,
+    "enable_multilevel_take_profit": true,
+    "trend_strength_multipliers": {
+      "STRONG_UPTREND": 1.5,
+      "UPTREND": 1.2,
+      "CONSOLIDATION": 1.0,
+      "DOWNTREND": 1.2,
+      "STRONG_DOWNTREND": 1.5
+    }
+  },
+  "multi_level_take_profit": {
+    "enable": true,
+    "levels": [
+      {
+        "profit_multiplier": 1.5,
+        "take_profit_ratio": 0.3,
+        "set_breakeven_stop": true,
+        "description": "第一级止盈 - 30%仓位，设置保本止损"
+      },
+      {
+        "profit_multiplier": 2.0,
+        "take_profit_ratio": 0.4,
+        "set_breakeven_stop": true,
+        "description": "第二级止盈 - 40%仓位，移动止损"
+      },
+      {
+        "profit_multiplier": 3.0,
+        "take_profit_ratio": 0.3,
+        "set_breakeven_stop": false,
+        "description": "第三级止盈 - 剩余30%仓位，让利润奔跑"
+      }
+    ]
+  },
+  "symbol_specific_config": {
+    "BTC": {
+      "atr_multiplier": 1.8,
+      "min_risk_reward": 1.5
+    },
+    "ETH": {
+      "atr_multiplier": 1.6,
+      "min_risk_reward": 1.3
+    }
+  }
+}
