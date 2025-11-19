@@ -1,7 +1,7 @@
 {
   "stop_loss": {
     "min_stop_loss_ratio": 0.02,
-    "max_stop_loss_ratio": 0.4,
+    "max_stop_loss_ratio": 0.2,
     "kline_based_stop_loss": true,
     "atr_multiplier": 1.5,
     "enable_trailing_stop": true,

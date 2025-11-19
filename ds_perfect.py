@@ -1684,44 +1684,67 @@ class PositionManager:
         self.position_levels = {}  # 记录每个持仓的止盈级别
         
     def check_profit_taking(self, symbol: str, current_position, price_data):
-        """检查是否需要执行多级止盈"""
+        """检查是否需要执行多级止盈 - 修复版：使用 st_config.json 配置"""
         if not current_position:
             return None
             
-        position_key = f"{current_position['side']}_{current_position['entry_price']}"
+        # [删除/注释旧代码]
+        # config = SYMBOL_CONFIGS[symbol]
+        # risk_config = config.get_risk_config()
+        # profit_taking_config = risk_config['profit_taking']
         
-        # ✅ 正确的配置获取方式
-        config = SYMBOL_CONFIGS[symbol]
-        risk_config = config.get_risk_config()
-        profit_taking_config = risk_config['profit_taking']
+        # [新增] 从 sl_tp_strategy 获取 multi_level_take_profit 配置
+        ml_tp_config = sl_tp_strategy.config.multi_level_take_profit
         
-        if not profit_taking_config['enable_multilevel_take_profit']:
+        # 使用新配置对象的属性访问方式 (.enable 而不是 ['enable'])
+        if not ml_tp_config.enable:
             return None
             
         current_price = price_data['price']
         entry_price = current_position['entry_price']
+        position_key = f"{current_position['side']}_{current_position['entry_price']}"
         
         if current_position['side'] == 'long':
             profit_ratio = (current_price - entry_price) / entry_price
         else:  # short
             profit_ratio = (entry_price - current_price) / entry_price
             
-        # 检查每个止盈级别
-        for i, level in enumerate(profit_taking_config['levels']):
+        # 检查每个止盈级别 (注意：levels 是对象列表还是字典列表，取决于 st_config_manager 的转换)
+        # 根据 st_config_manager.py，它通常被转回了 list[dict] 或者 list[obj]
+        # 为了安全，这里假设 levels 是字典列表 (因为 json load 出来是 dict)
+        
+        for i, level in enumerate(ml_tp_config.levels):
             level_key = f"{position_key}_level_{i}"
             
             # 如果已经执行过这个级别的止盈，跳过
             if self.position_levels.get(level_key, False):
                 continue
-                
+            
+            # 兼容对象访问或字典访问
+            profit_multiplier = level.get('profit_multiplier') if isinstance(level, dict) else level.profit_multiplier
+            take_profit_ratio = level.get('take_profit_ratio') if isinstance(level, dict) else level.take_profit_ratio
+            set_be_stop = level.get('set_breakeven_stop') if isinstance(level, dict) else level.set_breakeven_stop
+            description = level.get('description') if isinstance(level, dict) else level.description
+
+            # 这里的逻辑也需要修正：profit_multiplier 是相对于止损幅度的倍数，还是纯收益率？
+            # 你的配置注释写的是 "盈利倍数"，通常指 R (Risk) 的倍数。
+            # 但下面的代码直接拿 profit_ratio 和 profit_multiplier 比较是不对的 (除非 multiplier 是 0.02 这种小数)。
+            # 假设你的 multiplier 是 1.5 (1.5倍盈亏比)，我们需要计算当前的 R (风险)。
+            
+            # 获取当前品种的止损配置以计算 R
+            sl_config = sl_tp_strategy.config.stop_loss
+            base_risk = sl_config.min_stop_loss_ratio # 假设以最小止损作为基础风险单位 R
+            
+            target_profit_ratio = base_risk * profit_multiplier
+            
             # 检查是否达到止盈条件
-            if profit_ratio >= level['profit_multiplier']:
-                logger.log_info(f"🎯 达到止盈级别 {i+1}: 盈利{profit_ratio:.2%}倍, 触发条件{level['profit_multiplier']}倍")
+            if profit_ratio >= target_profit_ratio:
+                logger.log_info(f"🎯 达到止盈级别 {i+1}: 当前盈利{profit_ratio:.2%} >= 目标{target_profit_ratio:.2%} (R={base_risk:.1%})")
                 return {
                     'level': i,
-                    'take_profit_ratio': level['take_profit_ratio'],
-                    'set_breakeven_stop': level.get('set_breakeven_stop', False),
-                    'description': level['description']
+                    'take_profit_ratio': take_profit_ratio,
+                    'set_breakeven_stop': set_be_stop,
+                    'description': description
                 }
                 
         return None
@@ -1922,44 +1945,42 @@ def verify_position_exists(symbol: str, position_info: dict) -> bool:
         return False
 
 def setup_trailing_stop(symbol: str, current_position: dict, price_data: dict) -> bool:
-    """设置移动止损"""
-    config = SYMBOL_CONFIGS[symbol]
+    """设置移动止损 - 修复版：使用 st_config.json 配置"""
+    # [删除/注释旧代码]
+    # config = SYMBOL_CONFIGS[symbol]
+    # risk_config = config.get_risk_config()
+    # trailing_config = risk_config['dynamic_stop_loss']
+
+    # [新增] 使用 sl_tp_strategy 读取 st_config.json 中的 stop_loss 配置
+    sl_config = sl_tp_strategy.config.stop_loss
+    
     try:
-        risk_config = config.get_risk_config()
-        trailing_config = risk_config['dynamic_stop_loss']
-        
-        if not trailing_config['enable_trailing_stop']:
+        # 使用新配置的字段名
+        if not sl_config.enable_trailing_stop:
             return False
             
         entry_price = current_position['entry_price']
         current_price = price_data['price']
-        position_size = current_position['size']
         side = current_position['side']
         
         if side == 'long':
             profit_ratio = (current_price - entry_price) / entry_price
-            if profit_ratio >= trailing_config['trailing_activation_ratio']:
-                # 计算移动止损价格
-                trailing_stop_price = current_price * (1 - trailing_config['trailing_distance_ratio'])
-                
-                # 确保移动止损不会低于入场价（保本）
+            # 使用新参数名 trailing_activation_ratio
+            if profit_ratio >= sl_config.trailing_activation_ratio:
+                # 使用新参数名 trailing_distance_ratio
+                trailing_stop_price = current_price * (1 - sl_config.trailing_distance_ratio)
                 trailing_stop_price = max(trailing_stop_price, entry_price)
                 
-                logger.log_info(f"📈 {get_base_currency(symbol)}: 设置多头移动止损 - {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
-                
+                logger.log_info(f"📈 {get_base_currency(symbol)}: 触发移动止损 - 当前盈利{profit_ratio:.2%}, 新止损{trailing_stop_price:.2f}")
                 return set_trailing_stop_order(symbol, current_position, trailing_stop_price)
                 
         else:  # short
             profit_ratio = (entry_price - current_price) / entry_price
-            if profit_ratio >= trailing_config['trailing_activation_ratio']:
-                # 计算移动止损价格
-                trailing_stop_price = current_price * (1 + trailing_config['trailing_distance_ratio'])
-                
-                # 确保移动止损不会高于入场价（保本）
+            if profit_ratio >= sl_config.trailing_activation_ratio:
+                trailing_stop_price = current_price * (1 + sl_config.trailing_distance_ratio)
                 trailing_stop_price = min(trailing_stop_price, entry_price)
                 
-                logger.log_info(f"📉 {get_base_currency(symbol)}: 设置空头移动止损 - {trailing_stop_price:.2f} (当前盈利: {profit_ratio:.2%})")
-                
+                logger.log_info(f"📉 {get_base_currency(symbol)}: 触发移动止损 - 当前盈利{profit_ratio:.2%}, 新止损{trailing_stop_price:.2f}")
                 return set_trailing_stop_order(symbol, current_position, trailing_stop_price)
                 
         return False
