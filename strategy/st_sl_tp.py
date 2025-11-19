@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 import logging
 
 # 导入配置管理器
-from strategy.config_manager import get_config_manager, StrategyConfig
+from strategy.st_config_manager import get_config_manager, StrategyConfig
 
 # 导入必要的模块
 try:
