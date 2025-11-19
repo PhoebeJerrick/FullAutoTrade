@@ -1,4 +1,4 @@
-# Strategy/st_sl_tp.py
+# strategy/st_sl_tp.py
 import math
 import pandas as pd
 import numpy as np
@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 import logging
 
 # 导入配置管理器
-from Strategy.config_manager import get_config_manager, StrategyConfig
+from strategy.config_manager import get_config_manager, StrategyConfig
 
 # 导入必要的模块
 try:

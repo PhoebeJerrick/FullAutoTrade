@@ -1,9 +1,9 @@
-# Strategy/strategy_optimizer.py
+# strategy/strategy_optimizer.py
 import json
 import pandas as pd
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
-from .config_manager import get_config_manager, StrategyConfig
+from strategy.st_config_manager import get_config_manager, StrategyConfig
 
 class StrategyOptimizer:
     """
