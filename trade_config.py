@@ -19,62 +19,12 @@ MULTI_SYMBOL_CONFIGS = {
         'base_usdt_amount': float(os.getenv('BTC_BASE_USDT_AMOUNT', 100)),
         'max_position_ratio': 10,
     },
-    # ETH 配置
-    'ETH/USDT:USDT': {
-        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
-        'max_position_ratio': 8,
-    },
-    # SOL 配置 (示例)
-    'SOL/USDT:USDT': {
-        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 50)),
-        'max_position_ratio': 5,
-    },
-    # LTC 配置 (示例)
-    'LTC/USDT:USDT': {
-        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 40)),
-        'max_position_ratio': 5,
-    },
-    # BCH 配置 (示例)
-    'BCH/USDT:USDT': {
-        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
-        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
-    # DASH 配置 (示例)
-    'DASH/USDT:USDT': {
-        'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
-    # ZEC 配置 (示例)
-    'ZEC/USDT:USDT': {
-        'leverage': int(os.getenv('ZEC_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('ZEC_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
-    # ZEN 配置 (示例)
-    'ZEN/USDT:USDT': {
-        'leverage': int(os.getenv('ZEN_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('ZEN_BASE_USDT_AMOUNT', 60)),
-        'max_position_ratio': 7,
-    },
-    'ASTER/USDT:USDT': {
-        # 警告：请根据您的策略修改这些值
-        'leverage': int(os.getenv('ASTER_LEVERAGE', 15)),
-        'base_usdt_amount': float(os.getenv('ASTER_BASE_USDT_AMOUNT', 80)),
-        'max_position_ratio': 5,
-    },
-    
     'UNI/USDT:USDT': {
         # 警告：请根据您的策略修改这些值
         'leverage': int(os.getenv('UNI_LEVERAGE', 20)),
         'base_usdt_amount': float(os.getenv('UNI_BASE_USDT_AMOUNT', 80)),
         'max_position_ratio': 7,
     },
-    
     'OKB/USDT:USDT': {
         # 警告：请根据您的策略修改这些值
         'leverage': int(os.getenv('OKB_LEVERAGE', 15)),
@@ -85,13 +35,62 @@ MULTI_SYMBOL_CONFIGS = {
         # 警告：请根据您的策略修改这些值
         'leverage': int(os.getenv('HYPE_LEVERAGE', 10)),
         'base_usdt_amount': float(os.getenv('HYPE_BASE_USDT_AMOUNT', 30)),
-        'max_position_ratio': 3,
+        'max_position_ratio': 4,
     },    
-    'WCT/USDT:USDT': {
+
+    # ETH 配置
+    'ETH/USDT:USDT': {
+        'leverage': int(os.getenv('ETH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('ETH_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 8,
+    },
+    # BCH 配置 (示例)
+    'BCH/USDT:USDT': {
+        'leverage': int(os.getenv('BCH_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('BCH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    'ASTER/USDT:USDT': {
         # 警告：请根据您的策略修改这些值
-        'leverage': int(os.getenv('WCT_LEVERAGE', 10)),
-        'base_usdt_amount': float(os.getenv('WCT_BASE_USDT_AMOUNT', 70)),
-        'max_position_ratio': 3,
+        'leverage': int(os.getenv('ASTER_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('ASTER_BASE_USDT_AMOUNT', 80)),
+        'max_position_ratio': 5,
+    },
+    # LTC 配置 (示例)
+    'LTC/USDT:USDT': {
+        'leverage': int(os.getenv('LTC_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('LTC_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 5,
+    },
+    # SOL 配置 (示例)
+    'SOL/USDT:USDT': {
+        'leverage': int(os.getenv('SOL_LEVERAGE', 20)),
+        'base_usdt_amount': float(os.getenv('SOL_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 5,
+    },
+    # DOGE 配置 (示例)
+    'DOGE/USDT:USDT': {
+        'leverage': int(os.getenv('DOGE_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('DOGE_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    # BNB 配置 (示例)
+    'BNB/USDT:USDT': {
+        'leverage': int(os.getenv('BNB_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('BNB_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
+    },
+    'TRX/USDT:USDT': {
+        # 警告：请根据您的策略修改这些值
+        'leverage': int(os.getenv('TRX_LEVERAGE', 10)),
+        'base_usdt_amount': float(os.getenv('TRX_BASE_USDT_AMOUNT', 70)),
+        'max_position_ratio': 5,
+    },
+    # DASH 配置 (示例)
+    'DASH/USDT:USDT': {
+        'leverage': int(os.getenv('DASH_LEVERAGE', 15)),
+        'base_usdt_amount': float(os.getenv('DASH_BASE_USDT_AMOUNT', 60)),
+        'max_position_ratio': 7,
     },
 }
 
@@ -107,16 +106,34 @@ ACCOUNT_SYMBOL_MAPPING = {
     ],
     # 子账号用于交易 SOL, LTC, BCH
     "okxSub1": [
-        'BCH/USDT:USDT',
         'ETH/USDT:USDT',
+        'BCH/USDT:USDT',
         'ASTER/USDT:USDT',
         'LTC/USDT:USDT',
+    ],
+    # 子账号用于交易 SOL, LTC, BCH
+    "okxSub2": [
+        'DOGE/USDT:USDT',
+        'SOL/USDT:USDT',
+        'BNB/USDT:USDT',
+        'TRX/USDT:USDT',
     ],
     # 默认账号 (如果运行程序时未指定账号)
     "default": [
         'BTC/USDT:USDT', # 示例中只保留一个默认品种
         'DASH/USDT:USDT',
+        'ASTER/USDT:USDT',
+        'LTC/USDT:USDT',
     ],
+}
+
+ACCOUNT_ENV_SUFFIX = {
+    "okxMain": "_1",      # 对应 .env 里的 OKX_API_KEY_1
+    "okxSub1": "_2",      # 对应 .env 里的 OKX_API_KEY_2
+    "OkxSub2": "_3",      # 对应 .env 里的 OKX_API_KEY_3
+    "default": "",        # 对应 .env 里的 OKX_API_KEY (无后缀)
+    # 以后增加账号，在这里加一行:
+    # "okxNew": "_NEW",   # 对应 .env 里的 OKX_API_KEY_NEW
 }
 
 class TradingConfig:

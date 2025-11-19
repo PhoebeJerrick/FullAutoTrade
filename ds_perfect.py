@@ -22,6 +22,13 @@ from ai.ai_ds import analyze_with_deepseek, get_deepseek_analyzer
 from strategy.st_sl_tp import get_sl_tp_strategy, initialize_sl_tp_strategy
 from strategy.st_config_manager import get_config_manager
 from strategy.st_optimizer import StrategyOptimizer
+from trade_config import (
+    TradingConfig, 
+    MULTI_SYMBOL_CONFIGS, 
+    print_version_banner,
+    ACCOUNT_SYMBOL_MAPPING,
+    ACCOUNT_ENV_SUFFIX
+)
 
 #导入配置中心 (必须在导入 trade_logger之前，但因为 config_center.py 是自初始化的，顺序不严格)
 from cmd_config import CURRENT_ACCOUNT
@@ -170,25 +177,39 @@ def get_base_currency(symbol: str) -> str:
 
 # 根据账号选择对应的环境变量
 def get_account_config(account_name):
-    """根据账号名称获取对应的配置"""
-    if account_name == "okxMain":
-        return {
-            'api_key': os.getenv('OKX_API_KEY_1') or os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET_1') or os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD_1') or os.getenv('OKX_PASSWORD')
-        }
-    elif account_name == "okxSub1":
-        return {
-            'api_key': os.getenv('OKX_API_KEY_2'),
-            'secret': os.getenv('OKX_SECRET_2'),
-            'password': os.getenv('OKX_PASSWORD_2')
-        }
-    else:  # default
-        return {
-            'api_key': os.getenv('OKX_API_KEY'),
-            'secret': os.getenv('OKX_SECRET'),
-            'password': os.getenv('OKX_PASSWORD')
-        }
+    """
+    动态获取账号配置，无需修改代码逻辑。
+    它会根据 trade_config.py 中的 ACCOUNT_ENV_SUFFIX 自动查找环境变量。
+    """
+    # 1. 获取该账号对应的后缀，如果没有定义，默认使用空字符串
+    suffix = ACCOUNT_ENV_SUFFIX.get(account_name, "")
+    
+    # 2. 动态拼接环境变量名
+    # 例如: 如果后缀是 "_1"，则查找 OKX_API_KEY_1
+    # 如果后缀是 ""，则查找 OKX_API_KEY
+    api_key = os.getenv(f'OKX_API_KEY{suffix}')
+    secret = os.getenv(f'OKX_SECRET{suffix}')
+    password = os.getenv(f'OKX_PASSWORD{suffix}')
+
+    # 3. 检查是否成功获取
+    if not api_key:
+        # 尝试回退：如果找不到带后缀的，尝试找不带后缀的作为默认值
+        # 或者是为了兼容 default 账号
+        if account_name == 'default':
+             api_key = os.getenv('OKX_API_KEY')
+             secret = os.getenv('OKX_SECRET')
+             password = os.getenv('OKX_PASSWORD')
+        
+        if not api_key:
+            # 记录严重的配置错误日志，但这里无法使用 logger (可能还没初始化)，使用 print
+            print(f"❌ 严重错误: 无法找到账号 '{account_name}' 的环境变量 (后缀: '{suffix}')")
+            print(f"请检查 .env 文件中是否存在 OKX_API_KEY{suffix}")
+
+    return {
+        'api_key': api_key,
+        'secret': secret,
+        'password': password
+    }
 
 # 获取当前账号配置
 account_config = get_account_config(CURRENT_ACCOUNT)
