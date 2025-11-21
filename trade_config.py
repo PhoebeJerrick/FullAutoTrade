@@ -82,7 +82,7 @@ MULTI_SYMBOL_CONFIGS = {
     },
     'TRX/USDT:USDT': {
         # 警告：请根据您的策略修改这些值
-        'leverage': int(os.getenv('TRX_LEVERAGE', 10)),
+        'leverage': int(os.getenv('TRX_LEVERAGE', 20)),
         'base_usdt_amount': float(os.getenv('TRX_BASE_USDT_AMOUNT', 70)),
         'max_position_ratio': 5,
     },
@@ -349,10 +349,6 @@ class TradingConfig:
 
         self.margin_mode = os.getenv('MARGIN_MODE', 'isolated')
         
-        self.risk_management['stop_loss']['max_stop_loss_ratio'] = float(
-            os.getenv('MAX_STOP_LOSS_RATIO', self.risk_management['stop_loss']['max_stop_loss_ratio'])
-        )
-        
         self._last_update = time.time()
         print("🔄 Configuration reloaded from environment variables")
 
@@ -381,7 +377,6 @@ class TradingConfig:
             'data_points': self.data_points,
             'analysis_periods': self.analysis_periods,
             'position_management': self.position_management,
-            'risk_management': self.risk_management,
             'contract_size': getattr(self, 'contract_size', 0.01),
             'min_amount': getattr(self, 'min_amount', 0.01),
             'margin_mode': getattr(self, 'margin_mode', 'isolated'),

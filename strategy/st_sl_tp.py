@@ -43,21 +43,34 @@ class StopLossTakeProfitStrategy:
         except (TypeError, ValueError):
             return default_value
     
-    def calculate_adaptive_stop_loss(self, symbol: str, side: str, current_price: float, price_data: dict) -> float:
+    def calculate_adaptive_stop_loss(self, symbol: str, side: str, current_price: float, price_data: dict, leverage: float = 1.0) -> float:
         """自适应止损计算 - 集成配置管理"""
         config = self.symbol_configs[symbol]
         sl_config = self.config.stop_loss
         
         try:
             df = price_data['full_data']
-            atr = self.calculate_atr(df)
+
+            # 新增：从品种配置获取ATR周期，默认14
+            atr_period = config.get('atr_period', 14)
+            atr = self.calculate_atr(df, period=atr_period)  # 传入周期参数
             
             # 使用配置的ATR倍数
             atr_stop_distance = atr * sl_config.atr_multiplier
             
             # 方法2: 基于支撑阻力位的止损
             levels = price_data.get('levels_analysis', {})
+
+            # 我们取配置的最大止损比例（作为杠杆化后的风险上限，如 25%）和 1.0（100%爆仓线）中的较小值
+            max_safe_leveraged_risk = min(sl_config.max_stop_loss_ratio, 0.9) # 90%保证金风险
             
+            # 最终的安全止损距离比例 = max_safe_leveraged_risk / leverage
+            # 这个值在高杠杆下会非常小，覆盖配置的 max_stop_loss_ratio (0.25)
+            max_stop_distance_ratio_by_leverage = max_safe_leveraged_risk / leverage
+            
+            # 确保这个安全比例不低于最小止损比例 (min_stop_loss_ratio)
+            final_max_sl_ratio = max(max_stop_distance_ratio_by_leverage, sl_config.min_stop_loss_ratio)
+    
             if side == 'long':
                 # 🆕 修复：使用安全获取方法
                 support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
@@ -71,9 +84,9 @@ class StopLossTakeProfitStrategy:
                 stop_loss = max(structure_stop, atr_stop_price)
                 
                 # 确保止损合理（使用配置的最大止损比例）
-                max_stop_distance = current_price * sl_config.max_stop_loss_ratio
+                max_stop_distance = current_price * final_max_sl_ratio
                 min_stop_price = current_price - max_stop_distance
-                stop_loss = max(stop_loss, min_stop_price)
+                stop_loss = max(stop_loss, min_stop_price) # 确保止损价格不低于最小安全止损价
                 
             else:  # short
                 # 🆕 修复：使用安全获取方法
@@ -88,9 +101,9 @@ class StopLossTakeProfitStrategy:
                 stop_loss = min(structure_stop, atr_stop_price)
                 
                 # 确保止损合理（使用配置的最大止损比例）
-                max_stop_distance = current_price * sl_config.max_stop_loss_ratio
+                max_stop_distance = current_price * final_max_sl_ratio
                 max_stop_price = current_price + max_stop_distance
-                stop_loss = min(stop_loss, max_stop_price)
+                stop_loss = min(stop_loss, max_stop_price) # 确保止损价格不高于最大安全止损价
             
             stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
             direction = "above" if side == 'short' and stop_loss > current_price else "below"
@@ -128,6 +141,10 @@ class StopLossTakeProfitStrategy:
             # 计算默认止盈比例
             default_tp_ratio = sl_config.min_stop_loss_ratio * risk_reward_ratio
             
+            # 新增：从品种配置获取ATR周期
+            atr_period = config.get('atr_period', 14)
+            atr = self.calculate_atr(df, period=atr_period)  # 传入周期参数
+
             # 🆕 修复：在条件分支之前定义 min_profit_ratio
             min_profit_ratio = sl_config.min_stop_loss_ratio * 0.5  # 最小盈利是止损的一半
             
@@ -284,7 +301,14 @@ class StopLossTakeProfitStrategy:
         try:
             levels = price_data.get('levels_analysis', {})
             current_price = price_data['price']
+
+            df = price_data['full_data']  # 确保df已获取
             
+            # 新增：从品种配置获取ATR周期
+            config = self.symbol_configs[symbol]
+            atr_period = config.get('atr_period', 14)
+            atr = self.calculate_atr(df, period=atr_period)  # 若方法中需计算ATR，补充此句
+
             # 根据趋势强度调整盈亏比目标
             trend_multiplier = tp_config.trend_strength_multipliers.get(trend_strength, 1.0)
             adjusted_min_rr = min_risk_reward * trend_multiplier
@@ -382,7 +406,7 @@ class StopLossTakeProfitStrategy:
             # 备用计算
             return self.calculate_realistic_take_profit(symbol, side, entry_price, stop_loss, price_data, min_risk_reward)
 
-    def calculate_kline_based_stop_loss(self, side: str, entry_price: float, price_data: dict, max_stop_loss_ratio: float = None) -> float:
+    def calculate_kline_based_stop_loss(self, side: str, entry_price: float, price_data: dict, max_stop_loss_ratio: float = None, leverage: float = 1.0) -> float:
         """
         基于K线结构计算止损价格 - 集成配置管理
         """
@@ -391,14 +415,33 @@ class StopLossTakeProfitStrategy:
         try:
             df = price_data['full_data']
             current_price = price_data['price']
+
+            # 新增：从品种配置获取ATR周期（需先获取symbol，注意参数补充）
+            # 注意：原方法缺少symbol参数，需先补充参数定义
+            symbol = price_data.get('symbol')  # 假设price_data包含symbol信息，或从其他参数传入
+            config = self.symbol_configs.get(symbol, {})
+            atr_period = config.get('atr_period', 14)
             
+            # 计算ATR（传入周期）
+            atr = self.calculate_atr(df, period=atr_period)
+
             # 使用配置的最大止损比例，如果没有传入则使用默认值
             if max_stop_loss_ratio is None:
                 max_stop_loss_ratio = sl_config.max_stop_loss_ratio
+
+            # 🆕 杠杆化风险修正：计算基于杠杆的更严格最大止损距离
+            max_safe_leveraged_risk = min(sl_config.max_stop_loss_ratio, 0.9) # 90%保证金风险
+            max_stop_distance_ratio_by_leverage = max_safe_leveraged_risk / leverage
             
-            # 计算ATR
-            atr = self.calculate_atr(df)
-            
+            # 优先使用传入的 max_stop_loss_ratio，但不能超过杠杆限制
+            if max_stop_loss_ratio is None:
+                max_stop_loss_ratio = max_stop_distance_ratio_by_leverage
+            else:
+                max_stop_loss_ratio = min(max_stop_loss_ratio, max_stop_distance_ratio_by_leverage)
+
+            # 确保这个安全比例不低于最小止损比例 (min_stop_loss_ratio)
+            final_max_sl_ratio = max(max_stop_loss_ratio, sl_config.min_stop_loss_ratio)        
+
             if side == 'long':
                 # 多头止损：取支撑位和ATR止损中的较小值（更严格的止损）
                 levels = price_data.get('levels_analysis', {})
@@ -412,7 +455,7 @@ class StopLossTakeProfitStrategy:
                 stop_loss_price = min(support_level, stop_loss_by_atr)
                 
                 # 确保止损不超过最大比例
-                max_stop_loss_price = current_price * (1 - max_stop_loss_ratio)
+                max_stop_loss_price = current_price * (1 - final_max_sl_ratio)
                 stop_loss_price = max(stop_loss_price, max_stop_loss_price)
                 
                 # 确保止损在合理范围内（使用配置的最小止损比例）
@@ -432,7 +475,7 @@ class StopLossTakeProfitStrategy:
                 stop_loss_price = max(resistance_level, stop_loss_by_atr)
                 
                 # 确保止损不超过最大比例
-                max_stop_loss_price = current_price * (1 + max_stop_loss_ratio)
+                max_stop_loss_price = current_price * (1 + final_max_sl_ratio)
                 stop_loss_price = min(stop_loss_price, max_stop_loss_price)
                 
                 # 确保止损在合理范围内（使用配置的最小止损比例）
@@ -550,8 +593,10 @@ class StopLossTakeProfitStrategy:
             logger.log_error("risk_reward_calculation", f"盈亏比计算失败: {str(e)}")
             return 0
 
-    def validate_price_relationship(self, entry_price: float, stop_loss_price: float, take_profit_price: float, side: str) -> bool:
-        """验证价格关系的合理性 - 集成配置管理"""
+    def validate_price_relationship(self, entry_price: float, stop_loss_price: float, take_profit_price: float, side: str, leverage: float = 1.0) -> bool:
+        """验证价格关系的合理性 - 集成配置管理。
+        新增：使用 leverage 参数检查止损/止盈距离（开仓/加仓时有效）。
+        """
         sl_config = self.config.stop_loss
         tp_config = self.config.take_profit
         
@@ -569,13 +614,38 @@ class StopLossTakeProfitStrategy:
                                    f"空头价格关系错误: 止盈{take_profit_price:.2f} < 入场{entry_price:.2f} < 止损{stop_loss_price:.2f}")
                     return False
             
+            # 计算距离百分比
+            sl_distance_ratio = abs(entry_price - stop_loss_price) / entry_price
+            tp_distance_ratio = abs(take_profit_price - entry_price) / entry_price
+
+            # ----------------------------------------------------
+            # 🆕 杠杆化风险检查：确保止损距离乘以杠杆不超出配置的最大值
+            # ----------------------------------------------------
+            # 杠杆化的SL距离比例 (代表理论上保证金的损失百分比)
+            leveraged_sl_risk_ratio = sl_distance_ratio * leverage
+            
+            # 强制清算风险检查：杠杆化风险不应超过 70% (0.70)
+            if leveraged_sl_risk_ratio > 0.70:
+                logger.log_error(f"price_validation_failed_leverage_sl", 
+                               f"❌ 止损杠杆风险过高: {leveraged_sl_risk_ratio*100:.2f}% (超出100%保证金风险)")
+                return False
+
+            # 使用 max_stop_loss_ratio 作为用户配置的**杠杆化后**最大可承受风险上限
+            if leveraged_sl_risk_ratio > sl_config.max_stop_loss_ratio:
+                # 记录警告并返回 False，这将触发价格自动修正。
+                # 移动止损（Trailing Stop）和多级止盈（Multi-level TP）的更新逻辑会绕过此验证，因此符合您的要求。
+                logger.log_warning(f"⚠️ 止损杠杆化风险超出配置上限: {leveraged_sl_risk_ratio*100:.2f}% > 配置上限 {sl_config.max_stop_loss_ratio*100:.2f}%")
+                return False
+            # ----------------------------------------------------
+            
             # 检查价格是否过于接近（使用配置的最小止损比例）
-            min_distance = sl_config.min_stop_loss_ratio * 0.5  # 允许的最小距离是止损比例的一半
-            if abs(entry_price - stop_loss_price) / entry_price < min_distance:
+            min_distance_ratio = sl_config.min_stop_loss_ratio * 0.5  # 允许的最小距离是止损比例的一半
+            
+            if sl_distance_ratio < min_distance_ratio:
                 logger.log_warning("⚠️ 止损价格过于接近入场价格")
                 return False
                 
-            if abs(take_profit_price - entry_price) / entry_price < min_distance:
+            if tp_distance_ratio < min_distance_ratio:
                 logger.log_warning("⚠️ 止盈价格过于接近入场价格")
                 return False
                 
@@ -602,7 +672,7 @@ class StopLossTakeProfitStrategy:
         except Exception as e:
             logger.log_error("price_relationship_validation", str(e))
             return False
-
+        
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """计算平均真实波幅(ATR)"""
         try:
