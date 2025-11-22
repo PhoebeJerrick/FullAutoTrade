@@ -33,11 +33,6 @@ from trade_config import (
 #导入配置中心 (必须在导入 trade_logger之前，但因为 config_center.py 是自初始化的，顺序不严格)
 from cmd_config import CURRENT_ACCOUNT
 
-# Trading parameter configuration - combining advantages of both versions
-from trade_config import (TradingConfig, 
-                          MULTI_SYMBOL_CONFIGS, 
-                          print_version_banner,
-                          ACCOUNT_SYMBOL_MAPPING) # ✅ 仅导入类和字典
 # Global logger
 from trade_logger import logger
 
@@ -1972,42 +1967,90 @@ def check_existing_algo_orders(symbol: str, position: dict) -> dict:
             'remaining_size': position['size']
         }
 
-# 🆕 --- 核心修改：智能化移动止损，不再取消止盈单 ---
 def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: float) -> bool:
     """
-    设置移动止损订单 - 智能版
+    设置移动止损订单 - 智能无损版 (修复 OCO 止盈丢失问题)
     
-    此函数现在将:
-    1. 检查现有的 *止损单*。
-    2. 取消 *只* 取消旧的止损单 (保留止盈单)。
-    3. 创建新的止损单。
+    逻辑升级:
+    1. 检查现有订单。
+    2. 关键: 如果发现现有订单包含止盈 (无论是OCO还是独立TP)，先"捕获"止盈价格。
+    3. 取消旧的止损/OCO/止盈单。
+    4. 如果之前有止盈，创建新的 OCO 单 (新SL + 旧TP)。
+    5. 如果之前无止盈，创建新的独立 SL 单。
     """
     config = SYMBOL_CONFIGS[symbol]
     try:
         side = current_position['side']
         position_size = current_position['size']
         
-        # 1. 检查现有的策略订单
+        # 1. 分析现有策略订单
         orders_analysis = check_existing_algo_orders(symbol, current_position)
         
-        # 2. 如果有旧的止损单，只取消它们
-        if orders_analysis['has_stop_loss'] and orders_analysis['stop_loss_orders']:
-            logger.log_info(f"🔄 {get_base_currency(symbol)}: 发现旧的止损单，正在取消...")
-            cancel_specific_algo_orders(symbol, orders_analysis['stop_loss_orders'], 'conditional')
-            time.sleep(1) # 等待交易所处理取消
-        else:
-            logger.log_info(f"ℹ️ {get_base_currency(symbol)}: 未发现旧止损单，直接创建新单。")
+        # 临时变量，用于存储需要"继承"的止盈价格
+        tp_price_to_restore = None
+        
+        # 待取消的订单列表
+        conditional_orders_to_cancel = []
+        oco_orders_to_cancel = []
 
-        # 3. 创建新的移动止损条件单
-        logger.log_info(f"🎯 {get_base_currency(symbol)}: 创建新移动止损单于 {stop_price:.2f}")
-        result = sl_tp_algo_order_set(
-            symbol=symbol,
-            side=side,
-            amount=position_size,
-            stop_loss_price=stop_price,
-        )
+        # --- A. 检查 OCO 订单 (优先级最高) ---
+        if orders_analysis.get('oco_orders'):
+            for oco in orders_analysis['oco_orders']:
+                oco_orders_to_cancel.append(oco)
+                # 💡 关键步骤: 捕获旧的止盈价格
+                if oco.get('takeProfitPrice') and float(oco['takeProfitPrice']) > 0:
+                    tp_price_to_restore = float(oco['takeProfitPrice'])
+                    logger.log_info(f"♻️ {get_base_currency(symbol)}: 检测到OCO单，继承止盈价 {tp_price_to_restore}")
+
+        # --- B. 检查独立止损单 ---
+        if orders_analysis.get('stop_loss_orders'):
+            for sl in orders_analysis['stop_loss_orders']:
+                # 避免重复添加 (如果 check_existing_algo_orders 逻辑重叠)
+                if sl not in oco_orders_to_cancel:
+                    conditional_orders_to_cancel.append(sl)
+
+        # --- C. 检查独立止盈单 (可选: 将独立止盈合并进新的移动止损形成OCO) ---
+        # 如果我们还没有从 OCO 中获取止盈价，且存在独立止盈单，我们也可以通过取消它并合并来优化挂单数量
+        if tp_price_to_restore is None and orders_analysis.get('take_profit_orders'):
+            for tp in orders_analysis['take_profit_orders']:
+                tp_price_to_restore = float(tp['triggerPrice'])
+                conditional_orders_to_cancel.append(tp)
+                logger.log_info(f"♻️ {get_base_currency(symbol)}: 检测到独立止盈，准备合并为OCO，价格 {tp_price_to_restore}")
+
+        # 2. 执行取消操作
+        if oco_orders_to_cancel:
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 取消旧 OCO 订单...")
+            cancel_specific_algo_orders(symbol, oco_orders_to_cancel, 'oco')
+            
+        if conditional_orders_to_cancel:
+            logger.log_info(f"🔄 {get_base_currency(symbol)}: 取消旧条件单...")
+            cancel_specific_algo_orders(symbol, conditional_orders_to_cancel, 'conditional')
+            
+        if oco_orders_to_cancel or conditional_orders_to_cancel:
+            time.sleep(0.5) # 短暂等待交易所处理
+
+        # 3. 创建新订单 (根据是否捕获到止盈价决定类型)
+        if tp_price_to_restore:
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 创建移动止损 OCO (止损:{stop_price:.2f} | 止盈:{tp_price_to_restore:.2f})")
+            result = sl_tp_algo_order_set(
+                symbol=symbol,
+                side=side,
+                amount=position_size,
+                stop_loss_price=stop_price,
+                take_profit_price=tp_price_to_restore  # ✅ 传入继承的止盈价
+            )
+        else:
+            logger.log_info(f"🎯 {get_base_currency(symbol)}: 创建独立移动止损单 (止损:{stop_price:.2f})")
+            result = sl_tp_algo_order_set(
+                symbol=symbol,
+                side=side,
+                amount=position_size,
+                stop_loss_price=stop_price
+                # take_profit_price 默认为 None
+            )
+
         if result['success']:
-            logger.log_info(f"✅ {get_base_currency(symbol)}: 新移动止损设置成功: {stop_price:.2f}")
+            logger.log_info(f"✅ {get_base_currency(symbol)}: 移动止损更新成功")
             return True
         else:
             logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", "移动止损设置失败")
@@ -2016,7 +2059,6 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
     except Exception as e:
         logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", str(e))
         return False
-    # ✅ --- 修改结束 ---
 
 def mark_tp_level_executed(symbol: str, level_index: int):
     """标记止盈级别已执行，并保存状态到全局变量和文件"""
@@ -2998,6 +3040,8 @@ def trading_bot(symbol: str):
     
     # 从全局字典中获取该品种的配置
     config = SYMBOL_CONFIGS[symbol]
+    # 🆕 新增：告诉 logger 当前正在处理哪个品种
+    logger.bind_symbol(symbol)
 
     logger.log_info(f"\n=====================================")
     logger.log_info(f"🎯 运行交易品种: {get_base_currency(symbol)}")

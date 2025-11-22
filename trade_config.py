@@ -130,7 +130,7 @@ ACCOUNT_SYMBOL_MAPPING = {
 ACCOUNT_ENV_SUFFIX = {
     "okxMain": "_1",      # 对应 .env 里的 OKX_API_KEY_1
     "okxSub1": "_2",      # 对应 .env 里的 OKX_API_KEY_2
-    "OkxSub2": "_3",      # 对应 .env 里的 OKX_API_KEY_3
+    "okxSub2": "_3",      # 对应 .env 里的 OKX_API_KEY_3
     "default": "",        # 对应 .env 里的 OKX_API_KEY (无后缀)
     # 以后增加账号，在这里加一行:
     # "okxNew": "_NEW",   # 对应 .env 里的 OKX_API_KEY_NEW

@@ -6,60 +6,58 @@ from cmd_config import CURRENT_ACCOUNT
 
 class TradingLogger:
     def __init__(self, log_level=logging.INFO):
-            # ❌ 移除旧的 try...except 导入逻辑
-            
-            # 🚀 更改点 2: 直接使用导入的 CURRENT_ACCOUNT (它保证已被设置)
-            self.current_account = CURRENT_ACCOUNT
-            
-            # 生成日志文件路径 (使用 self.current_account 来构造路径)
-            self.log_file = f'../Output/{self.current_account}/{self.current_account}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-            self.setup_logging(log_level)
+        self.current_account = CURRENT_ACCOUNT
+        
+        # 🆕 新增：用于存储当前交易品种的上下文变量
+        self.context_symbol = None
+        
+        # 生成日志文件路径
+        self.log_file = f'../Output/{self.current_account}/{self.current_account}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        self.setup_logging(log_level)
 
     def setup_logging(self, log_level):
         """Setup logging with rotation and better formatting"""
-        # Create logs directory if it doesn't exist
         log_dir = os.path.dirname(self.log_file)
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir)
         
-        # Clear previous basic config
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         
-        # Create formatter - 修改格式
         formatter = logging.Formatter(
-            '%(asctime)s-%(name)s-%(levelname)s-%(message)s',  # 移除空格和冒号，使用连字符分隔
-            datefmt='%Y%m%d-%H%M%S'  # 修改日期格式为 YYYYMMDD-HHMMSS
+            '%(asctime)s-%(name)s-%(levelname)s-%(message)s',
+            datefmt='%Y%m%d-%H%M%S'
         )
         
-        # Setup logger - 修改记录器名称
-        self.logger = logging.getLogger('TradeBot')  # 改为 TradeBot
+        self.logger = logging.getLogger('TradeBot')
         self.logger.setLevel(log_level)
         
-        # File handler
         file_handler = logging.FileHandler(self.log_file)
         file_handler.setFormatter(formatter)
         
-        # Console handler
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         
-        # Add handlers
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
     
+    # 🆕 新增：主动设置当前上下文的方法
+    def bind_symbol(self, symbol: str):
+        """绑定当前交易品种到日志上下文"""
+        self.context_symbol = symbol
+
     def _format_message(self, message):
         """内部方法：获取当前品种并格式化消息"""
-        try:
-            # 尝试从 ds_perfect 模块获取 CURRENT_SYMBOL
-            from ds_perfect import CURRENT_SYMBOL
-            if CURRENT_SYMBOL:
+        # 🆕 修改：不再反向导入，而是使用内部状态
+        if self.context_symbol:
+            try:
                 # 仅保留基础货币（如 BTC, ETH）作为日志前缀
-                base_asset = CURRENT_SYMBOL.split('/')[0]
+                # 处理 'BTC/USDT:USDT' -> 'BTC'
+                base_asset = self.context_symbol.split('/')[0]
                 return f"[{base_asset}] {message}"
-        except (ImportError, AttributeError):
-            # 模块未加载或变量不存在
-            pass
+            except Exception:
+                return f"[{self.context_symbol}] {message}"
+        
         return message
 
     def log_signal(self, signal_data, price_data):
@@ -78,7 +76,6 @@ class TradingLogger:
         if details:
             message += f" | {details}"
         
-        # 使用格式化方法
         message = self._format_message(message) 
         
         if success:
@@ -87,31 +84,22 @@ class TradingLogger:
             self.logger.error(message)
     
     def log_error(self, context, error):
-        """Log error messages with context"""
-        # 使用格式化方法
         self.logger.error(self._format_message(f"{context}: {error}")) 
     
     def log_warning(self, message):
-        """Log warning messages"""
-        # 使用格式化方法
         self.logger.warning(self._format_message(f"{message}")) 
     
     def log_info(self, message):
-        """Log general info messages"""
-        # 使用格式化方法
         self.logger.info(self._format_message(f"{message}"))
     
     def log_debug(self, message):
-        """Log debug messages"""
         self.logger.debug(self._format_message(f"{message}"))
 
     def log_performance(self, metrics_dict):
-        """Log performance metrics"""
         metrics_str = " | ".join([f"{k}: {v}" for k, v in metrics_dict.items()])
         self.logger.info(self._format_message(f"PERFORMANCE: {metrics_str}"))
     
     def log_health_check(self, status, details=""):
-        """Log health check results"""
         if status:
             self.logger.info(self._format_message(f"HEALTH CHECK: PASSED | {details}"))
         else:
