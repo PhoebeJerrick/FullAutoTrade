@@ -22,7 +22,7 @@ class StopLossTakeProfitStrategy:
     负责计算和管理各种止盈止损策略
     """
     
-    def __init__(self, symbol_configs: Dict, config_file: str = "strategy_config.json"):
+    def __init__(self, symbol_configs: Dict, config_file: str = "st_config.json"):
         self.symbol_configs = symbol_configs
         self.config_manager = get_config_manager(config_file)
         self.config = self.config_manager.current_config
@@ -52,7 +52,8 @@ class StopLossTakeProfitStrategy:
             df = price_data['full_data']
 
             # 新增：从品种配置获取ATR周期，默认14
-            atr_period = config.get('atr_period', 14)
+            global_atr_period = self.config.default_atr_period
+            atr_period = config.get('atr_period', global_atr_period)
             atr = self.calculate_atr(df, period=atr_period)  # 传入周期参数
             
             # 使用配置的ATR倍数
@@ -72,38 +73,61 @@ class StopLossTakeProfitStrategy:
             final_max_sl_ratio = max(max_stop_distance_ratio_by_leverage, sl_config.min_stop_loss_ratio)
     
             if side == 'long':
-                # 🆕 修复：使用安全获取方法
-                support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
-                dynamic_support = self._safe_get_level_value(levels, 'dynamic_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                # -------------------------------------------------------
+                # 🟢 修改开始：添加 kline_based_stop_loss 判断逻辑
+                # -------------------------------------------------------
                 
-                # 选择较近的支撑位
-                structure_stop = min(support_level, dynamic_support)
-                
-                # 结合ATR和结构止损，选择较近的
+                # A. 计算纯 ATR 止损价
                 atr_stop_price = current_price - atr_stop_distance
-                stop_loss = max(structure_stop, atr_stop_price)
                 
-                # 确保止损合理（使用配置的最大止损比例）
+                # B. 根据配置决定是否融合 K线结构止损
+                if sl_config.kline_based_stop_loss:
+                    support_level = self._safe_get_level_value(levels, 'static_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                    dynamic_support = self._safe_get_level_value(levels, 'dynamic_support', current_price * (1 - sl_config.min_stop_loss_ratio))
+                    
+                    # 结构止损：取最近的支撑位
+                    structure_stop = min(support_level, dynamic_support)
+                    
+                    # 融合逻辑：取 ATR止损 和 结构止损 中 较高 的一个（即距离现价更近、更保守的）
+                    # 但如果结构止损太远（比如支撑位很深），ATR止损会起保护作用
+                    stop_loss = max(structure_stop, atr_stop_price)
+                else:
+                    # 如果关闭 K线止损，直接使用 ATR 止损
+                    stop_loss = atr_stop_price
+                    
+                # C. 最后进行最大安全距离兜底 (保持原有逻辑)
                 max_stop_distance = current_price * final_max_sl_ratio
                 min_stop_price = current_price - max_stop_distance
-                stop_loss = max(stop_loss, min_stop_price) # 确保止损价格不低于最小安全止损价
+                stop_loss = max(stop_loss, min_stop_price)
                 
             else:  # short
-                # 🆕 修复：使用安全获取方法
-                resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
-                dynamic_resistance = self._safe_get_level_value(levels, 'dynamic_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                # -------------------------------------------------------
+                # 🔴 修改开始：空头逻辑同理
+                # -------------------------------------------------------
                 
-                # 选择较远的阻力位（更严格的止损）
-                structure_stop = max(resistance_level, dynamic_resistance)
-                
-                # 结合ATR和结构止损，选择较远的
+                # A. 计算纯 ATR 止损价
                 atr_stop_price = current_price + atr_stop_distance
-                stop_loss = min(structure_stop, atr_stop_price)
                 
-                # 确保止损合理（使用配置的最大止损比例）
+                # B. 根据配置决定是否融合 K线结构止损
+                if sl_config.kline_based_stop_loss:
+                    resistance_level = self._safe_get_level_value(levels, 'static_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                    dynamic_resistance = self._safe_get_level_value(levels, 'dynamic_resistance', current_price * (1 + sl_config.min_stop_loss_ratio))
+                    
+                    # 结构止损：取较远的阻力位（原有逻辑是 max，这里保持一致）
+                    # 或者是取最近的阻力位？通常做空止损放在阻力位上方。
+                    # 原代码逻辑：structure_stop = max(...)，即取更高的阻力位作为止损参考
+                    structure_stop = max(resistance_level, dynamic_resistance)
+                    
+                    # 融合逻辑：取 ATR止损 和 结构止损 中 较低 的一个（即距离现价更近的）
+                    stop_loss = min(structure_stop, atr_stop_price)
+                else:
+                    # 如果关闭 K线止损，直接使用 ATR 止损
+                    stop_loss = atr_stop_price
+                
+                # C. 最后进行最大安全距离兜底 (保持原有逻辑)
                 max_stop_distance = current_price * final_max_sl_ratio
                 max_stop_price = current_price + max_stop_distance
-                stop_loss = min(stop_loss, max_stop_price) # 确保止损价格不高于最大安全止损价
+                stop_loss = min(stop_loss, max_stop_price)
             
             stop_distance_percent = abs(stop_loss - current_price) / current_price * 100
             direction = "above" if side == 'short' and stop_loss > current_price else "below"
@@ -127,8 +151,8 @@ class StopLossTakeProfitStrategy:
                 return current_price * (1 - sl_config.min_stop_loss_ratio)
             else:
                 return current_price * (1 + sl_config.min_stop_loss_ratio)
-
-    def calculate_intelligent_take_profit(self, symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0) -> float:
+            
+    def calculate_intelligent_take_profit(self, symbol: str, side: str, entry_price: float, price_data: dict, risk_reward_ratio: float = 2.0, stop_loss: Optional[float] = None) -> float:
         """计算智能止盈价格 - 集成配置管理"""
         config = self.symbol_configs[symbol]
         sl_config = self.config.stop_loss
@@ -142,7 +166,8 @@ class StopLossTakeProfitStrategy:
             default_tp_ratio = sl_config.min_stop_loss_ratio * risk_reward_ratio
             
             # 新增：从品种配置获取ATR周期
-            atr_period = config.get('atr_period', 14)
+            global_atr_period = self.config.default_atr_period
+            atr_period = config.get('atr_period', global_atr_period)
             atr = self.calculate_atr(df, period=atr_period)  # 传入周期参数
 
             # 🆕 修复：在条件分支之前定义 min_profit_ratio
@@ -160,7 +185,9 @@ class StopLossTakeProfitStrategy:
                 
                 # 方法3: 基于固定风险回报比
                 stop_loss_default = entry_price * (1 - sl_config.min_stop_loss_ratio)
-                risk = abs(entry_price - price_data.get('stop_loss', stop_loss_default))
+                # 修正：优先使用传入的 stop_loss，否则使用默认最小止损距离计算风险
+                risk_price = stop_loss if stop_loss is not None else stop_loss_default
+                risk = abs(entry_price - risk_price)
                 rr_take_profit = entry_price + (risk * risk_reward_ratio)
                 
                 # 取最合理的止盈价格
@@ -182,9 +209,11 @@ class StopLossTakeProfitStrategy:
                 
                 # 方法3: 基于固定风险回报比
                 stop_loss_default = entry_price * (1 + sl_config.min_stop_loss_ratio)
-                risk = abs(price_data.get('stop_loss', stop_loss_default) - entry_price)
+                # 修正：优先使用传入的 stop_loss，否则使用默认最小止损距离计算风险
+                risk_price = stop_loss if stop_loss is not None else stop_loss_default
+                risk = abs(risk_price - entry_price)
                 rr_take_profit = entry_price - (risk * risk_reward_ratio)
-                
+
                 # 取最合理的止盈价格
                 take_profit_price = max(support_level, atr_take_profit, rr_take_profit)
                 
@@ -303,11 +332,7 @@ class StopLossTakeProfitStrategy:
             current_price = price_data['price']
 
             df = price_data['full_data']  # 确保df已获取
-            
-            # 新增：从品种配置获取ATR周期
-            config = self.symbol_configs[symbol]
-            atr_period = config.get('atr_period', 14)
-            atr = self.calculate_atr(df, period=atr_period)  # 若方法中需计算ATR，补充此句
+
 
             # 根据趋势强度调整盈亏比目标
             trend_multiplier = tp_config.trend_strength_multipliers.get(trend_strength, 1.0)
@@ -406,7 +431,7 @@ class StopLossTakeProfitStrategy:
             # 备用计算
             return self.calculate_realistic_take_profit(symbol, side, entry_price, stop_loss, price_data, min_risk_reward)
 
-    def calculate_kline_based_stop_loss(self, side: str, entry_price: float, price_data: dict, max_stop_loss_ratio: float = None, leverage: float = 1.0) -> float:
+    def calculate_kline_based_stop_loss(self, symbol: str, side: str, entry_price: float, price_data: dict, max_stop_loss_ratio: float = None, leverage: float = 1.0) -> float:
         """
         基于K线结构计算止损价格 - 集成配置管理
         """
@@ -416,11 +441,9 @@ class StopLossTakeProfitStrategy:
             df = price_data['full_data']
             current_price = price_data['price']
 
-            # 新增：从品种配置获取ATR周期（需先获取symbol，注意参数补充）
-            # 注意：原方法缺少symbol参数，需先补充参数定义
-            symbol = price_data.get('symbol')  # 假设price_data包含symbol信息，或从其他参数传入
             config = self.symbol_configs.get(symbol, {})
-            atr_period = config.get('atr_period', 14)
+            global_atr_period = self.config.default_atr_period
+            atr_period = config.get('atr_period', global_atr_period)
             
             # 计算ATR（传入周期）
             atr = self.calculate_atr(df, period=atr_period)
@@ -503,7 +526,7 @@ class StopLossTakeProfitStrategy:
             # 没有历史记录或当前持仓，使用当前价格作为参考
             actual_side = current_position.get('side', 'long') if current_position else 'long'
             stop_loss = self.calculate_adaptive_stop_loss(symbol, actual_side, current_price, price_data)
-            take_profit = self.calculate_intelligent_take_profit(symbol, actual_side, current_price, price_data, tp_config.min_risk_reward)
+            take_profit = self.calculate_intelligent_take_profit(symbol, actual_side, current_price, price_data,stop_loss, tp_config.min_risk_reward)
             return {
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
@@ -530,8 +553,9 @@ class StopLossTakeProfitStrategy:
         if actual_side == 'long':
             # 多头：止损在下方，止盈在上方
             stop_loss = self.calculate_adaptive_stop_loss(symbol, 'long', weighted_entry, price_data)
-            take_profit = self.calculate_intelligent_take_profit(symbol, 'long', weighted_entry, price_data, tp_config.min_risk_reward * 0.9)  # 整体仓位使用稍低的风险回报比
-            
+            take_profit = self.calculate_intelligent_take_profit(symbol, 'long', weighted_entry, price_data, 
+                                                            stop_loss=stop_loss, # <-- 传入止损价
+                                                            risk_reward_ratio=tp_config.min_risk_reward * 0.9)
             # 双重验证：确保价格关系正确
             if stop_loss >= weighted_entry:
                 logger.log_warning(f"⚠️ {self.get_base_currency(symbol)}: 多头止损价格异常，自动修正")
@@ -544,8 +568,9 @@ class StopLossTakeProfitStrategy:
         else:  # short
             # 空头：止损在上方，止盈在下方
             stop_loss = self.calculate_adaptive_stop_loss(symbol, 'short', weighted_entry, price_data)
-            take_profit = self.calculate_intelligent_take_profit(symbol, 'short', weighted_entry, price_data, tp_config.min_risk_reward * 0.9)
-            
+            take_profit = self.calculate_intelligent_take_profit(symbol, 'short', weighted_entry, price_data, 
+                                                            stop_loss=stop_loss, # <-- 传入止损价
+                                                            risk_reward_ratio=tp_config.min_risk_reward * 0.9)
             # 双重验证：确保价格关系正确
             if stop_loss <= weighted_entry:
                 logger.log_warning(f"⚠️ {self.get_base_currency(symbol)}: 空头止损价格异常，自动修正")
@@ -715,18 +740,139 @@ class StopLossTakeProfitStrategy:
         except Exception:
             # 如果分割失败，则返回原始字符串
             return symbol
+        
+    # --- Multi-Level Take Profit Logic ---
+    def calculate_split_entry_levels(self, symbol: str, side: str, total_amount: float, 
+                                   entry_price: float, base_take_profit_price: float) -> List[Dict[str, Any]]:
+        """
+        计算多级止盈的拆单详情（价格和数量）
+        返回: [{'amount': float, 'price': float, 'level_index': int}, ...]
+        """
+        config = self.symbol_configs[symbol]
+        ml_tp_config = self.config.multi_level_take_profit
+        
+        if not ml_tp_config.enable or not ml_tp_config.levels:
+            return []
 
+        # 1. 计算基础盈利距离
+        profit_distance = abs(base_take_profit_price - entry_price)
+        if profit_distance == 0:
+            return []
+
+        orders_plan = []
+        remaining_amount = total_amount
+        
+        amount_step = config.amount_precision_step
+        min_amount = config.min_amount
+        price_step = config.price_precision_step
+
+        for i, level in enumerate(ml_tp_config.levels):
+            # 兼容字典或对象访问
+            ratio = level.get('take_profit_ratio') if isinstance(level, dict) else level.take_profit_ratio
+            multiplier = level.get('profit_multiplier') if isinstance(level, dict) else level.profit_multiplier
+            
+            # A. 计算价格
+            if side == 'buy': # 做多
+                level_tp_price = entry_price + (profit_distance * multiplier)
+            else: # 做空
+                level_tp_price = entry_price - (profit_distance * multiplier)
+            
+            # 价格精度调整
+            if price_step > 0:
+                level_tp_price = round(level_tp_price / price_step) * price_step
+
+            # B. 计算数量
+            is_last_level = (i == len(ml_tp_config.levels) - 1)
+            
+            if is_last_level:
+                level_amount = remaining_amount
+            else:
+                raw_amount = total_amount * ratio
+                # 数量精度调整
+                if config.requires_integer:
+                    level_amount = math.floor(raw_amount)
+                else:
+                    if amount_step > 0:
+                        level_amount = math.floor(raw_amount / amount_step) * amount_step
+                    else:
+                        level_amount = round(raw_amount, 8)
+            
+            # 确保不小于最小交易量
+            if level_amount < min_amount:
+                # 如果不是最后一级，且数量太小，可以选择跳过或合并到下一级
+                # 这里简单处理：如果是最后一级强行设置为剩余，否则跳过
+                if is_last_level:
+                    level_amount = max(level_amount, min_amount) 
+                else:
+                    continue
+
+            orders_plan.append({
+                'level_index': i,
+                'amount': level_amount,
+                'price': level_tp_price,
+                'multiplier': multiplier
+            })
+            
+            remaining_amount -= level_amount
+            if remaining_amount <= 0:
+                break
+                
+        return orders_plan
+
+    def check_multi_level_trigger(self, symbol: str, current_position: dict, current_price: float) -> Optional[Dict]:
+        """
+        检查是否触发多级止盈
+        """
+        ml_tp_config = self.config.multi_level_take_profit
+        if not ml_tp_config.enable or not current_position:
+            return None
+
+        # 获取已执行的级别
+        executed_levels = current_position.get('executed_tp_levels', [])
+        
+        entry_price = current_position['entry_price']
+        side = current_position['side']
+        
+        # 计算当前收益率
+        if side == 'long':
+            profit_ratio = (current_price - entry_price) / entry_price
+        else:
+            profit_ratio = (entry_price - current_price) / entry_price
+
+        # 获取基础风险 R (估算值)
+        sl_config = self.config.stop_loss
+        base_risk = current_position.get('initial_risk_ratio', sl_config.min_stop_loss_ratio)
+        
+        # 遍历检查
+        for i, level in enumerate(ml_tp_config.levels):
+            if i in executed_levels:
+                continue
+                
+            profit_multiplier = level.get('profit_multiplier') if isinstance(level, dict) else level.profit_multiplier
+            target_profit_ratio = base_risk * profit_multiplier
+            
+            if profit_ratio >= target_profit_ratio:
+                return {
+                    'level_index': i,
+                    'take_profit_ratio': level.get('take_profit_ratio') if isinstance(level, dict) else level.take_profit_ratio,
+                    'set_breakeven_stop': level.get('set_breakeven_stop') if isinstance(level, dict) else level.set_breakeven_stop,
+                    'description': level.get('description') if isinstance(level, dict) else level.description,
+                    'current_profit_ratio': profit_ratio,
+                    'target_profit_ratio': target_profit_ratio
+                }
+        
+        return None
 # 全局实例
 _sl_tp_strategy = None
 
-def get_sl_tp_strategy(symbol_configs: Dict = None, config_file: str = "strategy_config.json") -> StopLossTakeProfitStrategy:
+def get_sl_tp_strategy(symbol_configs: Dict = None, config_file: str = "st_config.json") -> StopLossTakeProfitStrategy:
     """获取止盈止损策略实例"""
     global _sl_tp_strategy
     if _sl_tp_strategy is None and symbol_configs is not None:
         _sl_tp_strategy = StopLossTakeProfitStrategy(symbol_configs, config_file)
     return _sl_tp_strategy
 
-def initialize_sl_tp_strategy(symbol_configs: Dict, config_file: str = "strategy_config.json"):
+def initialize_sl_tp_strategy(symbol_configs: Dict, config_file: str = "st_config.json"):
     """初始化止盈止损策略"""
     global _sl_tp_strategy
     _sl_tp_strategy = StopLossTakeProfitStrategy(symbol_configs, config_file)

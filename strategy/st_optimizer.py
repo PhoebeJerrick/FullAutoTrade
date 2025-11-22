@@ -11,7 +11,7 @@ class StrategyOptimizer:
     用于分析和优化止损止盈策略参数
     """
     
-    def __init__(self, config_file: str = "strategy_config.json"):
+    def __init__(self, config_file: str = "st_config.json"):
         self.config_manager = get_config_manager(config_file)
         self.performance_history = []
     
@@ -88,19 +88,16 @@ class StrategyOptimizer:
         """生成优化报告"""
         analysis = self.analyze_performance(symbol)
         
-        report = f"""
-📊 策略优化报告 - {symbol}
-⏰ 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        report = f"""📊 策略优化报告 - {symbol}⏰ 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                        📈 性能指标:
+                        总交易数: {analysis['total_trades']}
+                        胜率: {analysis['win_rate']:.1%}
+                        平均盈利: {analysis['avg_profit']:.1%}
+                        最大回撤: {analysis['max_drawdown']:.1%}
+                        夏普比率: {analysis['sharpe_ratio']:.2f}
 
-📈 性能指标:
-   总交易数: {analysis['total_trades']}
-   胜率: {analysis['win_rate']:.1%}
-   平均盈利: {analysis['avg_profit']:.1%}
-   最大回撤: {analysis['max_drawdown']:.1%}
-   夏普比率: {analysis['sharpe_ratio']:.2f}
-
-💡 优化建议:
-"""
+                        💡 优化建议:
+                        """
         for i, recommendation in enumerate(analysis['recommendations'], 1):
             report += f"   {i}. {recommendation}\n"
         

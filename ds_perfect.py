@@ -908,52 +908,6 @@ def log_perpetual_order_details(symbol: str, side: str, amount: float, order_typ
     except Exception as e:
         logger.log_error("log_perpetual_order_details", f"记录订单{get_base_currency(symbol)} 详情失败: {str(e)}")
 
-def check_existing_positions(symbol: str):
-    # Check existing positions and return whether there are isolated positions and the information of isolated positions.
-    config = SYMBOL_CONFIGS[symbol]
-    logger.log_info("🔍 Checking existing position mode..")
-    positions = exchange.fetch_positions([config.symbol])
-
-    has_isolated_position = False
-    isolated_position_info = None
-
-    for pos in positions:
-        if pos['symbol'] == config.symbol:
-            contracts = float(pos.get('contracts', 0))
-            mode = pos.get('mgnMode')
-
-            if contracts > 0 and mode == 'isolated':
-                has_isolated_position = True
-                isolated_position_info = {
-                    'side': pos.get('side'),
-                    'size': contracts,
-                    'entry_price': pos.get('entryPrice'),
-                    'mode': mode
-                }
-                break
-
-    return has_isolated_position, isolated_position_info
-
-def set_margin_mode(mode, symbol):
-    """设置保证金模式"""
-    try:
-        if mode == 'cross':
-            # 全仓模式
-            exchange.private_post_account_set_position_mode({
-                'posMode': 'long_short_mode'
-            })
-        else:
-            # 逐仓模式
-            exchange.private_post_account_set_position_mode({
-                'posMode': 'isolated'
-            })
-        logger.log_info(f"✅ Margin mode set to: {mode}")
-        return True
-    except Exception as e:
-        logger.log_error(f"set_margin_mode_{mode}", str(e))
-        return False
-
-
 def setup_exchange(symbol: str):
     """
     智能交易所设置：设置杠杆和保证金模式，并获取合约规格
@@ -1668,92 +1622,6 @@ def set_breakeven_stop(symbol: str,current_position: dict, price_data: dict):
         logger.log_error("breakeven_stop_setting", str(e))
         return False
     
-def log_limit_order_params(order_type, params, limit_price, stop_loss_price, function_name=""):
-    """记录限价单参数"""
-    try:
-        safe_params = params.copy()
-        # ... 实现日志记录逻辑
-        logger.log_info(f"📋 {function_name} - {order_type}限价单: 限价{limit_price:.2f}, 止损{stop_loss_price:.2f}")
-    except Exception as e:
-        logger.log_error("log_limit_order_params", f"记录限价单参数失败: {str(e)}")
-
-class PositionManager:
-    """持仓管理器，负责多级止盈逻辑"""
-    
-    def __init__(self):
-        self.position_levels = {}  # 记录每个持仓的止盈级别
-        
-    def check_profit_taking(self, symbol: str, current_position, price_data):
-        """检查是否需要执行多级止盈 - 修复版：使用 st_config.json 配置"""
-        if not current_position:
-            return None
-            
-        # 从 sl_tp_strategy 获取 multi_level_take_profit 配置
-        ml_tp_config = sl_tp_strategy.config.multi_level_take_profit
-        
-        # 使用新配置对象的属性访问方式 (.enable 而不是 ['enable'])
-        if not ml_tp_config.enable:
-            return None
-            
-        current_price = price_data['price']
-        entry_price = current_position['entry_price']
-        position_key = f"{current_position['side']}_{current_position['entry_price']}"
-        
-        if current_position['side'] == 'long':
-            profit_ratio = (current_price - entry_price) / entry_price
-        else:  # short
-            profit_ratio = (entry_price - current_price) / entry_price
-            
-        # 检查每个止盈级别 (注意：levels 是对象列表还是字典列表，取决于 st_config_manager 的转换)
-        # 根据 st_config_manager.py，它通常被转回了 list[dict] 或者 list[obj]
-        # 为了安全，这里假设 levels 是字典列表 (因为 json load 出来是 dict)
-        
-        for i, level in enumerate(ml_tp_config.levels):
-            level_key = f"{position_key}_level_{i}"
-            
-            # 如果已经执行过这个级别的止盈，跳过
-            if self.position_levels.get(level_key, False):
-                continue
-            
-            # 兼容对象访问或字典访问
-            profit_multiplier = level.get('profit_multiplier') if isinstance(level, dict) else level.profit_multiplier
-            take_profit_ratio = level.get('take_profit_ratio') if isinstance(level, dict) else level.take_profit_ratio
-            set_be_stop = level.get('set_breakeven_stop') if isinstance(level, dict) else level.set_breakeven_stop
-            description = level.get('description') if isinstance(level, dict) else level.description
-
-            # 这里的逻辑也需要修正：profit_multiplier 是相对于止损幅度的倍数，还是纯收益率？
-            # 你的配置注释写的是 "盈利倍数"，通常指 R (Risk) 的倍数。
-            # 但下面的代码直接拿 profit_ratio 和 profit_multiplier 比较是不对的 (除非 multiplier 是 0.02 这种小数)。
-            # 假设你的 multiplier 是 1.5 (1.5倍盈亏比)，我们需要计算当前的 R (风险)。
-            
-            # 获取当前品种的止损配置以计算 R
-            sl_config = sl_tp_strategy.config.stop_loss
-            base_risk = sl_config.min_stop_loss_ratio # 假设以最小止损作为基础风险单位 R
-            
-            target_profit_ratio = base_risk * profit_multiplier
-            
-            # 检查是否达到止盈条件
-            if profit_ratio >= target_profit_ratio:
-                logger.log_info(f"🎯 达到止盈级别 {i+1}: 当前盈利{profit_ratio:.2%} >= 目标{target_profit_ratio:.2%} (R={base_risk:.1%})")
-                return {
-                    'level': i,
-                    'take_profit_ratio': take_profit_ratio,
-                    'set_breakeven_stop': set_be_stop,
-                    'description': description
-                }
-                
-        return None
-        
-    def mark_level_executed(self, symbol: str, current_position, level):
-        """标记止盈级别已执行"""
-        position_key = f"{current_position['side']}_{current_position['entry_price']}"
-        level_key = f"{position_key}_level_{level}"
-        self.position_levels[level_key] = True
-
-# 创建全局持仓管理器实例
-position_manager = PositionManager()
-
-
 # Optimization: Add a unified error handling and retry decorator
 def retry_on_failure(max_retries=None, delay=None, exceptions=(Exception,)):
     # """Unified error handling and retry decorator"""
@@ -2149,6 +2017,24 @@ def set_trailing_stop_order(symbol: str, current_position: dict, stop_price: flo
         logger.log_error(f"set_trailing_stop_order_{get_base_currency(symbol)}", str(e))
         return False
     # ✅ --- 修改结束 ---
+
+def mark_tp_level_executed(symbol: str, level_index: int):
+    """标记止盈级别已执行，并保存状态到全局变量和文件"""
+    global position # 引用全局变量
+    
+    if position is None:
+        return # 无持仓时不应触发
+            
+    # 确保有 executed_tp_levels 字段
+    if 'executed_tp_levels' not in position:
+        position['executed_tp_levels'] = []
+            
+    if level_index not in position['executed_tp_levels']:
+        position['executed_tp_levels'].append(level_index)
+            
+        # 立即保存状态到文件
+        save_position_history()
+        logger.log_info(f"💾 {get_base_currency(symbol)}: 止盈级别 {level_index+1} 状态已保存")
 
 def execute_profit_taking(symbol: str, current_position: dict, profit_taking_signal: dict, price_data: dict):
     """执行多级止盈逻辑 - 永续合约市价平仓"""
@@ -2710,6 +2596,62 @@ def create_order_with_sl_tp(symbol: str, side: str, amount: float, order_type: s
         logger.log_error(f"order_traceback_{get_base_currency(symbol)}", f"详细错误信息: {traceback.format_exc()}")
         return None    
 
+def execute_split_strategy_entry(symbol: str, side: str, total_amount: float, order_type: str, 
+                                 limit_price: float, stop_loss_price: float, base_take_profit_price: float):
+    """
+    执行多级止盈拆单策略 (重构版 - 调用 st_sl_tp 计算)
+    """
+    # 1. 基础检查
+    if not base_take_profit_price or base_take_profit_price == 0:
+        logger.log_error("❌ 未提供有效的基础止盈价格，回退单笔下单")
+        return create_order_with_sl_tp(symbol, side, total_amount, order_type, limit_price, stop_loss_price, base_take_profit_price)
+
+    entry_price = limit_price if limit_price else get_current_price(symbol)
+    
+    # 2. 调用策略类计算拆单计划
+    orders_plan = sl_tp_strategy.calculate_split_entry_levels(
+        symbol=symbol,
+        side=side,
+        total_amount=total_amount,
+        entry_price=entry_price,
+        base_take_profit_price=base_take_profit_price
+    )
+
+    if not orders_plan:
+        logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 多级止盈计算返回空计划，回退单笔下单")
+        return create_order_with_sl_tp(symbol, side, total_amount, order_type, limit_price, stop_loss_price, base_take_profit_price)
+
+    logger.log_info(f"🚀 {get_base_currency(symbol)}: 执行多级拆单 | 基础止盈目标: {base_take_profit_price} | 止损: {stop_loss_price}")
+    
+    orders_response = []
+    remaining_amount = total_amount
+
+    # 3. 遍历执行下单
+    for plan in orders_plan:
+        level_amount = plan['amount']
+        level_tp_price = plan['price']
+        i = plan['level_index']
+        
+        logger.log_info(f"📦 拆单 {i+1}: 数量 {level_amount:.4f} | 目标 {level_tp_price:.2f}")
+        
+        response = create_order_with_sl_tp(
+            symbol=symbol,
+            side=side,
+            amount=level_amount,
+            order_type=order_type,
+            limit_price=limit_price,
+            stop_loss_price=stop_loss_price, # 共享止损
+            take_profit_price=level_tp_price # 独立止盈
+        )
+        
+        if response and response.get('code') == '0':
+            orders_response.append(response)
+            remaining_amount -= level_amount
+        else:
+             logger.log_error(f"❌ 第{i+1}级下单失败")
+
+    return orders_response
+
 def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
     """执行智能交易 - 添加整体仓位管理"""
     global position
@@ -2916,83 +2858,104 @@ def execute_intelligent_trade(symbol: str, signal_data: dict, price_data: dict):
         logger.log_info(f"📊 {get_base_currency(symbol)}: 执行开仓 - 执行价格{current_price:.2f}, 买二{bid_price:.2f}, 卖二{ask_price:.2f}")
 
         current_position = get_current_position(symbol)
-        
+        # 条件：1. 是首次开仓 (非加仓) 2. 开启了多级止盈配置
+        use_split_entry = (not is_scaling) and sl_tp_strategy.config.multi_level_take_profit.enable
+
         # 执行交易逻辑
         if signal_data['signal'] == 'BUY':
-            # 检查是否有现有空头持仓，先平仓
+            # (平反向仓位代码保持不变...)
             if current_position and current_position['side'] == 'short':
-                logger.log_info(f"🔄 {get_base_currency(symbol)}: 平空仓开多仓 - 平{current_position['size']}张，开{position_size}张")
-                
+                logger.log_info(f"🔄 {get_base_currency(symbol)}: 平空仓开多仓...")
                 close_success = close_position_safely(symbol, current_position, "反向开仓平空仓")
-                if not close_success:
-                    logger.log_error(f"close_position_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开多仓")
-                    return
+                if not close_success: return
                 time.sleep(2)
 
-            # 🆕 修复：传入浮点数而不是字符串
-            order_result = create_order_with_sl_tp(
-                symbol=symbol,
-                side='buy',
-                amount=position_size,  # 直接传入浮点数
-                order_type='limit',
-                limit_price=ask_price,  # 直接传入浮点数
-                stop_loss_price=stop_loss_price,  # 直接传入浮点数
-                take_profit_price=take_profit_price  # 直接传入浮点数
-            )
-
-            if order_result and order_result.get('code') == '0':
-                order_id = order_result['data'][0]['ordId']
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开多仓提交-{position_size:.2f}张, 订单ID: {order_id}")
-                # 🆕 记录开仓操作到持仓历史
+            limit_px = ask_price # 做多用卖一/卖二价
+            if use_split_entry:
+                # ✅ 场景 1：首次开仓，使用多级止盈拆单
+                execute_split_strategy_entry(
+                    symbol=symbol,
+                    side='buy', # 或者 'sell'，对应下方分支
+                    total_amount=position_size,
+                    order_type='limit',
+                    limit_price=limit_px,
+                    stop_loss_price=stop_loss_price,
+                    base_take_profit_price=take_profit_price
+                )
+                # 记录日志
                 add_to_position_history(symbol, {
-                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
-                    'size': position_size,
-                    'entry_price': current_price,
-                    'action': 'open',
-                    'order_id': order_id,
-                    'signal_confidence': signal_data['confidence']
+                    'side': 'long', 'size': position_size, 'entry_price': current_price,
+                    'action': 'open_split', 'signal_confidence': signal_data['confidence']
                 })
             else:
-                logger.log_error(f"buy_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
-                return
-
-        elif signal_data['signal'] == 'SELL':
-            # 检查是否有现有多头持仓，先平仓
-            if current_position and current_position['side'] == 'long':
-                logger.log_info(f"🔄 {get_base_currency(symbol)}: 平多仓开空仓 - 平{current_position['size']}张，开{position_size}张")
-                
-                close_success = close_position_safely(symbol, current_position, "反向开仓平多仓")
-                if not close_success:
-                    logger.log_error(f"close_position_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 平仓失败，放弃开空仓")
+                # ✅ 场景 2：加仓，或者未开启多级止盈，使用单笔下单
+                logger.log_info(f"➕ {get_base_currency(symbol)}: 执行加仓/单笔开仓")
+                order_result = create_order_with_sl_tp(
+                    symbol=symbol,
+                    side='buy',
+                    amount=position_size,
+                    order_type='limit',
+                    limit_price=limit_px,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price # 使用原逻辑计算的单一止盈
+                )
+                # (加仓成功后的记录逻辑保持不变...)
+                if order_result and order_result.get('code') == '0':
+                     order_id = order_result['data'][0]['ordId']
+                     add_to_position_history(symbol, {
+                        'side': 'long', 'size': position_size, 'entry_price': current_price,
+                        'action': 'open', 'order_id': order_id, 'signal_confidence': signal_data['confidence']
+                    })
+                else:
+                    logger.log_error(f"buy_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开多仓提交失败")
                     return
+        elif signal_data['signal'] == 'SELL':
+             # (平反向仓位代码保持不变...)
+            if current_position and current_position['side'] == 'long':
+                logger.log_info(f"🔄 {get_base_currency(symbol)}: 平多仓开空仓...")
+                close_success = close_position_safely(symbol, current_position, "反向开仓平多仓")
+                if not close_success: return
                 time.sleep(1)
 
-            # 🆕 修复：传入浮点数而不是字符串
-            order_result = create_order_with_sl_tp(
-                symbol=symbol,
-                side='sell',
-                amount=position_size,  # 直接传入浮点数
-                order_type='limit',
-                limit_price=bid_price,  # 直接传入浮点数
-                stop_loss_price=stop_loss_price,  # 直接传入浮点数
-                take_profit_price=take_profit_price  # 直接传入浮点数
-            )
+            limit_px = bid_price # 做空用买一/买二价
 
-            if order_result and order_result.get('code') == '0':
-                order_id = order_result['data'][0]['ordId']
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 限价开空仓提交-{position_size:.2f}张, 订单ID: {order_id}")  
-                # 🆕 记录开仓操作到持仓历史
+            if use_split_entry:
+                # ✅ 场景 1：首次开仓，使用多级止盈拆单
+                execute_split_strategy_entry(
+                    symbol=symbol,
+                    side='sell',
+                    total_amount=position_size,
+                    order_type='limit',
+                    limit_price=limit_px,
+                    stop_loss_price=stop_loss_price,
+                    base_take_profit_price=take_profit_price # 使用原逻辑计算的单一止盈
+                )
                 add_to_position_history(symbol, {
-                    'side': 'long' if signal_data['signal'] == 'BUY' else 'short',
-                    'size': position_size,
-                    'entry_price': current_price,
-                    'action': 'open',
-                    'order_id': order_id,
-                    'signal_confidence': signal_data['confidence']
+                    'side': 'short', 'size': position_size, 'entry_price': current_price,
+                    'action': 'open_split', 'signal_confidence': signal_data['confidence']
                 })
             else:
-                logger.log_error(f"sell_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开空仓提交失败")
-                return
+                # ✅ 场景 2：加仓/单笔
+                logger.log_info(f"➕ {get_base_currency(symbol)}: 执行加仓/单笔开仓")
+                order_result = create_order_with_sl_tp(
+                    symbol=symbol,
+                    side='sell',
+                    amount=position_size,
+                    order_type='limit',
+                    limit_price=limit_px,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price
+                )
+                # (记录逻辑...)
+                if order_result and order_result.get('code') == '0':
+                     order_id = order_result['data'][0]['ordId']
+                     add_to_position_history(symbol, {
+                        'side': 'short', 'size': position_size, 'entry_price': current_price,
+                        'action': 'open', 'order_id': order_id, 'signal_confidence': signal_data['confidence']
+                    })
+                else:
+                    logger.log_error(f"sell_order_failed_{get_base_currency(symbol)}", f"❌ {get_base_currency(symbol)}: 限价开空仓提交失败")
+                    return
     except Exception as e:
         logger.log_error(f"trade_execution_{get_base_currency(symbol)}", f"交易执行异常: {str(e)}")
         logger.log_warning(f"⚠️ {get_base_currency(symbol)}: 交易执行失败，但盈亏比分析仍然有效")
@@ -3066,38 +3029,33 @@ def trading_bot(symbol: str):
         if current_position:
             logger.log_info(f"ℹ️ {get_base_currency(symbol)}: 检测到持仓 {current_position['side']} {current_position['size']}张，进入持仓管理模式...")
 
-            # 3a. 检查多级止盈
-            # position_manager 是在文件全局范围创建的
-            profit_signal = position_manager.check_profit_taking(symbol, current_position, price_data)
-            
-            if profit_signal:
-                logger.log_info(f"💰 {get_base_currency(symbol)}: 触发多级止盈: {profit_signal['description']}")
-                # 执行部分平仓
-                execute_profit_taking(symbol, current_position, profit_signal, price_data)
-                # 标记此级别已执行
-                position_manager.mark_level_executed(symbol, current_position, profit_signal['level'])
-                
-                # 执行完止盈后，仓位发生变化，结束本轮循环
-                # 等待下一个tick（60秒后）再用新仓位和新价格重新评估
-                logger.log_info(f"✅ {get_base_currency(symbol)}: 部分止盈完成，结束本轮。")
-                return
-
-            # 3b. 检查移动止损 (如果没有触发多级止盈)
+            # 3a. 检查移动止损 (如果没有触发多级止盈)
             trailing_stop_activated = setup_trailing_stop(symbol, current_position, price_data)
             if trailing_stop_activated:
                 logger.log_info(f"🛡️ {get_base_currency(symbol)}: 移动止损已激活或更新。")
                 # 移动止损已设置，本轮管理结束
-                # 我们不 'return'，因为我们还想在下面检查止损单是否丢失
             
-            # 3c. [鲁棒性检查] 检查并设置缺失的止损/止盈
+            # 3b. [鲁棒性检查] 检查并设置缺失的止损/止盈
             # 这可以防止因重启、API错误、或移动止损操作不当导致持仓"裸奔"
             # 它会智能地补上缺失的止损单或止盈单
             logger.log_info(f"🛡️ {get_base_currency(symbol)}: 运行安全检查，确保止损止盈单在交易所存在...")
             check_and_set_stop_loss(symbol, current_position, price_data)
 
-            # 3d. [可选] 动态调整止盈 (如果需要更激进的策略)
-            # adjust_take_profit_dynamically(symbol, current_position, price_data)
-
+            # 3c. 检查多级止盈触发
+            tp_signal = sl_tp_strategy.check_multi_level_trigger(symbol, current_position, price_data['price'])
+            
+            if tp_signal:
+                logger.log_info(f"🎯 {get_base_currency(symbol)}: 触发多级止盈 - {tp_signal['description']}")
+                # 1. 执行止盈平仓
+                execute_profit_taking(
+                    symbol=symbol,
+                    current_position=current_position,
+                    profit_taking_signal={'take_profit_ratio': tp_signal['take_profit_ratio'], 'level': tp_signal['level_index'] + 1, 'set_breakeven_stop': tp_signal['set_breakeven_stop']},
+                    price_data=price_data
+                )
+                # 2. 标记状态防止重复执行
+                mark_tp_level_executed(symbol, tp_signal['level_index'])
+                
         # --- 持仓管理结束 ---
 
         # 4 使用DeepSeek高级用法进行市场分析

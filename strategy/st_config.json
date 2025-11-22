@@ -1,27 +1,18 @@
 {
-  "global":{
+  "global": {
     "stop_loss": {
-      // 最小止损比例 (例如 0.02 = 2%)
       "min_stop_loss_ratio": 0.02,
-      // 最大止损比例，用于限制最终止损价格与入场价的最大距离 (例如 0.2 = 20%)
       "max_stop_loss_ratio": 0.25,
-      // 是否启用基于K线结构（如支撑/阻力位）的止损
       "kline_based_stop_loss": true,
-      // ATR（平均真实波幅）的倍数，用于计算ATR止损距离
       "atr_multiplier": 1.4,
-      // 是否启用移动止损功能
       "enable_trailing_stop": true,
-      // 移动止损的激活比例 (例如 0.03 = 3% 盈利后激活)
       "trailing_activation_ratio": 0.03,
-      // 移动止损的跟踪距离比例 (例如 0.015 = 1.5% 的距离跟踪)
       "trailing_distance_ratio": 0.015
     },
     "take_profit": {
-      // 最小风险回报比 (例如 1.2:1)，用于计算基础止盈目标
       "min_risk_reward": 1.3,
-      // 最大风险回报比 (例如 3.0:1)
       "max_risk_reward": 3.0,
-      // 不同趋势强度下的止盈倍数乘数，用于动态调整止盈目标
+      "atr_multiplier": 1.5,
       "trend_strength_multipliers": {
         "STRONG_UPTREND": 1.5,
         "UPTREND": 1.2,
@@ -31,80 +22,55 @@
       }
     },
     "multi_level_take_profit": {
-      // 实际生效的 多级止盈功能启用开关
       "enable": true,
-      // 各级止盈的详细配置
       "levels": [
         {
-          // 止盈乘数，基于风险R的倍数 (例如 1.5 * R)
-          "profit_multiplier": 1.5,
-          // 本级止盈平仓的仓位比例 (例如 0.3 = 30% 仓位)
-          "take_profit_ratio": 0.3,
-          // 本级止盈执行后，是否将剩余仓位的止损设置为保本价
-          "set_breakeven_stop": true,
-          // 级别描述
-          "description": "第一级止盈 - 30%仓位，设置保本止损"
-        },
-        {
-          // 止盈乘数，基于风险R的倍数 (例如 2.0 * R)
-          "profit_multiplier": 2.0,
-          // 本级止盈平仓的仓位比例 (例如 0.4 = 40% 仓位)
+          "profit_multiplier": 0.7,
           "take_profit_ratio": 0.4,
-          // 本级止盈执行后，是否将剩余仓位的止损设置为保本价
           "set_breakeven_stop": true,
-          // 级别描述
-          "description": "第二级止盈 - 40%仓位，移动止损"
+          "description": "第一级止盈(0.7) - 40%仓位，设置保本止损"
         },
         {
-          // 止盈乘数，基于风险R的倍数 (例如 3.0 * R)
-          "profit_multiplier": 3.0,
-          // 本级止盈平仓的仓位比例 (例如 0.3 = 30% 仓位)
-          "take_profit_ratio": 0.3,
-          // 本级止盈执行后，是否将剩余仓位的止损设置为保本价
+          "profit_multiplier": 0.85,
+          "take_profit_ratio": 0.2,
+          "set_breakeven_stop": true,
+          "description": "第二级止盈(0.85) - 20%仓位，移动止损"
+        },
+        {
+          "profit_multiplier": 1.0,
+          "take_profit_ratio": 0.4,
           "set_breakeven_stop": false,
-          // 级别描述
-          "description": "第三级止盈 - 剩余30%仓位，让利润奔跑"
+          "description": "第三级止盈(1.0) - 剩余40%仓位，让利润奔跑"
         }
       ]
     },
-    "default_atr_period": 14  // 全局默认ATR周期（未配置品种 fallback 使用）
+    "default_atr_period": 14
   },
   "symbol_specific_config": {
-    // ⚠️ 品种特定配置：用于覆盖全局配置中的参数
     "BTC": {
-      // 针对BTC品种的ATR倍数，会覆盖全局的 1.5
       "atr_multiplier": 1.8,
-      // 针对BTC品种的最小风险回报比，会覆盖全局的 1.2
       "min_risk_reward": 1.5,
-      "atr_period": 20  // BTC专属ATR周期
+      "atr_period": 20
     },
     "ETH": {
-      // 针对ETH品种的ATR倍数，会覆盖全局的 1.5
       "atr_multiplier": 1.6,
-      // 针对ETH品种的最小风险回报比，会覆盖全局的 1.2
       "min_risk_reward": 1.3,
-      "atr_period": 14  // ETH专属ATR周期
+      "atr_period": 14
     },
     "SOL": {
-      // 针对ETH品种的ATR倍数，会覆盖全局的 1.5
       "atr_multiplier": 1.6,
-      // 针对ETH品种的最小风险回报比，会覆盖全局的 1.2
       "min_risk_reward": 1.3,
-      "atr_period": 15  // SOL专属ATR周期
+      "atr_period": 15
     },
     "BCH": {
-      // 针对ETH品种的ATR倍数，会覆盖全局的 1.5
       "atr_multiplier": 1.6,
-      // 针对ETH品种的最小风险回报比，会覆盖全局的 1.2
       "min_risk_reward": 1.3,
-      "atr_period": 14  // BCH专属ATR周期
+      "atr_period": 14
     },
     "TRX": {
-      // 针对ETH品种的ATR倍数，会覆盖全局的 1.5
       "atr_multiplier": 1.6,
-      // 针对ETH品种的最小风险回报比，会覆盖全局的 1.2
       "min_risk_reward": 1.3,
-      "atr_period": 13  // TRX专属ATR周期
+      "atr_period": 13
     }
   }
 }
